@@ -17,10 +17,19 @@ or live MCP behavior.
 The hardware target is Android 13/API 33+, on S21-class devices or newer.
 **Intended models:** Qwen3.5-0.8B and Gemma 4 E2B Q4, text-only. Pinned setup
 descriptors provide model identities/settings and connection defaults; the
-text-summary starter uses Qwen alone. Integrated download/setup, live browser
-OAuth/refresh, the browser starter and the Gemma pair still need device acceptance.
-Physical-phone validation, release APK delivery and public publication
-remain unfinished.
+text-summary starter uses Qwen alone. Both pinned models completed a coherent,
+tool-free handoff on an API 36 x86_64 emulator with 8 GiB RAM, and the native
+text-summary starter passed. Browser v4 also completed a live example.org run
+with manual Bearer authentication: one open call, reading bound to its returned
+tab ID, a complete nontruncated page and an accurate visible Gemma summary.
+Executor time was about 159 seconds; total time was about 3 minutes 12 seconds
+including model loading. Native Pause/Resume, Cancel and background/return also
+passed. Model download and verification completed after operator intervention
+on the emulator's partially validated network. Ordinary unattended downloads,
+OAuth provider login/refresh, setup interruption and active-process recovery, physical arm64 acceptance
+and signed-release updates remain open. Deployment of an upstream
+truncation-reporting fix remains unverified. Release APK delivery and public
+publication are unfinished.
 
 The intended experience is install → sign in → choose a supplied flow → provide
 starting input → watch progress and results. A connected browser may run on a PC
@@ -39,7 +48,7 @@ and network access; on-device inference does not make every flow offline.
 `apps/android/` contains the app. `flows/` and `schemas/` contain current v1
 references; examples using scripted dependencies are development fixtures.
 
-GitLab remains the authority for development and validation. This GitHub
-repository has separate curated source history and is the intended future public
-destination. It currently provides source, without a GitHub build/release
+GitLab remains the authority for development and validation. This private GitHub
+repository now holds curated source with separate history and is the intended
+future public destination. It provides source, without a GitHub build/release
 workflow or downloadable release claims. Reports may be filed in its Issues.

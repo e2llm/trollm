@@ -272,6 +272,9 @@ pub fn validate_with_registry(
     registry: &TaskRegistry,
 ) -> Result<(), ValidationError> {
     let mut problems = Vec::new();
+    if let Err(error) = registry.validate_completion() {
+        problems.push(error.to_string());
+    }
     if registry.schema_version != crate::registry::TASK_REGISTRY_SCHEMA {
         problems.push(format!(
             "registry schemaVersion must be '{}', got '{}'",

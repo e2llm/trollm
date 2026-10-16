@@ -446,14 +446,14 @@ impl ToolGateway for McpGateway {
                     tool: call.tool.clone(),
                     args_hash,
                 });
-                self.finish_read(call, policy.as_ref(), payload, Provenance::Live)
+                self.finish_result(call, policy.as_ref(), payload, Provenance::Live)
             }
         }
     }
 }
 
 impl McpGateway {
-    /// Mutation class: passthrough only — never cached, never shaped; the
+    /// Mutation class: live passthrough only — never cached or retried; the
     /// intent event is emitted BEFORE execution (core journals it for
     /// crash-safe resume); ambiguous failures are never retried.
     fn call_mutation(&mut self, call: &ToolCall, policy: &ToolPolicy) -> Result<ToolResult> {
@@ -470,11 +470,9 @@ impl McpGateway {
             tool: call.tool.clone(),
             args_hash,
         });
-        Ok(ToolResult {
-            content_for_model: payload,
-            artifacts: Vec::new(),
-            provenance: Provenance::Live,
-        })
+        // Validation, shaping or publication may fail after the remote effect.
+        // Return that failure without replaying the already-dispatched mutation.
+        self.finish_result(call, Some(policy), payload, Provenance::Live)
     }
 
     /// serveFrom: resolve `match` from args, find the item in the source
@@ -504,7 +502,7 @@ impl McpGateway {
                         match_value: match_value.to_string(),
                     });
                     let result =
-                        self.finish_read(call, Some(policy), item, Provenance::ServedFromFile)?;
+                        self.finish_result(call, Some(policy), item, Provenance::ServedFromFile)?;
                     self.server(src_server)?.require_credentials()?;
                     return Ok(result);
                 }
@@ -521,7 +519,7 @@ impl McpGateway {
                     tool: call.tool.clone(),
                     args_hash,
                 });
-                self.finish_read(call, Some(policy), payload, Provenance::Live)
+                self.finish_result(call, Some(policy), payload, Provenance::Live)
             }
             Some(OnMiss::Fail) | None => bail!(
                 "serveFrom miss for {}.{} ({} = {}) and onMiss != fetch_live",
@@ -734,7 +732,7 @@ impl McpGateway {
                     tool: call.tool.clone(),
                     args_hash: hash,
                 });
-                return self.finish_read(call, Some(policy), payload, Provenance::Cache);
+                return self.finish_result(call, Some(policy), payload, Provenance::Cache);
             }
         }
 
@@ -752,7 +750,7 @@ impl McpGateway {
         if policy.result_validation.is_some() {
             // Reject before filling the cache, and invalidate a prior named
             // artifact even when this replacement cannot be admitted.
-            self.prepare_read_result(call, Some(policy), &payload)?;
+            self.prepare_result(call, Some(policy), &payload)?;
         }
         self.cache.write_single(
             &call.server,
@@ -762,12 +760,12 @@ impl McpGateway {
             cache_policy.ttl_s,
             &call.args,
         )?;
-        self.finish_read(call, Some(policy), payload, Provenance::Live)
+        self.finish_result(call, Some(policy), payload, Provenance::Live)
     }
 
     /// Invalidate a replacement's sidecar before any admission check. Cache
     /// misses also use this before writing raw payloads into their cache.
-    fn prepare_read_result(
+    fn prepare_result(
         &self,
         call: &ToolCall,
         policy: Option<&ToolPolicy>,
@@ -795,7 +793,7 @@ impl McpGateway {
     }
 
     /// Preserve the parsed payload independently of the model-facing shape.
-    fn finish_read(
+    fn finish_result(
         &self,
         call: &ToolCall,
         policy: Option<&ToolPolicy>,
@@ -803,7 +801,7 @@ impl McpGateway {
         provenance: Provenance,
     ) -> Result<ToolResult> {
         let mut artifacts = Vec::new();
-        let result_path = self.prepare_read_result(call, policy, &payload)?;
+        let result_path = self.prepare_result(call, policy, &payload)?;
         if let Some(path) = &result_path {
             write_file_atomic(path, &serde_json::to_vec(&payload)?)?;
         }

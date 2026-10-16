@@ -167,7 +167,32 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         run_dir: RunDir,
     ) -> anyhow::Result<Self> {
         validate::validate_plan(&plan).map_err(|e| anyhow!(e.to_string()))?;
+        registry.validate_completion()?;
         validate::validate_with_registry(&plan, &registry).map_err(|e| anyhow!(e.to_string()))?;
+        fn check_completion_outputs(
+            plan: &ExecutionPlan,
+            registry: &TaskRegistry,
+        ) -> anyhow::Result<()> {
+            for (name, node) in &plan.nodes {
+                if node
+                    .task_ref
+                    .as_deref()
+                    .and_then(|task| registry.task(task))
+                    .is_some_and(|task| task.completion == TaskCompletion::ToolResult)
+                {
+                    anyhow::ensure!(
+                        !matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.values().any(|output| matches!(output, NodeOutputBinding::FromModel { .. }))),
+                        "plan '{}' node '{name}': tool-result completion cannot bind model outputs",
+                        plan.id
+                    );
+                }
+            }
+            for child in plan.subflows.values() {
+                check_completion_outputs(child, registry)?;
+            }
+            Ok(())
+        }
+        check_completion_outputs(&plan, &registry)?;
         // Every slot named by any plan in the tree must be bound.
         fn check_slots(
             plan: &ExecutionPlan,
@@ -585,6 +610,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     /// Coder loop (§5): render → generate → fences? gateway executes, append
     /// result, repeat : the text is the node's prose output → verify →
     /// transition. Loop exit without prose after maxSteps = verification-failed.
+    /// Opt-in tool-result completion returns after one successful tool call;
+    /// output/artifact verification still runs before transition.
     fn run_task_loop(
         &mut self,
         node_id: &str,
@@ -599,6 +626,22 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .last()
             .map(|f| f.vars.clone())
             .unwrap_or(Value::Null);
+        let mut bound_arguments = BTreeMap::new();
+        if let Some(bindings) = &task.tool_arguments {
+            for (tool, rule) in bindings {
+                let mut values = BTreeMap::new();
+                for (argument, path) in &rule.from_vars {
+                    let value = template::lookup(path, &frame_vars).ok_or_else(|| {
+                        TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            format!("tool argument source '{path}' is not bound"),
+                        )
+                    })?;
+                    values.insert(argument.clone(), value.clone());
+                }
+                bound_arguments.insert(tool.clone(), values);
+            }
+        }
         let template_text = self
             .registry
             .prompt_template(task)
@@ -686,15 +729,21 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 }
             }
 
-            let calls = fence::extract_tool_calls(&resp.text)
+            let mut calls = fence::extract_tool_calls(&resp.text)
                 .map_err(|e| TaskFailure::new(ErrorClass::ToolCallParse, e.to_string()))?;
+            if task.completion == TaskCompletion::ToolResult && calls.len() != 1 {
+                return Err(TaskFailure::new(
+                    ErrorClass::ToolCallParse,
+                    "tool-result completion requires exactly one tool call",
+                ));
+            }
             if calls.is_empty() {
                 // No fence: this generation is the node's prose output (§5).
                 prose = Some(resp.text.trim().to_string());
                 break;
             }
 
-            for call in &calls {
+            for call in &mut calls {
                 let fqn = format!("{}.{}", call.server, call.tool);
                 if !task.tools.iter().any(|t| t == &fqn) {
                     // Post-hoc validation failure (§5.1): the model called a
@@ -704,6 +753,28 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         ErrorClass::ToolCallParse,
                         format!("tool '{fqn}' not in allowlist of task '{task_ref}'"),
                     ));
+                }
+
+                if let Some(bindings) = bound_arguments.get(&fqn) {
+                    let args = call.args.as_object_mut().ok_or_else(|| {
+                        TaskFailure::new(ErrorClass::ToolCallParse, "tool args must be an object")
+                    })?;
+                    for (name, value) in bindings {
+                        match args.get(name) {
+                            Some(provided) if provided != value => {
+                                return Err(TaskFailure::new(
+                                    ErrorClass::ToolCallParse,
+                                    format!(
+                                        "tool '{fqn}' argument '{name}' conflicts with fromVars"
+                                    ),
+                                ));
+                            }
+                            Some(_) => {}
+                            None => {
+                                args.insert(name.clone(), value.clone());
+                            }
+                        }
+                    }
                 }
 
                 self.gateway.validate_call(call).map_err(|e| {
@@ -780,6 +851,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             ));
                         }
                     }
+                }
+
+                if task.completion == TaskCompletion::ToolResult {
+                    return Ok(TaskOutcome {
+                        // This mode forbids all model-prose output bindings.
+                        prose: String::new(),
+                        tool_calls_made,
+                        artifacts,
+                    });
                 }
 
                 // Append result, repeat (§5).

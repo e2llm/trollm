@@ -79,7 +79,7 @@ fn default_attempts() -> u32 {
     1
 }
 
-/// Admission checks for an exact ordinary-read payload, before shaping.
+/// Admission checks for an exact non-paginated payload, before shaping.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResultValidation {
@@ -97,7 +97,7 @@ pub struct ToolPolicy {
     pub paginate: Option<PaginatePolicy>,
     #[serde(default)]
     pub shape: Option<ShapePolicy>,
-    /// Publish the unshaped read payload as `<name>.json` plus complete metadata.
+    /// Publish the unshaped result as `<name>.json` plus complete metadata.
     #[serde(rename = "resultArtifact", default)]
     pub result_artifact: Option<String>,
     #[serde(rename = "resultValidation", default)]
@@ -146,8 +146,8 @@ impl PolicySet {
     pub(crate) fn validate(&self) -> Result<()> {
         for policy in self.policies.values() {
             if let Some(validation) = &policy.result_validation {
-                if policy.class != ToolClass::Read || policy.paginate.is_some() {
-                    bail!("resultValidation is only allowed for non-paginated read policies");
+                if policy.paginate.is_some() {
+                    bail!("resultValidation is only allowed for non-paginated policies");
                 }
                 if validation.max_bytes == 0 || validation.max_bytes > 262_144 {
                     bail!("resultValidation.maxBytes must be between 1 and 262144");
@@ -164,8 +164,8 @@ impl PolicySet {
                 {
                     bail!("resultArtifact must be a safe basename: 1–64 ASCII letters/digits, '_' or '-', starting with a letter/digit");
                 }
-                if policy.class != ToolClass::Read || policy.paginate.is_some() {
-                    bail!("resultArtifact is only allowed for non-paginated read policies");
+                if policy.paginate.is_some() {
+                    bail!("resultArtifact is only allowed for non-paginated policies");
                 }
             }
         }

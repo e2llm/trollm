@@ -24,8 +24,10 @@ impl ModelSlot for RecordingModel {
 
 struct BrowserGateway {
     artifacts: PathBuf,
+    opened_complete: Option<bool>,
     publish_page: bool,
     calls: Arc<Mutex<Vec<ToolCall>>>,
+    opened: Value,
     page: Value,
 }
 
@@ -35,12 +37,9 @@ impl ToolGateway for BrowserGateway {
     }
 
     fn validate_call(&self, call: &ToolCall) -> Result<()> {
-        // These three calls are the entire scripted fixture's catalog.
+        // These two calls are the entire scripted fixture's catalog.
         ensure!(call.server == "e2llm");
-        ensure!(matches!(
-            call.tool.as_str(),
-            "act" | "list_tabs" | "read_page"
-        ));
+        ensure!(matches!(call.tool.as_str(), "act" | "read_page"));
         Ok(())
     }
 
@@ -48,9 +47,23 @@ impl ToolGateway for BrowserGateway {
         self.calls.lock().unwrap().push(call.clone());
         let mut files = vec![];
         let content = match call.tool.as_str() {
-            "act" => json!({"ok": true}),
-            "list_tabs" => {
-                json!({"tabs": [{"id": 17, "url": "https://example.org/", "title": "Fixture", "browser": "fixture"}]})
+            "act" => {
+                if let Some(complete) = self.opened_complete {
+                    let written = artifacts::write_atomic(
+                        &self.artifacts,
+                        "opened.json",
+                        &serde_json::to_vec(&self.opened)?,
+                    )?;
+                    artifacts::write_meta(
+                        &written.path,
+                        &ArtifactMeta {
+                            fetched_at: 0,
+                            complete,
+                        },
+                    )?;
+                    files.push(written.path);
+                }
+                self.opened.clone()
             }
             "read_page" => {
                 if self.publish_page {
@@ -84,13 +97,24 @@ impl ToolGateway for BrowserGateway {
 const OPEN: &str = r#"<tool_call>{"server":"e2llm","tool":"act","args":{"browser":"fixture","action":"open","target":"https://example.org/"}}</tool_call>"#;
 const LIST: &str =
     r#"<tool_call>{"server":"e2llm","tool":"list_tabs","args":{"browser":"fixture"}}</tool_call>"#;
-const READ: &str = r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"fixture","tabId":17}}</tool_call>"#;
+const READ: &str =
+    r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"fixture"}}</tool_call>"#;
+
+struct FixtureResult {
+    status: RunStatus,
+    calls: Vec<ToolCall>,
+    coder_prompts: Vec<String>,
+    reasoner_prompts: Vec<String>,
+    opened: Value,
+    page: Value,
+}
 
 fn run_fixture(
-    open: bool,
+    coder: &[&str],
+    opened_complete: Option<bool>,
     publish_page: bool,
     final_response: &str,
-) -> (RunStatus, Vec<ToolCall>, Vec<String>, Value) {
+) -> FixtureResult {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../flows/starters/browser-summary");
     let plan = ExecutionPlan::from_yaml_file(&source.join("browser-summary.flow.yaml")).unwrap();
     let registry =
@@ -98,13 +122,11 @@ fn run_fixture(
     let base = common::tmp_dir("browser-starter");
     let run = RunDir::under(&base);
     let prompts = Arc::new(Mutex::new(vec![]));
+    let coder_prompts = Arc::new(Mutex::new(vec![]));
     let calls = Arc::new(Mutex::new(vec![]));
     let page = json!({"title": "Fixture", "url": "https://example.org/", "content": "EXACT_ARTIFACT_PAGE", "stats": {"contentNodes": 1, "truncated": false}});
-    let coder = if open {
-        vec![OPEN, "Opened", LIST, READ, "CODER_PROSE_NOT_PAGE"]
-    } else {
-        vec!["No action was taken"]
-    };
+    let opened =
+        json!({"result": "opened", "tabId": 178, "url": "https://example.org/", "sessionId": ""});
     let mut executor = Executor::new(
         plan,
         registry,
@@ -114,8 +136,8 @@ fn run_fixture(
             .with(
                 "coder",
                 RecordingModel {
-                    model: MockModel::scripted(coder),
-                    prompts: Arc::new(Mutex::new(vec![])),
+                    model: MockModel::scripted(coder.iter().copied()),
+                    prompts: coder_prompts.clone(),
                 },
             )
             .with(
@@ -127,8 +149,10 @@ fn run_fixture(
             ),
         BrowserGateway {
             artifacts: run.artifacts_dir(),
+            opened_complete,
             publish_page,
             calls: calls.clone(),
+            opened: opened.clone(),
             page: page.clone(),
         },
         run,
@@ -137,7 +161,14 @@ fn run_fixture(
     let status = executor.run_until_blocked().unwrap();
     let observed_calls = calls.lock().unwrap().clone();
     let observed_prompts = prompts.lock().unwrap().clone();
+    let observed_coder_prompts = coder_prompts.lock().unwrap().clone();
     if status == RunStatus::Succeeded {
+        assert_eq!(executor.state().stack[0].counters.steps, 3);
+        assert_eq!(executor.state().stack[0].counters.reasoner_calls, 1);
+        assert_eq!(
+            executor.state().stack[0].vars["open_page"]["outputs"]["opened"],
+            opened
+        );
         assert_eq!(
             executor.state().stack[0].vars["read_page"]["outputs"]["page"],
             page
@@ -149,39 +180,93 @@ fn run_fixture(
     }
     drop(executor);
     std::fs::remove_dir_all(base).unwrap();
-    (status, observed_calls, observed_prompts, page)
+    FixtureResult {
+        status,
+        calls: observed_calls,
+        coder_prompts: observed_coder_prompts,
+        reasoner_prompts: observed_prompts,
+        opened,
+        page,
+    }
 }
 
 #[test]
 fn browser_starter_hands_exact_page_to_tool_free_reasoner() {
-    let (status, calls, prompts, page) =
-        run_fixture(true, true, "Fixture summary: https://example.org/");
-    assert_eq!(status, RunStatus::Succeeded);
-    assert_eq!(
-        calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>(),
-        ["act", "list_tabs", "read_page"]
+    let result = run_fixture(
+        &[OPEN, READ],
+        Some(true),
+        true,
+        "Fixture summary: https://example.org/",
     );
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains(&page.to_string()));
-    assert!(!prompts[0].contains("CODER_PROSE_NOT_PAGE"));
+    assert_eq!(result.status, RunStatus::Succeeded);
+    assert_eq!(
+        result
+            .calls
+            .iter()
+            .map(|c| c.tool.as_str())
+            .collect::<Vec<_>>(),
+        ["act", "read_page"]
+    );
+    assert_eq!(result.coder_prompts.len(), 2);
+    // The model never selects or copies the ID; the typed binding supplies it.
+    assert_eq!(result.calls[1].args["tabId"], result.opened["tabId"]);
+    assert_eq!(result.calls[1].args["tabId"], json!(178));
+    assert!(!result.coder_prompts[1].contains("178"));
+    assert!(!result.coder_prompts[1].contains("list_tabs"));
+    assert_eq!(result.reasoner_prompts.len(), 1);
+    assert!(result.reasoner_prompts[0].contains(&result.page.to_string()));
+    assert!(!result.reasoner_prompts[0].contains("tabId"));
 }
 
 #[test]
 fn browser_starter_rejects_no_open_and_missing_page() {
-    let (status, calls, prompts, _) = run_fixture(false, true, "Unused");
-    assert!(matches!(status, RunStatus::Failed { .. }));
-    assert!(calls.is_empty());
-    assert!(prompts.is_empty());
-    let (status, calls, prompts, _) = run_fixture(true, false, "Unused");
-    assert!(matches!(status, RunStatus::Failed { .. }));
-    assert_eq!(calls.len(), 3);
-    assert!(prompts.is_empty());
+    let result = run_fixture(&["No action was taken"], Some(true), true, "Unused");
+    assert!(matches!(result.status, RunStatus::Failed { .. }));
+    assert!(result.calls.is_empty());
+    assert!(result.reasoner_prompts.is_empty());
+    let result = run_fixture(&[OPEN, READ], Some(true), false, "Unused");
+    assert!(matches!(result.status, RunStatus::Failed { .. }));
+    assert_eq!(result.calls.len(), 2);
+    assert!(result.reasoner_prompts.is_empty());
+}
+
+#[test]
+fn browser_starter_rejects_missing_or_incomplete_open_result_before_reading() {
+    for complete in [None, Some(false)] {
+        let result = run_fixture(&[OPEN, READ], complete, true, "Unused");
+        assert!(matches!(result.status, RunStatus::Failed { .. }));
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.coder_prompts.len(), 1);
+        assert!(result.reasoner_prompts.is_empty());
+    }
+}
+
+#[test]
+fn browser_starter_rejects_read_prose_and_unauthorized_read_task_tools() {
+    for read_response in ["The page is ready", LIST, OPEN] {
+        let result = run_fixture(&[OPEN, read_response], Some(true), true, "Unused");
+        assert!(matches!(result.status, RunStatus::Failed { .. }));
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.coder_prompts.len(), 2);
+        assert!(result.reasoner_prompts.is_empty());
+    }
+}
+
+#[test]
+fn browser_starter_rejects_model_selected_wrong_tab_before_dispatch() {
+    // Native v3 incorrectly selected another existing tab (137). V4 must fail
+    // before reading it even if the model supplies a syntactically valid ID.
+    let wrong_read = r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"fixture","tabId":137}}</tool_call>"#;
+    let result = run_fixture(&[OPEN, wrong_read], Some(true), true, "Unused");
+    assert!(matches!(result.status, RunStatus::Failed { .. }));
+    assert_eq!(result.calls.len(), 1);
+    assert!(result.reasoner_prompts.is_empty());
 }
 
 #[test]
 fn browser_starter_denies_reasoner_tool_dispatch() {
-    let (status, calls, prompts, _) = run_fixture(true, true, LIST);
-    assert!(matches!(status, RunStatus::Failed { .. }));
-    assert_eq!(calls.len(), 3);
-    assert_eq!(prompts.len(), 1);
+    let result = run_fixture(&[OPEN, READ], Some(true), true, LIST);
+    assert!(matches!(result.status, RunStatus::Failed { .. }));
+    assert_eq!(result.calls.len(), 2);
+    assert_eq!(result.reasoner_prompts.len(), 1);
 }

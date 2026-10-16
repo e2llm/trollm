@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -75,6 +76,7 @@ fun RunScreen(
     var finalReport by remember(runId) { mutableStateOf<String?>(null) }
     var lines by remember(runId) { mutableStateOf<List<String>>(emptyList()) }
     var error by remember(runId, flow?.sha256) { mutableStateOf<String?>(null) }
+    var pollingError by remember(runId) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val inputScroll = rememberScrollState()
 
@@ -111,13 +113,17 @@ fun RunScreen(
                 }
             }
             step.onSuccess { (events, status) ->
+                pollingError = null
                 if (events.isNotEmpty()) {
                     lines = lines + events.map(::renderEvent)
                     cursor = events.last().seq
                 }
                 phase = status.phase
                 finalReport = status.finalReport
-            }.onFailure { error = it.message }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                pollingError = it.message
+            }
             if (phase is RunPhaseApi.Succeeded || phase is RunPhaseApi.Failed) break
             delay(300)
             if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
@@ -260,6 +266,7 @@ fun RunScreen(
         }
 
         error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
+        pollingError?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
         Button(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back") }
     }
 }

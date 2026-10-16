@@ -103,29 +103,62 @@ class StarterBundles(unittest.TestCase):
         self.assertEqual(setup["connections"]["e2llm"]["auth"], "oauth")
         self.assertEqual([field["key"] for field in setup["input"]["fields"]], ["browser", "url", "question"])
         self.assertEqual(setup["input"]["toolArguments"], {
-            "e2llm.list_tabs": {"fromInput": {"browser": "browser"}},
             "e2llm.act": {"fromInput": {"browser": "browser", "target": "url"},
                           "fixed": {"action": "open"}, "forbid": ["sessionId", "tabId"]},
             "e2llm.read_page": {"fromInput": {"browser": "browser"},
                                 "require": ["tabId"], "forbid": ["sessionId", "selector"]},
         })
         tasks = registry["tasks"]
+        self.assertEqual((plan["version"], registry["version"]), (4, 4))
+        self.assertEqual(plan["limits"]["maxSteps"], 3)
+        self.assertEqual(plan["limits"]["maxReasonerCalls"], 1)
+        expected_chain = (("open_page", "open-page", "read_page"),
+                          ("read_page", "read-page", "summarize"),
+                          ("summarize", "summarize-page", "done"))
+        for node, task, following in expected_chain:
+            self.assertEqual(plan["nodes"][node], {"kind": "task", "taskRef": task, "onVerified": following})
         for task in tasks.values():
             self.assertIn(task["prompt"], files)
         self.assertEqual([tasks[name]["loop"]["maxSteps"] for name in
-                          ("open-page", "read-page", "summarize-page")], [2, 3, 1])
-        self.assertEqual(tasks["open-page"]["tools"], ["e2llm.act"])
+                          ("open-page", "read-page", "summarize-page")], [1, 1, 1])
+        for name, grant in (("open-page", "e2llm.act"),
+                            ("read-page", "e2llm.read_page")):
+            self.assertEqual(tasks[name]["tools"], [grant])
+            self.assertEqual(tasks[name]["completion"], "tool-result")
+            prompt = files[tasks[name]["prompt"]].decode()
+            self.assertTrue(prompt.startswith("User input JSON:\n{{ user_input }}"))
+            for obsolete in ('"BROWSER"', '"URL"', '"tabId":123', "<tool_result>", "acknowledg"):
+                self.assertNotIn(obsolete, prompt)
+        self.assertEqual(tasks["open-page"]["outputContract"], {
+            "outputs": {"opened": {"fromArtifact": "opened", "format": "json", "type": "object"}},
+            "requireArtifactComplete": ["opened"],
+        })
         self.assertNotIn("allowNoop", tasks["open-page"]["outputContract"])
         self.assertEqual(tasks["open-page"]["mutations"], {"idempotency": "intent-log", "onUncertain": "fail-run"})
         self.assertEqual(tasks["summarize-page"]["tools"], [])
         self.assertEqual(tasks["summarize-page"]["model"], "reasoner")
         self.assertIn("{{ read_page.outputs.page }}", files["prompts/summarize-page.md"].decode())
         self.assertNotIn("outputs.report", files["prompts/summarize-page.md"].decode())
+        self.assertNotIn("list_tabs.outputs.tabs", files["prompts/summarize-page.md"].decode())
+        self.assertNotIn("list_tabs", files["prompts/read-page.md"].decode())
+        self.assertIn("Omit tabId", files["prompts/read-page.md"].decode())
+        self.assertEqual(tasks["read-page"]["toolArguments"], {
+            "e2llm.read_page": {"fromVars": {"tabId": "open_page.outputs.opened.tabId"}},
+        })
         self.assertEqual(tasks["read-page"]["outputContract"], {
             "outputs": {"page": {"fromArtifact": "page", "format": "json", "type": "object"}},
             "requireArtifactComplete": ["page"],
         })
         policies = plan["mcp"]["policies"]
+        self.assertNotIn("e2llm.list_tabs", policies)
+        self.assertEqual(policies["e2llm.act"]["resultArtifact"], "opened")
+        opened_validator = Draft202012Validator(policies["e2llm.act"]["resultValidation"]["schema"])
+        opened = {"result": "opened", "tabId": 178, "url": "https://example.org/"}
+        opened_validator.validate(opened)
+        for invalid in ({**opened, "result": "unknown"}, {**opened, "tabId": 0},
+                        {**opened, "tabId": "178"}, {**opened, "url": ""},
+                        {key: value for key, value in opened.items() if key != "tabId"}):
+            self.assertFalse(opened_validator.is_valid(invalid))
         self.assertTrue(all("retry" not in p and "cache" not in p for p in policies.values()))
         self.assertEqual(policies["e2llm.read_page"]["shape"], {"strip": ["content"], "toFile": True})
         validator = Draft202012Validator(policies["e2llm.read_page"]["resultValidation"]["schema"])
