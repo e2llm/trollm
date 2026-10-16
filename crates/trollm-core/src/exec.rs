@@ -1,0 +1,1855 @@
+//! The executor: a stack machine over task/foreach/end (§4.4) with coder-loop
+//! task semantics (§5), mutation journaling (§6), budgets, and pause/resume /
+//! crash recovery via the persisted RunState (§4.4).
+
+use anyhow::{anyhow, Context};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use trollm_mcp::ToolGateway;
+use trollm_models::{GenerateRequest, ModelSlot};
+use uuid::Uuid;
+
+use crate::artifacts;
+use crate::error::{ErrorClass, TaskFailure};
+use crate::events::{dangling_intents, now_ms, DanglingIntent, EventLog, EventType};
+use crate::plan::*;
+use crate::registry::*;
+use crate::state::*;
+use crate::{fence, template, validate};
+
+/// Slot name → model instance (§9 leaves supporting types to core).
+#[derive(Debug, Default)]
+pub struct SlotMap<M> {
+    slots: BTreeMap<String, M>,
+}
+
+impl<M> SlotMap<M> {
+    pub fn new() -> Self {
+        Self {
+            slots: BTreeMap::new(),
+        }
+    }
+
+    pub fn with(mut self, name: impl Into<String>, model: M) -> Self {
+        self.slots.insert(name.into(), model);
+        self
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, model: M) {
+        self.slots.insert(name.into(), model);
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut M> {
+        self.slots.get_mut(name)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.slots.contains_key(name)
+    }
+}
+
+impl<M> FromIterator<(String, M)> for SlotMap<M> {
+    fn from_iter<I: IntoIterator<Item = (String, M)>>(iter: I) -> Self {
+        Self {
+            slots: iter.into_iter().collect(),
+        }
+    }
+}
+
+/// `runs/<uuid>/` directory handle (§8).
+#[derive(Debug, Clone)]
+pub struct RunDir {
+    path: PathBuf,
+    run_id: String,
+}
+
+impl RunDir {
+    /// Wrap an existing or new run directory; the run id is the directory name
+    /// (a fresh uuid is generated only if the name is not one).
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let run_id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| Uuid::parse_str(s).is_ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        Self { path, run_id }
+    }
+
+    /// Create a fresh `runs/<uuid>` under `base` (§8 layout).
+    pub fn under(base: &Path) -> Self {
+        Self::new(base.join("runs").join(Uuid::new_v4().to_string()))
+    }
+
+    pub fn create_dirs(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(self.artifacts_dir())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn events_path(&self) -> PathBuf {
+        self.path.join("events.jsonl")
+    }
+    pub fn snapshot_path(&self) -> PathBuf {
+        self.path.join("state.snapshot.json")
+    }
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.path.join("artifacts")
+    }
+}
+
+/// §9 pinned enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunStatus {
+    Running,
+    Paused { reason: String },
+    Succeeded,
+    Failed { reason: String },
+}
+
+/// Cloned identity of the plan owning the current frame (avoids holding a
+/// borrow into `self.plan` across `&mut self` calls).
+#[derive(Debug, Clone)]
+struct FramePlan {
+    id: String,
+    limits: Limits,
+    on_limit: RunLimitPolicy,
+}
+
+/// Result of one successful coder loop (§5).
+struct TaskOutcome {
+    prose: String,
+    tool_calls_made: u32,
+    /// Artifacts reported by the gateway during this task, keyed by logical
+    /// name (filename stem — the wiring convention documented in artifacts.rs).
+    artifacts: BTreeMap<String, PathBuf>,
+}
+
+pub struct Executor<M: ModelSlot, G: ToolGateway> {
+    plan: ExecutionPlan,
+    registry: TaskRegistry,
+    user_input: String,
+    models: SlotMap<M>,
+    gateway: G,
+    run_dir: RunDir,
+    log: EventLog,
+    state: RunState,
+    /// True when constructed over an existing run dir (resume/crash recovery).
+    restored: bool,
+    start_events_emitted: bool,
+    pending_uncertain: Vec<DanglingIntent>,
+    unsafe_completed_replay: bool,
+    /// Retries consumed on the current node (per-node budget, resets on entry).
+    node_retries: u32,
+    pause_reason: String,
+    fail_reason: String,
+    cancel_requested: bool,
+}
+
+impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
+    /// §9 pinned constructor. Validates plan + registry (§4.2). If `run_dir`
+    /// already contains `state.snapshot.json`, this is a resume/crash-recovery
+    /// construction: state and event-log position are restored and dangling
+    /// mutation intents are collected for `onUncertain` handling (§6).
+    pub fn new(
+        plan: ExecutionPlan,
+        registry: TaskRegistry,
+        user_input: String,
+        models: SlotMap<M>,
+        gateway: G,
+        run_dir: RunDir,
+    ) -> anyhow::Result<Self> {
+        validate::validate_plan(&plan).map_err(|e| anyhow!(e.to_string()))?;
+        validate::validate_with_registry(&plan, &registry).map_err(|e| anyhow!(e.to_string()))?;
+        // Every slot named by any plan in the tree must be bound.
+        fn check_slots(
+            plan: &ExecutionPlan,
+            models: &SlotMap<impl Sized>,
+            problems: &mut Vec<String>,
+        ) {
+            for slot in plan.models.keys() {
+                if !models.contains(slot) {
+                    problems.push(format!(
+                        "plan '{}' declares slot '{slot}' but no model is bound to it",
+                        plan.id
+                    ));
+                }
+            }
+            for sub in plan.subflows.values() {
+                check_slots(sub, models, problems);
+            }
+        }
+        let mut problems = Vec::new();
+        check_slots(&plan, &models, &mut problems);
+        if !problems.is_empty() {
+            return Err(anyhow!(problems.join("\n")));
+        }
+
+        run_dir.create_dirs().context("creating run dir")?;
+        let log = EventLog::open(&run_dir.events_path(), run_dir.run_id())
+            .context("opening event log")?;
+
+        let snapshot = run_dir.snapshot_path();
+        let (state, restored, pending_uncertain, unsafe_completed_replay) = if snapshot.exists() {
+            let bytes = std::fs::read(&snapshot).context("reading state.snapshot.json")?;
+            let mut state: RunState =
+                serde_json::from_slice(&bytes).context("parsing state.snapshot.json")?;
+            // The maxItems window is per dispatch session: after pause/resume a
+            // run may process up to maxItems further items (PREMISE: pause
+            // composes with backgrounding; resume-from-cursor is the expected
+            // path). Documented deviation-free reading of §3/§4.4.
+            for cur in state.foreach_cursors.values_mut() {
+                cur.session_items = 0;
+            }
+            let events = EventLog::read_all(&run_dir.events_path())?;
+            let pending = dangling_intents(&events);
+            let unsafe_replay = events.iter().any(|e| {
+                e["type"] == "tool_call_result"
+                    && e["intentSeq"].as_u64().is_some()
+                    && e["skipped"] != true
+                    && e["seq"].as_u64().unwrap_or(u64::MAX) > state.event_watermark
+            });
+            (state, true, pending, unsafe_replay)
+        } else {
+            (
+                RunState::fresh(run_dir.run_id(), &plan.pin(), &plan.entry_step),
+                false,
+                Vec::new(),
+                false,
+            )
+        };
+
+        Ok(Self {
+            plan,
+            registry,
+            user_input,
+            models,
+            gateway,
+            run_dir,
+            log,
+            state,
+            restored,
+            start_events_emitted: false,
+            pending_uncertain,
+            unsafe_completed_replay,
+            node_retries: 0,
+            pause_reason: String::new(),
+            fail_reason: String::new(),
+            cancel_requested: false,
+        })
+    }
+
+    pub fn run_dir(&self) -> &RunDir {
+        &self.run_dir
+    }
+
+    pub fn run_id(&self) -> &str {
+        self.run_dir.run_id()
+    }
+
+    pub fn state(&self) -> &RunState {
+        &self.state
+    }
+
+    /// §9: drive until Paused / Succeeded / Failed.
+    pub fn run_until_blocked(&mut self) -> anyhow::Result<RunStatus> {
+        if !self.start_events_emitted {
+            self.start_events_emitted = true;
+            if !self.restored {
+                self.emit(
+                    EventType::RunStarted,
+                    json!({ "plan": self.plan.id, "sha256": self.plan.sha256 }),
+                )?;
+                let mut pins = Vec::new();
+                collect_pins(&self.plan, &mut pins);
+                for (id, sha) in pins {
+                    self.emit(EventType::PlanLoaded, json!({ "plan": id, "sha256": sha }))?;
+                }
+                let (pid, node) = self.current_position()?;
+                self.emit(EventType::NodeEntered, json!({ "plan": pid, "node": node }))?;
+                self.persist_snapshot()?;
+            }
+        }
+        if self.restored {
+            self.restored = false;
+            match self.state.status {
+                StateStatus::Succeeded => return Ok(RunStatus::Succeeded),
+                StateStatus::Failed => {
+                    return Ok(RunStatus::Failed {
+                        reason: "run already failed".into(),
+                    })
+                }
+                _ => {}
+            }
+            self.state.status = StateStatus::Running;
+            self.emit(EventType::Resumed, json!({}))?;
+            self.handle_recovery()?;
+            if self.state.status != StateStatus::Running {
+                self.persist_snapshot()?;
+                return self.current_status();
+            }
+            self.persist_snapshot()?;
+        }
+        self.dispatch()
+    }
+
+    /// §9: resume a paused run (same process or after crash — identical path).
+    pub fn resume(&mut self) -> anyhow::Result<RunStatus> {
+        match self.state.status {
+            StateStatus::Succeeded => return Ok(RunStatus::Succeeded),
+            StateStatus::Failed => {
+                return Ok(RunStatus::Failed {
+                    reason: self.fail_reason.clone(),
+                })
+            }
+            _ => {}
+        }
+        if self.restored {
+            self.restored = false;
+        }
+        self.state.status = StateStatus::Running;
+        // maxItems is a per-session window; resuming starts a new session.
+        for cur in self.state.foreach_cursors.values_mut() {
+            cur.session_items = 0;
+        }
+        self.emit(EventType::Resumed, json!({}))?;
+        self.handle_recovery()?;
+        if self.state.status != StateStatus::Running {
+            self.persist_snapshot()?;
+            return self.current_status();
+        }
+        self.persist_snapshot()?;
+        self.dispatch()
+    }
+
+    /// §9: cancel. Terminal; recorded in the log.
+    pub fn cancel(&mut self) {
+        self.cancel_requested = true;
+        if self.state.status == StateStatus::Running || self.state.status == StateStatus::Paused {
+            let _ = self.emit(EventType::RunEnded, json!({ "outcome": "cancelled" }));
+            self.state.status = StateStatus::Failed;
+            self.fail_reason = "cancelled".to_string();
+            let _ = self.persist_snapshot();
+        }
+    }
+
+    /// §9: persist RunState without committing additional log progress.
+    /// The executor advances the recovery watermark only at node boundaries.
+    pub fn snapshot(&self) -> anyhow::Result<()> {
+        self.write_snapshot()
+    }
+
+    // ------------------------------------------------------------------
+    // dispatch
+
+    fn dispatch(&mut self) -> anyhow::Result<RunStatus> {
+        loop {
+            match self.state.status {
+                StateStatus::Paused => {
+                    return Ok(RunStatus::Paused {
+                        reason: self.pause_reason.clone(),
+                    })
+                }
+                StateStatus::Succeeded => return Ok(RunStatus::Succeeded),
+                StateStatus::Failed => {
+                    return Ok(RunStatus::Failed {
+                        reason: self.fail_reason.clone(),
+                    })
+                }
+                StateStatus::Running => {}
+            }
+            if self.cancel_requested {
+                self.finish_failed("cancelled")?;
+                continue;
+            }
+
+            let (plan_id, node_id) = self.current_position()?;
+            let fp = self.frame_plan(&plan_id)?;
+            let node = fp_node(&self.plan, &plan_id, &node_id)?.clone();
+            match node.kind {
+                NodeKind::Task => self.step_task(&node_id, &node, &fp)?,
+                NodeKind::Foreach => self.step_foreach(&node_id, &node, &fp)?,
+                NodeKind::End => self.step_end(&node_id, &node, &fp)?,
+            }
+        }
+    }
+
+    fn current_status(&self) -> anyhow::Result<RunStatus> {
+        Ok(match self.state.status {
+            StateStatus::Running => RunStatus::Running,
+            StateStatus::Paused => RunStatus::Paused {
+                reason: self.pause_reason.clone(),
+            },
+            StateStatus::Succeeded => RunStatus::Succeeded,
+            StateStatus::Failed => RunStatus::Failed {
+                reason: self.fail_reason.clone(),
+            },
+        })
+    }
+
+    fn current_position(&self) -> anyhow::Result<(String, String)> {
+        let frame = self
+            .state
+            .stack
+            .last()
+            .ok_or_else(|| anyhow!("run stack is empty"))?;
+        Ok((plan_id_of_pin(&frame.plan), frame.node.clone()))
+    }
+
+    fn frame_plan(&self, plan_id: &str) -> anyhow::Result<FramePlan> {
+        let plan = self
+            .plan
+            .find_plan(plan_id)
+            .ok_or_else(|| anyhow!("plan '{plan_id}' referenced by run state is not loaded"))?;
+        Ok(FramePlan {
+            id: plan.id.clone(),
+            limits: plan.limits.clone(),
+            on_limit: plan.on_limit,
+        })
+    }
+
+    fn emit(&mut self, ty: EventType, fields: Value) -> std::io::Result<u64> {
+        self.log.append(ty, fields)
+    }
+
+    fn persist_snapshot(&mut self) -> anyhow::Result<()> {
+        self.state.event_watermark = self.log.last_seq();
+        self.write_snapshot()
+    }
+
+    fn write_snapshot(&self) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec_pretty(&self.state)?;
+        let path = self.run_dir.snapshot_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    fn finish_failed(&mut self, reason: &str) -> anyhow::Result<()> {
+        self.emit(
+            EventType::RunEnded,
+            json!({ "outcome": "failed", "reason": reason }),
+        )?;
+        self.state.status = StateStatus::Failed;
+        self.fail_reason = reason.to_string();
+        self.persist_snapshot()
+    }
+
+    fn finish_succeeded(&mut self, outcome: &str) -> anyhow::Result<()> {
+        self.emit(EventType::RunEnded, json!({ "outcome": outcome }))?;
+        self.state.status = StateStatus::Succeeded;
+        self.persist_snapshot()
+    }
+
+    /// Move the top frame along a transition (§4.2): node target, or inline
+    /// `{status: paused|failed}`.
+    fn transit(&mut self, key: &str, t: &Transition) -> anyhow::Result<()> {
+        let (plan_id, from) = self.current_position()?;
+        match t {
+            Transition::Node(target) => {
+                self.emit(
+                    EventType::NodeExited,
+                    json!({ "plan": plan_id, "node": from }),
+                )?;
+                self.emit(
+                    EventType::Transition,
+                    json!({ "plan": plan_id, "from": from, "to": target, "key": key }),
+                )?;
+                let frame = self.state.stack.last_mut().unwrap();
+                frame.node = target.clone();
+                self.node_retries = 0;
+                self.emit(
+                    EventType::NodeEntered,
+                    json!({ "plan": plan_id, "node": target }),
+                )?;
+                self.persist_snapshot()?;
+            }
+            Transition::Inline(inline) => {
+                let to = match inline.status {
+                    InlineStatus::Paused => "paused",
+                    InlineStatus::Failed => "failed",
+                };
+                self.emit(
+                    EventType::Transition,
+                    json!({ "plan": plan_id, "from": from, "to": to, "key": key }),
+                )?;
+                match inline.status {
+                    InlineStatus::Paused => {
+                        self.emit(EventType::Paused, json!({ "reason": inline.reason }))?;
+                        self.state.status = StateStatus::Paused;
+                        self.pause_reason = inline.reason.clone();
+                        self.persist_snapshot()?;
+                    }
+                    InlineStatus::Failed => {
+                        let reason = if inline.reason.is_empty() {
+                            format!("transition '{key}' from '{from}' declared failed")
+                        } else {
+                            inline.reason.clone()
+                        };
+                        self.finish_failed(&reason)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // end nodes
+
+    fn step_end(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
+        let outcome = node.outcome.clone().unwrap_or_default();
+        self.emit(
+            EventType::NodeExited,
+            json!({ "plan": fp.id, "node": node_id, "outcome": outcome }),
+        )?;
+        if self.state.stack.len() == 1 {
+            // Root end. The frame is kept on the stack so the terminal
+            // snapshot retains the run's bound outputs (consumers read final
+            // results from state.snapshot.json without re-parsing the log).
+            // Only succeeded/failed are routable root outcomes; anything else
+            // (e.g. a subflow-only outcome like 'skipped' surfacing at root)
+            // is the runtime unhandled-transition case of §4.2.
+            match outcome.as_str() {
+                "succeeded" => self.finish_succeeded("succeeded")?,
+                "failed" => self.finish_failed("failed")?,
+                other => {
+                    self.finish_failed(&format!(
+                        "unhandled-transition: root end outcome '{other}'"
+                    ))?;
+                }
+            }
+        } else {
+            // flowRef return (§4.4): hand the child frame's node outputs to the
+            // parent foreach for §4.6 aggregation.
+            let frame = self.state.stack.pop().unwrap();
+            let parent = self.state.stack.last().unwrap();
+            self.state.pending_return = Some(PendingReturn {
+                parent_plan: parent.plan.clone(),
+                parent_node: parent.node.clone(),
+                outputs: frame.node_outputs,
+                outcome,
+            });
+            self.persist_snapshot()?;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // task nodes (§5)
+
+    fn step_task(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
+        // Timeout is a run-level budget, checked at node boundaries (§4.4:
+        // transitions happen only at node boundaries).
+        let started = self
+            .state
+            .stack
+            .last()
+            .map(|f| f.counters.started_at)
+            .unwrap_or_else(now_ms);
+        if now_ms().saturating_sub(started) > fp.limits.timeout_s * 1000 {
+            self.emit(
+                EventType::BudgetExhausted,
+                json!({ "budget": "timeoutS", "limit": fp.limits.timeout_s, "node": node_id }),
+            )?;
+            return self.apply_run_limit(fp, "timeoutS");
+        }
+
+        let task = self
+            .registry
+            .task(node.task_ref.as_deref().unwrap_or(""))
+            .cloned()
+            .ok_or_else(|| anyhow!("taskRef {:?} not in registry", node.task_ref))?;
+
+        match self.run_task_loop(node_id, node, &task, fp) {
+            Ok(outcome) => match self.verify_and_bind(node_id, node, &task, &outcome) {
+                Ok(()) => {
+                    let t = node.on_verified.clone().expect("validated");
+                    self.transit("onVerified", &t)
+                }
+                Err(f) => self.handle_task_error(node_id, node, fp, f),
+            },
+            Err(f) if f.class == ErrorClass::BudgetExhausted => self.apply_run_limit(fp, &f.detail),
+            Err(f) => self.handle_task_error(node_id, node, fp, f),
+        }
+    }
+
+    /// Coder loop (§5): render → generate → fences? gateway executes, append
+    /// result, repeat : the text is the node's prose output → verify →
+    /// transition. Loop exit without prose after maxSteps = verification-failed.
+    fn run_task_loop(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        task: &TaskDef,
+        fp: &FramePlan,
+    ) -> Result<TaskOutcome, TaskFailure> {
+        let task_ref = node.task_ref.clone().unwrap_or_default();
+        let frame_vars = self
+            .state
+            .stack
+            .last()
+            .map(|f| f.vars.clone())
+            .unwrap_or(Value::Null);
+        let template_text = self
+            .registry
+            .prompt_template(task)
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, format!("prompt: {e}")))?;
+        let mut context =
+            template::render(&template_text, &frame_vars, &self.user_input).map_err(|e| {
+                TaskFailure::new(
+                    ErrorClass::VerificationFailed,
+                    format!("prompt render: {e}"),
+                )
+            })?;
+
+        let max_steps = task.loop_spec.as_ref().map(|l| l.max_steps).unwrap_or(1);
+        let mut tool_calls_made = 0u32;
+        let mut artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut prose: Option<String> = None;
+
+        for _ in 0..max_steps {
+            self.check_generation_budget(node_id, task, fp)?;
+
+            let req = GenerateRequest {
+                prompt: context.clone(),
+                grammar_gbnf: if task.tools.is_empty() {
+                    None
+                } else {
+                    Some(trollm_models::fence::tool_call_grammar(
+                        &task
+                            .tools
+                            .iter()
+                            .filter_map(|grant| grant.split_once('.'))
+                            .map(|(server, tool)| (server.to_string(), tool.to_string()))
+                            .collect::<Vec<_>>(),
+                    ))
+                },
+                max_tokens: 2048,
+                stop: Vec::new(),
+            };
+            let t0 = Instant::now();
+            let resp = {
+                let slot = self.models.get_mut(&task.model).ok_or_else(|| {
+                    TaskFailure::new(
+                        ErrorClass::ModelError,
+                        format!("no model bound to slot '{}'", task.model),
+                    )
+                })?;
+                slot.generate(req)
+                    .map_err(|e| TaskFailure::new(ErrorClass::ModelError, e.to_string()))?
+            };
+            let ms = t0.elapsed().as_millis() as u64;
+
+            {
+                let frame = self.state.stack.last_mut().unwrap();
+                frame.counters.steps += 1;
+                frame.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
+                if task.model == "reasoner" {
+                    frame.counters.reasoner_calls += 1;
+                }
+            }
+            self.state.counters.steps += 1;
+            self.state.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
+            if task.model == "reasoner" {
+                self.state.counters.reasoner_calls += 1;
+            }
+            self.emit(
+                EventType::ModelCall,
+                json!({
+                    "slot": task.model, "node": node_id,
+                    "tokensIn": resp.tokens_in, "tokensOut": resp.tokens_out, "ms": ms,
+                }),
+            )
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, format!("event log: {e}")))?;
+
+            if let Some(frame) = self.state.stack.last() {
+                if frame.counters.tokens > fp.limits.max_tokens_total {
+                    self.emit(
+                        EventType::BudgetExhausted,
+                        json!({ "budget": "maxTokensTotal", "value": frame.counters.tokens,
+                                "limit": fp.limits.max_tokens_total, "node": node_id }),
+                    )
+                    .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                    return Err(TaskFailure::new(
+                        ErrorClass::BudgetExhausted,
+                        format!("maxTokensTotal {} exceeded", fp.limits.max_tokens_total),
+                    ));
+                }
+            }
+
+            let calls = fence::extract_tool_calls(&resp.text)
+                .map_err(|e| TaskFailure::new(ErrorClass::ToolCallParse, e.to_string()))?;
+            if calls.is_empty() {
+                // No fence: this generation is the node's prose output (§5).
+                prose = Some(resp.text.trim().to_string());
+                break;
+            }
+
+            for call in &calls {
+                let fqn = format!("{}.{}", call.server, call.tool);
+                if !task.tools.iter().any(|t| t == &fqn) {
+                    // Post-hoc validation failure (§5.1): the model called a
+                    // tool outside its allowlist. Counted as tool-call-parse
+                    // (see OPEN QUESTIONS in the implementation report).
+                    return Err(TaskFailure::new(
+                        ErrorClass::ToolCallParse,
+                        format!("tool '{fqn}' not in allowlist of task '{task_ref}'"),
+                    ));
+                }
+
+                self.gateway.validate_call(call).map_err(|e| {
+                    TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
+                })?;
+
+                // Mutation journaling (§6): intent BEFORE the call for tasks
+                // with mutations.idempotency = intent-log.
+                let intent_seq = if task
+                    .mutations
+                    .as_ref()
+                    .map(|m| m.idempotency == Idempotency::IntentLog)
+                    .unwrap_or(false)
+                {
+                    let args_sha256 = hex_sha256(call.args.to_string().as_bytes());
+                    Some(
+                        self.emit(
+                            EventType::ToolCallIntent,
+                            json!({
+                                "node": node_id, "taskRef": task_ref,
+                                "server": call.server, "tool": call.tool,
+                                "args": call.args, "argsSha256": args_sha256,
+                            }),
+                        )
+                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                let t0 = Instant::now();
+                let result = self
+                    .gateway
+                    .call(call)
+                    .map_err(|e| TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {e}")))?;
+                let call_ms = t0.elapsed().as_millis() as u64;
+
+                self.emit(
+                    EventType::ToolCallResult,
+                    json!({
+                        "intentSeq": intent_seq, "node": node_id,
+                        "server": call.server, "tool": call.tool,
+                        "provenance": format!("{:?}", result.provenance), "ms": call_ms,
+                    }),
+                )
+                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                tool_calls_made += 1;
+
+                for art in &result.artifacts {
+                    if let Ok(bytes) = std::fs::read(art) {
+                        let sha = hex_sha256(&bytes);
+                        self.emit(
+                            EventType::ArtifactWritten,
+                            json!({ "path": art, "bytes": bytes.len(), "sha256": sha }),
+                        )
+                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                        self.state.counters.artifact_bytes += bytes.len() as u64;
+                        if let Some(f) = self.state.stack.last_mut() {
+                            f.counters.artifact_bytes += bytes.len() as u64;
+                        }
+                        if let Some(name) = artifacts::logical_name(art) {
+                            artifacts.insert(name, art.clone());
+                        }
+                        let limit_bytes = fp.limits.artifact_max_mb * 1024 * 1024;
+                        if self.state.counters.artifact_bytes > limit_bytes {
+                            self.emit(
+                                EventType::BudgetExhausted,
+                                json!({ "budget": "artifactMaxMb", "limit": fp.limits.artifact_max_mb }),
+                            )
+                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                            return Err(TaskFailure::new(
+                                ErrorClass::BudgetExhausted,
+                                "artifactMaxMb exceeded",
+                            ));
+                        }
+                    }
+                }
+
+                // Append result, repeat (§5).
+                context.push_str("\n<tool_result>");
+                context.push_str(
+                    &json!({
+                        "server": call.server,
+                        "tool": call.tool,
+                        "result": result.content_for_model,
+                    })
+                    .to_string(),
+                );
+                context.push_str("</tool_result>\n");
+            }
+        }
+
+        let prose = prose.ok_or_else(|| {
+            TaskFailure::new(
+                ErrorClass::VerificationFailed,
+                format!("coder loop exhausted maxSteps={max_steps} without prose output"),
+            )
+        })?;
+        Ok(TaskOutcome {
+            prose,
+            tool_calls_made,
+            artifacts,
+        })
+    }
+
+    /// Frame-scoped run budgets (§4.4: "own counter scope"; counters persist
+    /// across pause, never reset). Checked before each generation.
+    fn check_generation_budget(
+        &mut self,
+        node_id: &str,
+        task: &TaskDef,
+        fp: &FramePlan,
+    ) -> Result<(), TaskFailure> {
+        let (steps, reasoner_calls) = self
+            .state
+            .stack
+            .last()
+            .map(|f| (f.counters.steps, f.counters.reasoner_calls))
+            .unwrap_or((0, 0));
+        let hit = if steps >= fp.limits.max_steps {
+            Some(("maxSteps", steps as u64, fp.limits.max_steps as u64))
+        } else if task.model == "reasoner" && reasoner_calls >= fp.limits.max_reasoner_calls {
+            Some((
+                "maxReasonerCalls",
+                reasoner_calls as u64,
+                fp.limits.max_reasoner_calls as u64,
+            ))
+        } else {
+            None
+        };
+        if let Some((budget, value, limit)) = hit {
+            self.emit(
+                EventType::BudgetExhausted,
+                json!({ "budget": budget, "value": value, "limit": limit, "node": node_id }),
+            )
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+            return Err(TaskFailure::new(
+                ErrorClass::BudgetExhausted,
+                format!("{budget} {value}/{limit}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Run-level onLimit policy (§3): abort | respond_partial.
+    fn apply_run_limit(&mut self, fp: &FramePlan, detail: &str) -> anyhow::Result<()> {
+        match fp.on_limit {
+            RunLimitPolicy::Abort => self.finish_failed(&format!("budget-exhausted: {detail}")),
+            RunLimitPolicy::RespondPartial => {
+                // Terminal but not a failure: the run ends and whatever partial
+                // results exist are delivered.
+                self.finish_succeeded("partial")
+            }
+        }
+    }
+
+    /// onError (§4.5): retry with backoff, then route to `then`. Default:
+    /// retry 0, then `{status: failed, reason: <error-class>}`.
+    fn handle_task_error(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        fp: &FramePlan,
+        failure: TaskFailure,
+    ) -> anyhow::Result<()> {
+        self.emit(
+            EventType::Error,
+            json!({
+                "class": failure.class.as_str(),
+                "detail": failure.detail,
+                "node": node_id,
+                "plan": fp.id,
+            }),
+        )?;
+        let policy = node.on_error.clone().unwrap_or(OnError {
+            retry: 0,
+            backoff_s: 0,
+            then: Transition::Inline(InlineTransition {
+                status: InlineStatus::Failed,
+                reason: failure.class.as_str().to_string(),
+            }),
+        });
+        if self.node_retries < policy.retry {
+            self.node_retries += 1;
+            if policy.backoff_s > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(policy.backoff_s));
+            }
+            // Frame stays on this node: the task re-executes from entry
+            // (per-node loop budget resets, §4.4).
+            Ok(())
+        } else {
+            self.node_retries = 0;
+            self.transit("onError", &policy.then)
+        }
+    }
+
+    /// Output-contract verification (§4.3): structure only — required outputs
+    /// exist, types match, artifact references exist and are complete.
+    fn verify_and_bind(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        task: &TaskDef,
+        outcome: &TaskOutcome,
+    ) -> Result<(), TaskFailure> {
+        let contract = &task.output_contract;
+
+        // allowNoop (§4.3): a task with a tool allowlist that made no calls is
+        // a no-op; the contract must explicitly accept that.
+        if !contract.allow_noop && !task.tools.is_empty() && outcome.tool_calls_made == 0 {
+            return Err(TaskFailure::new(
+                ErrorClass::VerificationFailed,
+                format!(
+                    "task '{}' made no tool calls (no-op) and its contract does not allowNoop",
+                    node.task_ref.as_deref().unwrap_or("")
+                ),
+            ));
+        }
+
+        let mut bound: BTreeMap<String, Value> = BTreeMap::new();
+        for (name, spec) in &contract.outputs {
+            if matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.contains_key(name))
+            {
+                continue;
+            }
+            let value = match spec {
+                OutputSpec::FromModel { type_, .. } => {
+                    let v = Value::String(outcome.prose.clone());
+                    check_output_type(name, &v, *type_)?;
+                    v
+                }
+                OutputSpec::FromArtifact {
+                    from_artifact,
+                    format,
+                    type_,
+                } => {
+                    let path = self.find_artifact(from_artifact, &outcome.artifacts)?;
+                    // §4.3: fromArtifact outputs require the meta sidecar to
+                    // say complete: true.
+                    if !artifacts::is_complete(&path) {
+                        return Err(TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            format!("artifact '{from_artifact}' is not marked complete"),
+                        ));
+                    }
+                    let bytes = std::fs::read(&path).map_err(|e| {
+                        TaskFailure::new(
+                            ErrorClass::ArtifactIo,
+                            format!("reading artifact '{from_artifact}': {e}"),
+                        )
+                    })?;
+                    let v = parse_artifact(format, &bytes).map_err(|e| {
+                        TaskFailure::new(
+                            ErrorClass::ArtifactIo,
+                            format!("parsing artifact '{from_artifact}': {e}"),
+                        )
+                    })?;
+                    check_output_type(name, &v, *type_)?;
+                    v
+                }
+            };
+            bound.insert(name.clone(), value);
+        }
+
+        // Plan-node-level output bindings (§3) add to / override contract
+        // bindings when present.
+        if let Some(NodeOutputs::Task(outputs)) = &node.outputs {
+            for (name, binding) in outputs {
+                match binding {
+                    NodeOutputBinding::FromModel { .. } => {
+                        bound.insert(name.clone(), Value::String(outcome.prose.clone()));
+                    }
+                    NodeOutputBinding::FromArtifact {
+                        from_artifact,
+                        format,
+                    } => {
+                        let path = self.find_artifact(from_artifact, &outcome.artifacts)?;
+                        if !artifacts::is_complete(&path) {
+                            return Err(TaskFailure::new(
+                                ErrorClass::VerificationFailed,
+                                format!("artifact '{from_artifact}' is not marked complete"),
+                            ));
+                        }
+                        let bytes = std::fs::read(&path)
+                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                        let fmt = match format.as_deref() {
+                            Some("json") => ArtifactFormat::Json,
+                            _ => ArtifactFormat::Jsonl,
+                        };
+                        let v = parse_artifact(&fmt, &bytes)
+                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                        bound.insert(name.clone(), v);
+                    }
+                }
+            }
+        }
+
+        for (name, spec) in &contract.outputs {
+            let type_ = match spec {
+                OutputSpec::FromModel { type_, .. } | OutputSpec::FromArtifact { type_, .. } => {
+                    *type_
+                }
+            };
+            check_output_type(name, &bound[name], type_)?;
+        }
+
+        // requireArtifactComplete + node verify.artifactComplete (§3/§4.3).
+        let mut completeness: Vec<String> = contract.require_artifact_complete.clone();
+        if let Some(v) = &node.verify {
+            if let Some(ac) = &v.artifact_complete {
+                completeness.push(ac.clone());
+            }
+        }
+        for name in completeness {
+            let path = self.find_artifact(&name, &outcome.artifacts)?;
+            if !artifacts::is_complete(&path) {
+                return Err(TaskFailure::new(
+                    ErrorClass::VerificationFailed,
+                    format!("required artifact '{name}' is not marked complete"),
+                ));
+            }
+        }
+
+        // Bind into the frame: `vars[node]` exposes outputs both bare
+        // (`{{ enrich.summary }}`) and under `.outputs` (`{{ each.outputs... }}`).
+        let frame = self.state.stack.last_mut().unwrap();
+        let mut node_obj = Map::new();
+        for (k, v) in &bound {
+            node_obj.insert(k.clone(), v.clone());
+        }
+        node_obj.insert(
+            "outputs".to_string(),
+            Value::Object(bound.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        );
+        vars_obj_mut(frame).insert(node_id.to_string(), Value::Object(node_obj));
+        frame.node_outputs.insert(node_id.to_string(), bound);
+        Ok(())
+    }
+
+    /// Resolve a logical artifact name (e.g. `tracker.list_issues.latest`) to a
+    /// path: artifacts produced by this task first, then the run artifact dir.
+    fn find_artifact(
+        &self,
+        name: &str,
+        task_artifacts: &BTreeMap<String, PathBuf>,
+    ) -> Result<PathBuf, TaskFailure> {
+        if let Some(p) = task_artifacts.get(name) {
+            return Ok(p.clone());
+        }
+        if let Ok(entries) = std::fs::read_dir(self.run_dir.artifacts_dir()) {
+            for entry in entries.flatten() {
+                if artifacts::logical_name(&entry.path()).as_deref() == Some(name) {
+                    return Ok(entry.path());
+                }
+            }
+        }
+        Err(TaskFailure::new(
+            ErrorClass::VerificationFailed,
+            format!("declared artifact '{name}' was not produced"),
+        ))
+    }
+
+    // ------------------------------------------------------------------
+    // foreach nodes (§4.4, §4.6)
+
+    fn step_foreach(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
+        if !self.state.foreach_cursors.contains_key(node_id) {
+            self.foreach_enter(node_id, node)?;
+            if self.state.status != StateStatus::Running {
+                return Ok(()); // onEmpty fired a terminal/pause transition
+            }
+            if !self.state.foreach_cursors.contains_key(node_id) {
+                return Ok(()); // transitioned away (empty snapshot)
+            }
+        }
+        let phase = self.state.foreach_cursors[node_id].phase;
+        match phase {
+            ForeachPhase::Next => self.foreach_next(node_id, node, fp),
+            ForeachPhase::InBody => self.foreach_body_done(node_id, node),
+            ForeachPhase::InBetween => {
+                self.take_child_return(node_id)?;
+                let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+                cur.index += 1;
+                cur.phase = ForeachPhase::Next;
+                self.persist_snapshot()
+            }
+        }
+    }
+
+    /// First entry: resolve `items`, take the snapshot (enumeration: snapshot
+    /// is the only legal value in v1, §3), persist it as an artifact.
+    fn foreach_enter(&mut self, node_id: &str, node: &Node) -> anyhow::Result<()> {
+        let binding = node.items.as_ref().expect("validated").from.clone();
+        let vars = self
+            .state
+            .stack
+            .last()
+            .map(|f| f.vars.clone())
+            .unwrap_or(Value::Null);
+        let items = match resolve_path(&vars, &binding).cloned() {
+            Some(Value::Array(a)) => a,
+            Some(other) => {
+                self.emit(
+                    EventType::Error,
+                    json!({ "class": ErrorClass::VerificationFailed.as_str(),
+                            "detail": format!("foreach items binding '{binding}' is not a list"),
+                            "node": node_id }),
+                )?;
+                return self.finish_failed(&format!(
+                    "foreach '{node_id}': items binding '{binding}' resolved to non-list ({other})"
+                ));
+            }
+            None => {
+                self.emit(
+                    EventType::Error,
+                    json!({ "class": ErrorClass::VerificationFailed.as_str(),
+                            "detail": format!("foreach items binding '{binding}' is unbound"),
+                            "node": node_id }),
+                )?;
+                return self.finish_failed(&format!(
+                    "foreach '{node_id}': items binding '{binding}' is unbound"
+                ));
+            }
+        };
+
+        // Snapshot the items once, into the run artifact store (§4.4
+        // foreachCursors snapshotRef).
+        let mut buf = String::new();
+        for item in &items {
+            buf.push_str(&item.to_string());
+            buf.push('\n');
+        }
+        let file_name = format!("{node_id}.snapshot.jsonl");
+        let written =
+            artifacts::write_atomic(&self.run_dir.artifacts_dir(), &file_name, buf.as_bytes())
+                .map_err(|e| anyhow!("snapshot artifact for foreach '{node_id}': {e}"))?;
+        self.emit(
+            EventType::ArtifactWritten,
+            json!({ "path": written.path, "bytes": written.bytes, "sha256": written.sha256 }),
+        )?;
+        self.state.counters.artifact_bytes += written.bytes;
+
+        if items.is_empty() {
+            // onEmpty fires when the snapshot length is 0 (§4.6).
+            let t = node.on_empty.clone().expect("validated");
+            return self.transit("onEmpty", &t);
+        }
+
+        self.state.foreach_cursors.insert(
+            node_id.to_string(),
+            ForeachCursor {
+                index: 0,
+                snapshot_ref: format!("artifacts/{file_name}"),
+                session_items: 0,
+                results: Vec::new(),
+                phase: ForeachPhase::Next,
+            },
+        );
+        self.persist_snapshot()?;
+        Ok(())
+    }
+
+    /// Phase Next: finish, hit the item limit, or push the body frame.
+    fn foreach_next(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
+        let items = self.read_snapshot(node_id)?;
+        let (index, session_items) = {
+            let cur = &self.state.foreach_cursors[node_id];
+            (cur.index, cur.session_items)
+        };
+
+        if index >= items.len() {
+            // Aggregate per §4.6 and transition onComplete: each declared
+            // output name collects `body.outputs` across iterations.
+            let results = self.state.foreach_cursors[node_id].results.clone();
+            let frame = self.state.stack.last_mut().unwrap();
+            let mut outputs_obj = Map::new();
+            match &node.outputs {
+                Some(NodeOutputs::Foreach(spec)) => {
+                    for name in spec.keys() {
+                        outputs_obj.insert(name.clone(), Value::Array(results.clone()));
+                    }
+                }
+                _ => {
+                    outputs_obj.insert("results".to_string(), Value::Array(results));
+                }
+            }
+            let mut node_obj = Map::new();
+            node_obj.insert("outputs".to_string(), Value::Object(outputs_obj));
+            vars_obj_mut(frame).insert(node_id.to_string(), Value::Object(node_obj));
+            let t = node.on_complete.clone().expect("validated");
+            return self.transit("onComplete", &t);
+        }
+
+        if let Some(max) = node.max_items {
+            if session_items >= max {
+                let t = node.on_limit.clone().expect("validated");
+                return self.transit("onLimit", &t);
+            }
+        }
+
+        // Push the body frame (§4.4).
+        let item = items[index].clone();
+        {
+            let frame = self.state.stack.last_mut().unwrap();
+            vars_obj_mut(frame).insert(node.bind_as.clone().expect("validated"), item);
+        }
+        let body = node.body.clone().expect("validated");
+        let child_vars = self.resolve_inputs(&body.inputs)?;
+        let child_pin = self.subflow_pin(&body.flow_ref)?;
+        let child_entry = self
+            .plan
+            .find_plan(&body.flow_ref)
+            .expect("validated")
+            .entry_step
+            .clone();
+        self.emit(
+            EventType::Transition,
+            json!({ "plan": fp.id, "from": node_id, "to": format!("{}:{}", body.flow_ref, child_entry), "key": "body" }),
+        )?;
+        self.state.stack.push(Frame {
+            plan: child_pin,
+            node: child_entry.clone(),
+            vars: Value::Object(child_vars),
+            node_outputs: BTreeMap::new(),
+            counters: Counters {
+                started_at: now_ms(),
+                ..Counters::default()
+            },
+        });
+        self.node_retries = 0;
+        self.emit(
+            EventType::NodeEntered,
+            json!({ "plan": body.flow_ref, "node": child_entry }),
+        )?;
+        self.state.foreach_cursors.get_mut(node_id).unwrap().phase = ForeachPhase::InBody;
+        self.persist_snapshot()?;
+        Ok(())
+    }
+
+    /// Phase InBody: the body frame just popped; aggregate its outputs (§4.6),
+    /// then push the between frame if declared.
+    fn foreach_body_done(&mut self, node_id: &str, node: &Node) -> anyhow::Result<()> {
+        let returned = self.take_child_return(node_id)?;
+        let outputs = returned.outputs;
+        let outcome = returned.outcome;
+        let items = self.read_snapshot(node_id)?;
+        // `indexBy: itemKey` (§3) means: index each result entry by the value
+        // of the item's itemKey field. Any other literal names the item field
+        // directly.
+        let index_field = match &node.outputs {
+            Some(NodeOutputs::Foreach(spec)) => spec
+                .values()
+                .next()
+                .map(|c| c.index_by.clone())
+                .unwrap_or_else(|| "itemKey".to_string()),
+            _ => "itemKey".to_string(),
+        };
+        let item_key = node.item_key.clone().expect("validated");
+        let effective_field = if index_field == "itemKey" {
+            item_key.clone()
+        } else {
+            index_field
+        };
+        let (index, new_index_done) = {
+            let cur = &self.state.foreach_cursors[node_id];
+            (cur.index, cur.index + 1)
+        };
+        let key_value = items
+            .get(index)
+            .and_then(|it| it.get(&effective_field))
+            .cloned()
+            .unwrap_or(Value::Null);
+        {
+            let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+            let mut entry = Map::new();
+            entry.insert(effective_field, key_value);
+            entry.insert("outcome".to_string(), Value::String(outcome));
+            entry.insert("outputs".to_string(), serde_json::to_value(&outputs)?);
+            cur.results.push(Value::Object(entry));
+            cur.session_items += 1;
+        }
+
+        if let Some(between) = node.between.clone() {
+            // The between flow sees the foreach progress as
+            // `{{ <foreachId>.cursor }}` / `{{ <foreachId>.snapshot_len }}`.
+            let mut child_vars = Map::new();
+            child_vars.insert(
+                node_id.to_string(),
+                json!({ "cursor": new_index_done, "snapshot_len": items.len() }),
+            );
+            let child_pin = self.subflow_pin(&between.flow_ref)?;
+            let child_entry = self
+                .plan
+                .find_plan(&between.flow_ref)
+                .expect("validated")
+                .entry_step
+                .clone();
+            let (plan_id, _) = self.current_position()?;
+            self.emit(
+                EventType::Transition,
+                json!({ "plan": plan_id, "from": node_id, "to": format!("{}:{}", between.flow_ref, child_entry), "key": "between" }),
+            )?;
+            self.state.stack.push(Frame {
+                plan: child_pin,
+                node: child_entry.clone(),
+                vars: Value::Object(child_vars),
+                node_outputs: BTreeMap::new(),
+                counters: Counters {
+                    started_at: now_ms(),
+                    ..Counters::default()
+                },
+            });
+            self.node_retries = 0;
+            self.emit(
+                EventType::NodeEntered,
+                json!({ "plan": between.flow_ref, "node": child_entry }),
+            )?;
+            self.state.foreach_cursors.get_mut(node_id).unwrap().phase = ForeachPhase::InBetween;
+            self.persist_snapshot()?;
+            Ok(())
+        } else {
+            let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+            cur.index += 1;
+            cur.phase = ForeachPhase::Next;
+            self.persist_snapshot()
+        }
+    }
+
+    fn take_child_return(&mut self, node_id: &str) -> anyhow::Result<PendingReturn> {
+        let parent = self
+            .state
+            .stack
+            .last()
+            .ok_or_else(|| anyhow!("missing parent frame"))?;
+        let returned = self.state.pending_return.as_ref().ok_or_else(|| {
+            anyhow!("invalid recovery state: missing child return for '{node_id}'")
+        })?;
+        if returned.parent_plan != parent.plan || returned.parent_node != node_id {
+            return Err(anyhow!(
+                "invalid recovery state: child return belongs to another parent"
+            ));
+        }
+        Ok(self.state.pending_return.take().unwrap())
+    }
+
+    fn read_snapshot(&self, node_id: &str) -> anyhow::Result<Vec<Value>> {
+        let cur = self
+            .state
+            .foreach_cursors
+            .get(node_id)
+            .ok_or_else(|| anyhow!("no foreach cursor for '{node_id}'"))?;
+        let path = self.run_dir.path().join(&cur.snapshot_ref);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading foreach snapshot {}", path.display()))?;
+        let mut items = Vec::new();
+        for line in text.lines() {
+            if !line.trim().is_empty() {
+                items.push(serde_json::from_str(line)?);
+            }
+        }
+        Ok(items)
+    }
+
+    fn resolve_inputs(
+        &self,
+        inputs: &BTreeMap<String, FromBinding>,
+    ) -> anyhow::Result<Map<String, Value>> {
+        let vars = self
+            .state
+            .stack
+            .last()
+            .map(|f| f.vars.clone())
+            .unwrap_or(Value::Null);
+        let mut out = Map::new();
+        for (name, binding) in inputs {
+            let v = resolve_path(&vars, &binding.from).cloned().ok_or_else(|| {
+                anyhow!(
+                    "flowRef input '{name}': binding '{}' is unbound",
+                    binding.from
+                )
+            })?;
+            out.insert(name.clone(), v);
+        }
+        Ok(out)
+    }
+
+    fn subflow_pin(&self, flow_ref: &str) -> anyhow::Result<String> {
+        self.plan
+            .find_plan(flow_ref)
+            .map(|p| p.pin())
+            .ok_or_else(|| anyhow!("flowRef '{flow_ref}' is not loaded"))
+    }
+
+    // ------------------------------------------------------------------
+    // mutation journaling crash recovery (§6)
+
+    /// On resume, an intent without a result triggers the task's onUncertain
+    /// policy (§6).
+    fn handle_recovery(&mut self) -> anyhow::Result<()> {
+        // The snapshot watermark identifies committed node/cursor boundaries,
+        // even when this node is legitimately revisited. A completed mutation
+        // outside that prefix has no resumable generation state: do not replay.
+        if self.unsafe_completed_replay {
+            self.finish_failed("completed mutation beyond snapshot boundary: unsafe replay")
+        } else {
+            self.handle_uncertain()
+        }
+    }
+
+    fn handle_uncertain(&mut self) -> anyhow::Result<()> {
+        let pending = std::mem::take(&mut self.pending_uncertain);
+        for intent in pending {
+            let policy = self
+                .registry
+                .task(&intent.task_ref)
+                .and_then(|t| t.mutations.as_ref())
+                .map(|m| m.on_uncertain);
+            match policy {
+                Some(OnUncertain::RefetchState) => {
+                    // refetch-state, core side: mark the mutation skipped with a
+                    // log note so the intent is closed. Querying the server's
+                    // current state and deciding whether the write already
+                    // applied is the gateway's concern (§6 places serveFrom/
+                    // cache state there); core only guarantees the journal
+                    // closes and the task re-executes from its node boundary.
+                    self.emit(
+                        EventType::ToolCallResult,
+                        json!({
+                            "intentSeq": intent.seq,
+                            "server": intent.server,
+                            "tool": intent.tool,
+                            "skipped": true,
+                            "note": "onUncertain=refetch-state: intent without result on resume; mutation marked skipped, state refetch delegated to gateway",
+                        }),
+                    )?;
+                }
+                Some(OnUncertain::FailRun) | None => {
+                    let reason = format!(
+                        "uncertain mutation {}.{} (onUncertain=fail-run)",
+                        intent.server, intent.tool
+                    );
+                    self.emit(
+                        EventType::Error,
+                        json!({ "class": ErrorClass::McpError.as_str(), "detail": reason, "node": intent.node }),
+                    )?;
+                    return self.finish_failed(&reason);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn collect_pins(plan: &ExecutionPlan, out: &mut Vec<(String, String)>) {
+    out.push((plan.id.clone(), plan.sha256.clone()));
+    for sub in plan.subflows.values() {
+        collect_pins(sub, out);
+    }
+}
+
+pub fn plan_id_of_pin(pin: &str) -> String {
+    pin.split('@').next().unwrap_or(pin).to_string()
+}
+
+fn fp_node<'a>(root: &'a ExecutionPlan, plan_id: &str, node_id: &str) -> anyhow::Result<&'a Node> {
+    root.find_plan(plan_id)
+        .and_then(|p| p.nodes.get(node_id))
+        .ok_or_else(|| anyhow!("node '{node_id}' not found in plan '{plan_id}'"))
+}
+
+fn vars_obj_mut(frame: &mut Frame) -> &mut Map<String, Value> {
+    if !frame.vars.is_object() {
+        frame.vars = Value::Object(Map::new());
+    }
+    frame.vars.as_object_mut().unwrap()
+}
+
+/// Resolve a dotted binding path (`setup.outputs.items`, `item`) against vars.
+fn resolve_path<'a>(vars: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = vars;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
+}
+
+fn check_output_type(name: &str, v: &Value, ty: OutputType) -> Result<(), TaskFailure> {
+    let ok = match ty {
+        OutputType::Prose | OutputType::String => v.is_string(),
+        OutputType::List => v.is_array(),
+        OutputType::Object => v.is_object(),
+        OutputType::Number => v.is_number(),
+        OutputType::Bool => v.is_boolean(),
+    };
+    if !ok {
+        return Err(TaskFailure::new(
+            ErrorClass::VerificationFailed,
+            format!("output '{name}' has wrong type (expected {ty:?}, got {v})"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_artifact(format: &ArtifactFormat, bytes: &[u8]) -> anyhow::Result<Value> {
+    let text = String::from_utf8(bytes.to_vec()).context("artifact is not UTF-8")?;
+    match format {
+        ArtifactFormat::Jsonl => {
+            let mut items = Vec::new();
+            for line in text.lines() {
+                if !line.trim().is_empty() {
+                    items.push(serde_json::from_str::<Value>(line)?);
+                }
+            }
+            Ok(Value::Array(items))
+        }
+        ArtifactFormat::Json => Ok(serde_json::from_str(&text)?),
+    }
+}
+
+#[cfg(test)]
+mod recovery_regressions {
+    use super::*;
+    use trollm_mcp::{ToolCall, ToolDescriptor, ToolResult};
+    use trollm_models::MockModel;
+
+    struct NoGateway;
+    impl ToolGateway for NoGateway {
+        fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>> {
+            Ok(vec![])
+        }
+        fn validate_call(&self, _: &ToolCall) -> anyhow::Result<()> {
+            anyhow::bail!("no tools supported by NoGateway")
+        }
+        fn call(&mut self, _: &ToolCall) -> anyhow::Result<ToolResult> {
+            panic!("unexpected tool effect")
+        }
+    }
+
+    fn plan(id: &str, entry: &str, nodes: &str) -> ExecutionPlan {
+        ExecutionPlan::from_yaml_str(&format!(r#"
+schemaVersion: ledger.execution-plan.v1
+id: {id}
+version: 1
+sourceBaseline: {{ sha256: "{}" }}
+input: {{ promptTemplate: "" }}
+limits: {{ maxSteps: 50, maxReasonerCalls: 0, maxTokensTotal: 10000, timeoutS: 600, artifactMaxMb: 5 }}
+onLimit: abort
+models: {{ coder: {{ ctx: 8192 }} }}
+mcp: {{ servers: [], policies: {{}} }}
+entryStep: {entry}
+nodes:
+{nodes}
+"#, "0".repeat(64))).unwrap()
+    }
+
+    fn foreach_nodes(node: &str, body: &str, between: bool) -> String {
+        format!(
+            r#"  {node}:
+    kind: foreach
+    items: {{ from: items }}
+    itemKey: id
+    bindAs: item
+    enumeration: snapshot
+    ordering: source
+    body: {{ flowRef: {body}, inputs: {{ items: {{ from: item.children }} }} }}
+{}
+    outputs: {{ results: {{ collect: body.outputs, indexBy: itemKey }} }}
+    onEmpty: done
+    onComplete: done
+  done: {{ kind: end, outcome: succeeded }}"#,
+            if between {
+                "    between: { flowRef: between }"
+            } else {
+                ""
+            }
+        )
+    }
+
+    fn executor(plan: ExecutionPlan, run: RunDir) -> Executor<MockModel, NoGateway> {
+        Executor::new(
+            plan,
+            TaskRegistry::from_yaml_str(
+                "schemaVersion: ledger.task-registry.v1\ntasks: {}",
+                Path::new("."),
+            )
+            .unwrap(),
+            String::new(),
+            SlotMap::new().with("coder", MockModel::default()),
+            NoGateway,
+            run,
+        )
+        .unwrap()
+    }
+
+    fn advance_foreach(exec: &mut Executor<MockModel, NoGateway>, id: &str) {
+        let (pid, _) = exec.current_position().unwrap();
+        let node = fp_node(&exec.plan, &pid, id).unwrap().clone();
+        let fp = exec.frame_plan(&pid).unwrap();
+        exec.step_foreach(id, &node, &fp).unwrap();
+    }
+
+    #[test]
+    fn child_return_survives_pop_aggregation_and_between_snapshots() {
+        for boundary in 0..3 {
+            let mut root = plan("root", "each", &foreach_nodes("each", "child", true));
+            root.subflows.insert(
+                "child".into(),
+                plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+            );
+            root.subflows.insert(
+                "between".into(),
+                plan(
+                    "between",
+                    "done",
+                    "  done: { kind: end, outcome: succeeded }",
+                ),
+            );
+            let run =
+                RunDir::under(&std::env::temp_dir().join(format!("return-{}", Uuid::new_v4())));
+            let mut exec = executor(root.clone(), run.clone());
+            exec.state.stack[0].vars = json!({"items": [{"id": 7, "children": []}]});
+            advance_foreach(&mut exec, "each");
+            exec.state.stack.last_mut().unwrap().node_outputs.insert(
+                "work".into(),
+                BTreeMap::from([("note".into(), json!("durable"))]),
+            );
+            let fp = exec.frame_plan("child").unwrap();
+            let end = fp_node(&exec.plan, "child", "done").unwrap().clone();
+            exec.step_end("done", &end, &fp).unwrap(); // published pop boundary
+            if boundary > 0 {
+                advance_foreach(&mut exec, "each");
+            } // aggregation + between push
+            if boundary > 1 {
+                let fp = exec.frame_plan("between").unwrap();
+                let end = fp_node(&exec.plan, "between", "done").unwrap().clone();
+                exec.step_end("done", &end, &fp).unwrap(); // between pop
+            }
+            drop(exec);
+            let mut resumed = executor(root, run.clone());
+            assert_eq!(resumed.resume().unwrap(), RunStatus::Succeeded);
+            let results = &resumed.state.stack[0].vars["each"]["outputs"]["results"];
+            assert_eq!(results.as_array().unwrap().len(), 1);
+            assert_eq!(results[0]["outcome"], "succeeded");
+            assert_eq!(results[0]["outputs"]["work"]["note"], "durable");
+            drop(resumed);
+            std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn missing_child_return_is_invalid_recovery_state() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        root.subflows.insert(
+            "child".into(),
+            plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        let run =
+            RunDir::under(&std::env::temp_dir().join(format!("missing-return-{}", Uuid::new_v4())));
+        let mut exec = executor(root, run.clone());
+        exec.state.stack[0].vars = json!({"items": [{"id": 7, "children": []}]});
+        advance_foreach(&mut exec, "each");
+        exec.state.stack.pop();
+        assert!(exec
+            .foreach_body_done("each", &exec.plan.nodes["each"].clone())
+            .unwrap_err()
+            .to_string()
+            .contains("missing child return"));
+        drop(exec);
+        std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn nested_body_and_between_lookup_and_deepest_resume() {
+        let mut root = plan("root", "outer", &foreach_nodes("outer", "child", false));
+        let mut child = plan("child", "inner", &foreach_nodes("inner", "leaf", true));
+        child.subflows.insert(
+            "leaf".into(),
+            plan("leaf", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        child.subflows.insert(
+            "between".into(),
+            plan(
+                "between",
+                "done",
+                "  done: { kind: end, outcome: succeeded }",
+            ),
+        );
+        root.subflows.insert("child".into(), child);
+        let run = RunDir::under(&std::env::temp_dir().join(format!("nested-{}", Uuid::new_v4())));
+        let mut exec = executor(root.clone(), run.clone());
+        exec.state.stack[0].vars =
+            json!({"items": [{"id": 1, "children": [{"id": 2, "children": []}]}]});
+        advance_foreach(&mut exec, "outer");
+        advance_foreach(&mut exec, "inner");
+        assert_eq!(exec.state.stack.len(), 3);
+        drop(exec);
+        let mut resumed = executor(root.clone(), run.clone());
+        assert_eq!(resumed.resume().unwrap(), RunStatus::Succeeded);
+        assert_eq!(
+            resumed.state.foreach_cursors["inner"].results[0]["outcome"],
+            "succeeded"
+        );
+        root.subflows.insert(
+            "duplicate".into(),
+            plan("leaf", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        assert!(validate::validate_plan(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate plan id"));
+        drop(resumed);
+        std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn final_output_overrides_enforce_types_and_completeness() {
+        for (binding, complete, expected) in [
+            (
+                "items: { from: model }",
+                true,
+                RunStatus::Failed {
+                    reason: "failed".into(),
+                },
+            ),
+            (
+                "items: { fromArtifact: replacement, format: jsonl }",
+                false,
+                RunStatus::Failed {
+                    reason: "failed".into(),
+                },
+            ),
+            (
+                "items: { fromArtifact: replacement, format: jsonl }",
+                true,
+                RunStatus::Succeeded,
+            ),
+            (
+                "extra: { fromArtifact: replacement, format: jsonl }",
+                false,
+                RunStatus::Failed {
+                    reason: "failed".into(),
+                },
+            ),
+        ] {
+            let root = plan(
+                "outputs",
+                "work",
+                &format!(
+                    r#"  work:
+    kind: task
+    taskRef: work
+    outputs: {{ {binding} }}
+    onVerified: success
+    onError: {{ then: failure }}
+  success: {{ kind: end, outcome: succeeded }}
+  failure: {{ kind: end, outcome: failed }}"#
+                ),
+            );
+            let registry = TaskRegistry::from_yaml_str(
+                r#"schemaVersion: ledger.task-registry.v1
+ tasks:
+  work:
+    model: coder
+    prompt: work.md
+    tools: []
+    outputContract:
+      outputs:
+        items: { fromArtifact: original, format: jsonl, type: list }
+      allowNoop: true
+"#
+                .trim_start()
+                .replace("\n tasks:", "\ntasks:")
+                .as_str(),
+                Path::new("."),
+            )
+            .unwrap();
+            let base = std::env::temp_dir().join(format!("outputs-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&base).unwrap();
+            std::fs::write(base.join("work.md"), "work").unwrap();
+            let mut registry = registry;
+            registry.base_dir = Some(base.clone());
+            let run = RunDir::under(&base);
+            run.create_dirs().unwrap();
+            for (name, finished) in [("original", true), ("replacement", complete)] {
+                let art = artifacts::write_atomic(
+                    &run.artifacts_dir(),
+                    &format!("{name}.jsonl"),
+                    b"{\"id\":1}\n",
+                )
+                .unwrap();
+                artifacts::write_meta(
+                    &art.path,
+                    &artifacts::ArtifactMeta {
+                        fetched_at: 0,
+                        complete: finished,
+                    },
+                )
+                .unwrap();
+            }
+            let mut exec = Executor::new(
+                root,
+                registry,
+                String::new(),
+                SlotMap::new().with("coder", MockModel::scripted(["prose"])),
+                NoGateway,
+                run.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                exec.run_until_blocked().unwrap(),
+                expected,
+                "binding={binding}, complete={complete}"
+            );
+            if expected == RunStatus::Succeeded {
+                assert!(exec.state.stack[0].vars["work"]["outputs"]["items"].is_array());
+            }
+            drop(exec);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn executor_uses_models_grammar_from_actual_task_grants() {
+        let base = std::env::temp_dir().join(format!("grammar-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("work.md"), "work").unwrap();
+        let root = plan("grammar", "work", "  work: { kind: task, taskRef: work, onVerified: done }\n  done: { kind: end, outcome: succeeded }");
+        let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: work.md\n    tools: [tracker.read]\n    outputContract: { allowNoop: true }", &base).unwrap();
+        let mut exec = Executor::new(
+            root,
+            registry,
+            String::new(),
+            SlotMap::new().with("coder", MockModel::scripted(["prose"])),
+            NoGateway,
+            RunDir::under(&base),
+        )
+        .unwrap();
+        assert_eq!(exec.run_until_blocked().unwrap(), RunStatus::Succeeded);
+        let requests = exec.models.get_mut("coder").unwrap().recorded_requests();
+        assert_eq!(
+            requests[0].grammar_gbnf,
+            Some(trollm_models::fence::tool_call_grammar(&[(
+                "tracker".into(),
+                "read".into()
+            )]))
+        );
+        drop(exec);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}

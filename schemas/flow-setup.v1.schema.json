@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "trollm.flow-setup.v1",
+  "description": "Optional root-flow setup defaults. Thinking is disabled by the runtime. Overrides are resolved and persisted outside this descriptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "title",
+    "models"
+  ],
+  "properties": {
+    "format": {
+      "const": "trollm.flow-setup.v1"
+    },
+    "title": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "input": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "pattern": "\\S",
+          "default": "Input"
+        },
+        "placeholder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "label"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$"
+              },
+              "label": {
+                "type": "string",
+                "pattern": "\\S"
+              },
+              "placeholder": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "required": {
+                "type": "boolean",
+                "default": false
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "url"
+                ],
+                "default": "text"
+              },
+              "maxLength": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384,
+                "default": 4096
+              }
+            }
+          }
+        },
+        "toolArguments": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[^.]+\\..+$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "fromInput": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$"
+                },
+                "default": {}
+              },
+              "fixed": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$"
+                },
+                "additionalProperties": true,
+                "default": {}
+              },
+              "forbid": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$"
+                },
+                "default": []
+              },
+              "require": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$"
+                },
+                "default": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "url",
+          "sha256",
+          "sizeBytes",
+          "ctx"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https://[^/@\\s?#]+(?:[/?#][^\\s]*)?$",
+            "format": "uri"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          },
+          "ctx": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0.2
+          },
+          "topP": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 0.95
+          }
+        }
+      }
+    },
+    "connections": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url",
+          "auth"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "pattern": "^https://[^/@\\s?#]+(?:[/?#][^\\s]*)?$",
+            "format": "uri"
+          },
+          "auth": {
+            "enum": [
+              "bearer",
+              "oauth"
+            ]
+          },
+          "issuerUrl": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^https://[^/@\\s?#]+(?:[/?#][^\\s]*)?$",
+                "format": "uri"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

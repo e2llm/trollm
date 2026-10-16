@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">trollm</string>
+    <string name="channel_runs">Runs</string>
+    <string name="notification_run_active">trollm run in progress</string>
+</resources>

@@ -1,0 +1,42 @@
+[package]
+name = "trollm-uniffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Thin UniFFI wrapper over trollm-core/models/mcp
+# (docs/ARCHITECTURE-ANDROID.md §9). Marshalling only — no orchestration
+# logic lives here. Proc-macro UniFFI mode (no UDL file, no build.rs);
+# Kotlin bindings are generated with `uniffi-bindgen` from the built library
+# (see apps/android/README.md).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trollm-core = { path = "../trollm-core" }
+trollm-models = { path = "../trollm-models" }
+trollm-mcp = { path = "../trollm-mcp" }
+uniffi = "0.28"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+url = "2"
+
+# `llama` wires the real LlamaCppSlot model runtime (Android / Linux builds
+# with GGUF weights present). `stub` wires a deterministic in-process model
+# used by tests and by UI development builds without weights. With neither
+# feature the crate compiles but `start_run` fails cleanly.
+# `bindgen-cli` only builds the local `uniffi-bindgen` shim binary (UniFFI
+# 0.28 ships no installable CLI crate; the shim calls uniffi_bindgen_main).
+[features]
+llama = ["trollm-models/llama"]
+stub = []
+bindgen-cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]

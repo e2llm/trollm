@@ -1,0 +1,11 @@
+# Gradle / Android Studio
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.cxx/
+
+# Rust cross-build output (produced by the buildRustAndroid task)
+app/src/main/jniLibs/

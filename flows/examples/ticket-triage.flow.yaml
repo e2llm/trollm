@@ -1,0 +1,79 @@
+schemaVersion: ledger.execution-plan.v1
+id: ticket-triage
+version: 1
+sourceBaseline:
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"  # set at publish time
+
+input:
+  promptTemplate: |
+    Triage request from user: {{ user_input }}
+
+limits:
+  maxSteps: 200
+  maxReasonerCalls: 50
+  maxTokensTotal: 400000
+  timeoutS: 1800
+  artifactMaxMb: 50
+onLimit: respond_partial
+
+models:
+  coder: { ctx: 8192 }
+  reasoner: { ctx: 4096 }
+
+mcp:
+  servers:
+    - { name: tracker, url: "https://mcp.example.invalid" }   # placeholder host; app-side config overrides
+  policies:
+    tracker.list_issues:
+      class: read
+      cache: { key: [query], ttlS: 900 }
+      paginate: { param: cursor, deliver: first_page, backgroundFetch: all }
+      shape: { strip: [body], toFile: true }
+    tracker.get_issue:
+      class: read
+      serveFrom: { fetchedBy: tracker.list_issues, match: id }
+      onMiss: fetch_live
+    tracker.close_issue:  { class: mutation, passthrough: true, timeoutS: 10 }
+    tracker.update_issue: { class: mutation, passthrough: true, timeoutS: 10 }
+    tracker.add_comment:  { class: mutation, passthrough: true, timeoutS: 10 }
+
+entryStep: setup
+nodes:
+  setup:
+    kind: task
+    taskRef: prepare-worklist
+    onVerified: each
+    onError: { retry: 2, backoffS: 5, then: fail-run }
+
+  each:
+    kind: foreach
+    items: { from: setup.outputs.items }
+    itemKey: id
+    bindAs: item
+    enumeration: snapshot
+    ordering: source
+    maxItems: 500
+    onLimit: { status: paused, reason: item-limit }
+    body:
+      flowRef: process-item
+      inputs: { item: { from: item } }
+    between:
+      flowRef: return-to-list
+    outputs:
+      results: { collect: body.outputs, indexBy: itemKey }
+    onEmpty: finish-empty
+    onComplete: finish
+
+  finish:
+    kind: task
+    taskRef: finalize-batch
+    onVerified: done
+    onError: { retry: 1, backoffS: 2, then: fail-run }
+
+  finish-empty:
+    kind: task
+    taskRef: finalize-empty-batch
+    onVerified: done
+
+  done:     { kind: end, outcome: succeeded }
+  fail-run: { kind: end, outcome: failed }

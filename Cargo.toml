@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/trollm-core",
+    "crates/trollm-models",
+    "crates/trollm-mcp",
+    "crates/trollm-uniffi",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"

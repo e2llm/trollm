@@ -1,0 +1,35 @@
+# Directly authored, tool-free v1 example; no browser recording is required.
+schemaVersion: ledger.execution-plan.v1
+id: text-summary
+version: 1
+setup:
+  path: setup.json
+  sha256: "638d0387f21ae46d66b8474e5314250e9cc96aa6037bf98bf92ff9616a2f9670"
+
+input:
+  promptTemplate: "Summarize the supplied text: {{ user_input }}"
+
+limits:
+  maxSteps: 2
+  maxReasonerCalls: 0
+  maxTokensTotal: 4096
+  timeoutS: 60
+  artifactMaxMb: 1
+onLimit: abort
+
+models:
+  coder: { ctx: 4096 }
+
+mcp:
+  servers: []
+  policies: {}
+
+entryStep: summarize
+nodes:
+  summarize:
+    kind: task
+    taskRef: summarize-text
+    onVerified: done
+  done:
+    kind: end
+    outcome: succeeded

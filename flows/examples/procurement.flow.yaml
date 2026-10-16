@@ -1,0 +1,70 @@
+schemaVersion: ledger.execution-plan.v1
+id: procurement
+version: 1
+sourceBaseline:
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+input:
+  promptTemplate: |
+    Purchase request from user: {{ user_input }}
+
+limits:
+  maxSteps: 150
+  maxReasonerCalls: 30
+  maxTokensTotal: 300000
+  timeoutS: 1800
+  artifactMaxMb: 50
+onLimit: respond_partial
+
+models:
+  coder: { ctx: 8192 }
+  reasoner: { ctx: 4096 }
+
+mcp:
+  servers:
+    - { name: catalog, url: "https://mcp.example.invalid" }
+  policies:
+    catalog.search_products:
+      class: read
+      cache: { key: [query], ttlS: 1800 }
+      paginate: { param: cursor, deliver: first_page, backgroundFetch: all }
+      shape: { strip: [description_html, images], toFile: true }
+    catalog.get_product:
+      class: read
+      serveFrom: { fetchedBy: catalog.search_products, match: sku }
+      onMiss: fetch_live
+    catalog.add_to_cart:  { class: mutation, passthrough: true, timeoutS: 10 }
+    catalog.place_order:  { class: mutation, passthrough: true, timeoutS: 15 }
+
+entryStep: search
+nodes:
+  search:
+    kind: task
+    taskRef: catalog-search            # same skeleton as ticket-triage; registry: procurement.tasks.yaml
+    onVerified: each
+    onError: { retry: 2, backoffS: 5, then: fail-run }
+
+  each:
+    kind: foreach
+    items: { from: search.outputs.items }
+    itemKey: sku
+    bindAs: item
+    enumeration: snapshot
+    ordering: source
+    maxItems: 200
+    onLimit: { status: paused, reason: item-limit }
+    body: { flowRef: evaluate-product, inputs: { item: { from: item } } }
+    outputs: { results: { collect: body.outputs, indexBy: itemKey } }
+    onEmpty: finish-empty
+    onComplete: finish
+
+  finish:
+    kind: task
+    taskRef: finalize-order
+    onVerified: done
+  finish-empty:
+    kind: task
+    taskRef: finalize-empty
+    onVerified: done
+  done:     { kind: end, outcome: succeeded }
+  fail-run: { kind: end, outcome: failed }
