@@ -1,0 +1,21 @@
+{
+  "connections": {},
+  "description": "Write a short summary of supplied text using a local model. No tools or account are required.",
+  "format": "trollm.flow-setup.v1",
+  "input": {
+    "label": "Short text to summarize",
+    "placeholder": "Paste a short passage here."
+  },
+  "models": {
+    "coder": {
+      "ctx": 4096,
+      "label": "Qwen3.5-0.8B Q4_K_M",
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+      "sizeBytes": 532517120,
+      "temperature": 0.2,
+      "topP": 0.95,
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/ed4bdcdbcce9f095bb49e8759176c64e45fa294b/Qwen3.5-0.8B-Q4_K_M.gguf"
+    }
+  },
+  "title": "Summarize text"
+}

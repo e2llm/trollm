@@ -1,0 +1,60 @@
+// Export the selected JVM dependency graph without an additional Gradle plugin.
+// Invoke with --init-script ../../ci/android-sbom.gradle :app:exportAndroidSbom.
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.findProject(':app')
+    if (app == null) throw new GradleException('Android SBOM requires :app')
+    def buildType = app.findProperty('trollm.androidBuildType') ?: 'debug'
+    if (!(buildType in ['debug', 'release'])) throw new GradleException('Invalid Android build type')
+    def runtimeConfiguration = "${buildType}RuntimeClasspath".toString()
+    def applicationRef = "trollm-android-${buildType}".toString()
+    app.tasks.register('exportAndroidSbom') {
+        def destination = app.layout.buildDirectory.file('reports/android-sbom.json')
+        outputs.file(destination)
+        // Always resolve the same configuration used by the selected APK build.
+        outputs.upToDateWhen { false }
+        doLast {
+            def output = destination.get().asFile
+            output.delete() // Never retain an old inventory after a failed resolution.
+            def configuration = app.configurations.getByName(runtimeConfiguration)
+            def result = configuration.incoming.resolutionResult
+            def unresolved = result.allDependencies.findAll { it instanceof UnresolvedDependencyResult }
+            if (!unresolved.empty) {
+                throw new GradleException('Unresolved Android dependencies: ' +
+                    unresolved.collect { it.attempted.displayName }.sort().join(', '))
+            }
+            def root = result.root
+            def encode = { value -> java.net.URLEncoder.encode(value, 'UTF-8').replace('+', '%20') }
+            def reference = { id ->
+                if (id == root.id) return applicationRef
+                if (!(id instanceof ModuleComponentIdentifier)) {
+                    throw new GradleException('Unsupported non-Maven Android dependency: ' + id.displayName)
+                }
+                "pkg:maven/${encode(id.group)}/${encode(id.module)}@${encode(id.version)}".toString()
+            }
+            def components = result.allComponents.findAll { it.id != root.id }.collect { component ->
+                def id = component.id
+                def purl = reference(id)
+                [type: 'library', 'bom-ref': purl, group: id.group, name: id.module,
+                 version: id.version, purl: purl]
+            }.sort { it.purl }
+            if (components.empty) throw new GradleException('Android runtime SBOM has no Maven components')
+            def dependencies = result.allComponents.collect { component ->
+                [ref: reference(component.id), dependsOn: component.dependencies.collect {
+                    reference(it.selected.id)
+                }.unique().sort()]
+            }.sort { it.ref }
+            def bom = [bomFormat: 'CycloneDX', specVersion: '1.5', version: 1,
+                metadata: [component: [type: 'application', 'bom-ref': applicationRef,
+                    name: applicationRef], properties: [
+                    [name: 'trollm:configuration', value: runtimeConfiguration]]],
+                components: components, dependencies: dependencies]
+            output.parentFile.mkdirs()
+            output.setText(JsonOutput.prettyPrint(JsonOutput.toJson(bom)) + '\n', 'UTF-8')
+            logger.lifecycle("Android SBOM: ${components.size()} resolved Maven components -> ${output}")
+        }
+    }
+}

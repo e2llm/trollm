@@ -1,0 +1,55 @@
+schemaVersion: ledger.execution-plan.v1
+id: process-item
+version: 1
+sourceBaseline:
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+input:
+  promptTemplate: ""        # inputs arrive bound from parent foreach: { item }
+
+limits:
+  maxSteps: 16
+  maxReasonerCalls: 1
+  maxTokensTotal: 30000
+  timeoutS: 180
+  artifactMaxMb: 10
+onLimit: abort
+
+models:
+  coder: { ctx: 8192 }
+  reasoner: { ctx: 4096 }
+
+mcp:
+  servers:
+    - { name: tracker, url: "https://mcp.example.invalid" }
+  policies: {}              # inherits parent run's gateway policies
+
+entryStep: enrich
+nodes:
+  enrich:
+    kind: task
+    taskRef: enrich-ticket
+    onVerified: decide
+    onError: { retry: 1, backoffS: 3, then: skip-item }
+
+  decide:
+    kind: task
+    taskRef: consult-steering
+    onVerified: act
+    onError: { retry: 0, then: skip-item }
+
+  act:
+    kind: task
+    taskRef: execute-decision
+    onVerified: end-item
+    onError: { retry: 0, then: fail-item }
+
+  skip-item:
+    kind: end
+    outcome: skipped
+  fail-item:
+    kind: end
+    outcome: failed
+  end-item:
+    kind: end
+    outcome: succeeded

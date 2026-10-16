@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Platform HTTPS, including model downloads, accepts CAs explicitly installed
+     by the user or device administrator alongside Android's system roots.
+     This does not modify the system trust store or configure Rust MCP TLS. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

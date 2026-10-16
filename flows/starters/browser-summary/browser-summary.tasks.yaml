@@ -1,0 +1,30 @@
+schemaVersion: ledger.task-registry.v1
+id: browser-summary
+version: 1
+tasks:
+  open-page:
+    model: coder
+    prompt: prompts/open-page.md
+    tools: [e2llm.act]
+    loop: { maxSteps: 2 }
+    mutations: { idempotency: intent-log, onUncertain: fail-run }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }
+  read-page:
+    model: coder
+    prompt: prompts/read-page.md
+    tools: [e2llm.list_tabs, e2llm.read_page]
+    loop: { maxSteps: 3 }
+    outputContract:
+      outputs:
+        page: { fromArtifact: page, format: json, type: object }
+      requireArtifactComplete: [page]
+  summarize-page:
+    model: reasoner
+    prompt: prompts/summarize-page.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }

@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trollm.dev/schemas/execution-plan.v1.schema.json",
+  "title": "ledger.execution-plan.v1",
+  "description": "Trollm execution plan (docs/ARCHITECTURE-ANDROID.md §3). All routing is authoring-time; node kinds and transition keys are closed sets.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "version",
+    "limits",
+    "onLimit",
+    "models",
+    "entryStep",
+    "nodes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "ledger.execution-plan.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 0 },
+    "sourceBaseline": {
+      "description": "Optional recorded-source provenance. Omit for directly authored flows; explicit null is not valid.",
+      "type": "object",
+      "required": ["sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "setup": {
+      "description": "Optional root-only bundle-relative JSON setup descriptor; its hash is pinned by these raw flow bytes.",
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!.*[\\\\:\\x00])(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "promptTemplate": {
+          "type": "string",
+          "description": "May reference {{ user_input }}."
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "description": "Run-level budgets, ledger-enforced.",
+      "required": ["maxSteps", "maxReasonerCalls", "maxTokensTotal", "timeoutS", "artifactMaxMb"],
+      "additionalProperties": false,
+      "properties": {
+        "maxSteps": { "type": "integer", "minimum": 0 },
+        "maxReasonerCalls": { "type": "integer", "minimum": 0 },
+        "maxTokensTotal": { "type": "integer", "minimum": 0 },
+        "timeoutS": { "type": "integer", "minimum": 0 },
+        "artifactMaxMb": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "onLimit": {
+      "description": "Terminal run-level budget policy.",
+      "enum": ["abort", "respond_partial"]
+    },
+    "models": {
+      "type": "object",
+      "description": "SLOTS ONLY. Weights are pinned by the app, never by the plan.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["ctx"],
+        "additionalProperties": false,
+        "properties": {
+          "ctx": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "url"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "url": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "policies": {
+          "type": "object",
+          "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Opaque to this schema."
+        }
+      }
+    },
+    "entryStep": { "type": "string", "minLength": 1 },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/node" }
+    }
+  },
+  "$defs": {
+    "transition": {
+      "description": "§4.2: a node id, or an inline {status, reason}. No expressions, no conditions on model output.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["status"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "enum": ["paused", "failed"] },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "fromBinding": {
+      "type": "object",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "minLength": 1 }
+      }
+    },
+    "flowRef": {
+      "type": "object",
+      "required": ["flowRef"],
+      "additionalProperties": false,
+      "properties": {
+        "flowRef": { "type": "string", "minLength": 1 },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/fromBinding" }
+        }
+      }
+    },
+    "onError": {
+      "description": "§4.5. Default if absent: retry 0, then {status: failed, reason: <error-class>}.",
+      "type": "object",
+      "required": ["then"],
+      "additionalProperties": false,
+      "properties": {
+        "retry": { "type": "integer", "minimum": 0 },
+        "backoffS": { "type": "integer", "minimum": 0 },
+        "then": { "$ref": "#/$defs/transition" }
+      }
+    },
+    "nodeOutputBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["fromArtifact"],
+          "additionalProperties": false,
+          "properties": {
+            "fromArtifact": { "type": "string", "minLength": 1 },
+            "format": { "enum": ["jsonl", "json"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["from"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "const": "model" }
+          }
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["task", "foreach", "end"] }
+      },
+      "oneOf": [
+        {
+          "description": "kind: task",
+          "type": "object",
+          "required": ["kind", "taskRef", "onVerified"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "task" },
+            "taskRef": { "type": "string", "minLength": 1 },
+            "outputs": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/nodeOutputBinding" }
+            },
+            "verify": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "artifactComplete": { "type": "string", "minLength": 1 }
+              }
+            },
+            "onVerified": { "$ref": "#/$defs/transition" },
+            "onError": { "$ref": "#/$defs/onError" }
+          }
+        },
+        {
+          "description": "kind: foreach",
+          "type": "object",
+          "required": [
+            "kind",
+            "items",
+            "itemKey",
+            "bindAs",
+            "enumeration",
+            "ordering",
+            "body",
+            "outputs",
+            "onEmpty",
+            "onComplete"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "foreach" },
+            "items": { "$ref": "#/$defs/fromBinding" },
+            "itemKey": { "type": "string", "minLength": 1 },
+            "bindAs": { "type": "string", "minLength": 1 },
+            "enumeration": { "const": "snapshot" },
+            "ordering": { "const": "source" },
+            "maxItems": { "type": "integer", "minimum": 1 },
+            "onLimit": { "$ref": "#/$defs/transition" },
+            "body": { "$ref": "#/$defs/flowRef" },
+            "between": { "$ref": "#/$defs/flowRef" },
+            "outputs": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": ["collect", "indexBy"],
+                "additionalProperties": false,
+                "properties": {
+                  "collect": { "const": "body.outputs" },
+                  "indexBy": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "onEmpty": { "$ref": "#/$defs/transition" },
+            "onComplete": { "$ref": "#/$defs/transition" }
+          }
+        },
+        {
+          "description": "kind: end",
+          "type": "object",
+          "required": ["kind", "outcome"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "end" },
+            "outcome": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Subflows also use 'skipped'. Root frames route only 'succeeded' and 'failed'; anything else is the runtime unhandled-transition failure (§4.2)."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

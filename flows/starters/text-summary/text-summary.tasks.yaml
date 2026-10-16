@@ -1,0 +1,13 @@
+schemaVersion: ledger.task-registry.v1
+id: text-summary
+version: 1
+
+tasks:
+  summarize-text:
+    model: coder
+    prompt: prompts/minimal-summary.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }

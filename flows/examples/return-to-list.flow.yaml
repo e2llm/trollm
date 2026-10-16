@@ -1,0 +1,33 @@
+schemaVersion: ledger.execution-plan.v1
+id: return-to-list
+version: 1
+sourceBaseline:
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+input:
+  promptTemplate: ""
+
+limits:
+  maxSteps: 2
+  maxReasonerCalls: 0
+  maxTokensTotal: 2000
+  timeoutS: 15
+  artifactMaxMb: 1
+onLimit: abort
+
+models:
+  coder: { ctx: 8192 }
+  reasoner: { ctx: 4096 }
+
+mcp:
+  servers: []
+  policies: {}
+
+entryStep: checkpoint
+nodes:
+  checkpoint:
+    kind: task
+    taskRef: progress-checkpoint
+    onVerified: end-ok
+    onError: { retry: 0, then: end-ok }     # checkpoint failure must never kill the batch
+  end-ok: { kind: end, outcome: succeeded }

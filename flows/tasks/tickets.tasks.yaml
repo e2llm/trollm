@@ -1,0 +1,72 @@
+schemaVersion: ledger.task-registry.v1
+id: tickets
+version: 1
+sourceBaseline:
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+tasks:
+  prepare-worklist:
+    model: coder
+    prompt: prompts/prepare-worklist.md
+    tools: [tracker.list_issues]
+    loop: { maxSteps: 8 }
+    outputContract:
+      outputs:
+        items: { fromArtifact: tracker.list_issues.latest, format: jsonl, type: list }
+      requireArtifactComplete: [tracker.list_issues.latest]
+
+  enrich-ticket:
+    model: coder
+    prompt: prompts/enrich-ticket.md
+    tools: [tracker.get_issue]
+    loop: { maxSteps: 4 }
+    outputContract:
+      outputs:
+        summary: { from: model, type: prose }
+
+  consult-steering:
+    model: reasoner
+    prompt: prompts/consult-steering.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        advice: { from: model, type: prose }
+
+  execute-decision:
+    model: coder
+    prompt: prompts/execute-decision.md
+    tools: [tracker.close_issue, tracker.update_issue, tracker.add_comment]
+    loop: { maxSteps: 4 }
+    mutations: { idempotency: intent-log, onUncertain: refetch-state }
+    outputContract:
+      outputs:
+        outcome: { from: model, type: prose }
+      allowNoop: true
+
+  progress-checkpoint:
+    model: coder
+    prompt: prompts/progress-checkpoint.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs: {}
+      allowNoop: true
+
+  finalize-batch:
+    model: coder
+    prompt: prompts/finalize-batch.md
+    tools: []
+    loop: { maxSteps: 2 }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }
+
+  finalize-empty-batch:
+    model: coder
+    prompt: prompts/finalize-empty-batch.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }
