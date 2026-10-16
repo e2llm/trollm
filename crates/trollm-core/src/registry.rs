@@ -34,6 +34,12 @@ pub struct TaskDef {
     /// Tool allowlist, entries `<server>.<tool>`; may be empty (§5).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// What completes this task: model prose, or one successful tool result.
+    #[serde(default)]
+    pub completion: TaskCompletion,
+    /// Owned arguments resolved from prior node outputs or other frame variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_arguments: Option<BTreeMap<String, TaskToolArguments>>,
     /// Coder-loop bound; omit for single-shot (§5).
     #[serde(rename = "loop")]
     #[serde(default)]
@@ -42,6 +48,80 @@ pub struct TaskDef {
     pub mutations: Option<Mutations>,
     #[serde(default)]
     pub output_contract: OutputContract,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskCompletion {
+    #[default]
+    ModelProse,
+    ToolResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskToolArguments {
+    pub from_vars: BTreeMap<String, String>,
+}
+
+fn identifier(value: &str) -> bool {
+    let mut chars = value.bytes();
+    matches!(chars.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
+}
+
+impl TaskDef {
+    fn validate_completion(&self) -> anyhow::Result<()> {
+        if let Some(bindings) = &self.tool_arguments {
+            anyhow::ensure!(
+                self.completion == TaskCompletion::ToolResult,
+                "toolArguments requires tool-result completion"
+            );
+            anyhow::ensure!(!bindings.is_empty(), "toolArguments must not be empty");
+            for (tool, rule) in bindings {
+                anyhow::ensure!(
+                    tool.split('.').count() == 2
+                        && tool.split('.').all(identifier)
+                        && self.tools.contains(tool),
+                    "toolArguments must name a granted server.tool"
+                );
+                anyhow::ensure!(!rule.from_vars.is_empty(), "fromVars must not be empty");
+                for (argument, path) in &rule.from_vars {
+                    anyhow::ensure!(
+                        identifier(argument) && path.split('.').all(identifier),
+                        "fromVars requires argument names and dotted variable identifiers"
+                    );
+                }
+            }
+        }
+        if self.completion == TaskCompletion::ToolResult {
+            anyhow::ensure!(
+                !self.tools.is_empty(),
+                "tool-result completion requires tools"
+            );
+            anyhow::ensure!(
+                self.loop_spec
+                    .as_ref()
+                    .map(|spec| spec.max_steps)
+                    .unwrap_or(1)
+                    == 1,
+                "tool-result completion requires loop.maxSteps = 1"
+            );
+            anyhow::ensure!(
+                !self.output_contract.allow_noop,
+                "tool-result completion cannot allowNoop"
+            );
+            anyhow::ensure!(
+                !self
+                    .output_contract
+                    .outputs
+                    .values()
+                    .any(|output| matches!(output, OutputSpec::FromModel { .. })),
+                "tool-result completion cannot declare model outputs"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +213,7 @@ impl TaskRegistry {
         let mut reg: TaskRegistry = serde_yaml::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("parsing registry {}: {e}", path.display()))?;
         reg.base_dir = path.parent().map(|p| p.to_path_buf());
+        reg.validate_completion()?;
         Ok(reg)
     }
 
@@ -141,11 +222,20 @@ impl TaskRegistry {
     pub fn from_yaml_str(yaml: &str, base_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let mut reg: TaskRegistry = serde_yaml::from_str(yaml)?;
         reg.base_dir = Some(base_dir.into());
+        reg.validate_completion()?;
         Ok(reg)
     }
 
     pub fn task(&self, task_ref: &str) -> Option<&TaskDef> {
         self.tasks.get(task_ref)
+    }
+
+    pub(crate) fn validate_completion(&self) -> anyhow::Result<()> {
+        for (name, task) in &self.tasks {
+            task.validate_completion()
+                .map_err(|error| anyhow::anyhow!("task '{name}': {error}"))?;
+        }
+        Ok(())
     }
 
     /// Load and return the raw prompt template text for a task.

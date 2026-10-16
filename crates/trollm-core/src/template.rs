@@ -44,7 +44,7 @@ pub fn render(template: &str, vars: &Value, user_input: &str) -> Result<String, 
 }
 
 /// Resolve a dotted path (`item.id`, `each.outputs.results`) against the vars object.
-fn lookup<'a>(path: &str, vars: &'a Value) -> Option<&'a Value> {
+pub(crate) fn lookup<'a>(path: &str, vars: &'a Value) -> Option<&'a Value> {
     let mut cur = vars;
     for part in path.split('.') {
         cur = cur.get(part)?;

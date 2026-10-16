@@ -112,21 +112,20 @@ fn result_artifact_rejects_unsafe_reserved_and_incompatible_policies() {
             "{name}"
         );
     }
-    for extra in [
-        json!({"class": "mutation"}),
-        json!({"paginate": {"param": "cursor", "deliver": "first_page", "backgroundFetch": "all"}}),
-    ] {
-        let mut policy = extra;
+    for class in ["read", "mutation"] {
+        let mut policy = json!({"class": class, "paginate": {"param": "cursor", "deliver": "first_page", "backgroundFetch": "all"}});
         policy["resultArtifact"] = json!("page");
         assert!(
             PolicySet::from_yaml_str(&json!({"tracker.summarize": policy}).to_string()).is_err()
         );
     }
     for name in ["page", "Page_2-raw", &"a".repeat(64)] {
-        assert!(PolicySet::from_yaml_str(
-            &json!({"tracker.summarize": {"resultArtifact": name}}).to_string()
-        )
-        .is_ok());
+        for class in ["read", "mutation"] {
+            assert!(PolicySet::from_yaml_str(
+                &json!({"tracker.summarize": {"class": class, "resultArtifact": name}}).to_string()
+            )
+            .is_ok());
+        }
     }
     // Public policy fields cannot bypass validation at gateway construction.
     let mut policies =
@@ -571,6 +570,165 @@ fn mutation_passthrough_never_touches_cache() {
     gw.call(&call("tracker", "close_issue", json!({ "id": 3 })))
         .unwrap();
     assert_eq!(server.count("call:close_issue"), 2);
+}
+
+fn mutation_result_policies(shape: bool) -> PolicySet {
+    let mut policy = json!({
+        "class":"mutation", "passthrough":true,
+        "retry":{"attempts":3,"backoffS":0},
+        "cache":{"key":["id"],"ttlS":900},
+        "resultArtifact":"page",
+        "resultValidation":{"maxBytes":256,"schema":{
+            "type":"object","required":["result","tabId"],
+            "properties":{"result":{"const":"opened"},"tabId":{"type":"integer","minimum":1}}
+        }}
+    });
+    if shape {
+        policy["shape"] = json!({"strip":["body"],"toFile":true});
+    }
+    PolicySet::from_yaml_str(&json!({"tracker.close_issue":policy}).to_string()).unwrap()
+}
+
+#[test]
+fn mutation_result_artifact_preserves_valid_payload_before_shape_without_cache_or_retry() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("mutation-result");
+    let payload = json!({"result":"opened","tabId":178,"body":"exact unshaped result"});
+    server
+        .tool_payloads
+        .lock()
+        .unwrap()
+        .insert("close_issue".into(), payload.clone());
+    let (events, sink) = collecting_sink();
+    let mut gw = gateway(&server, mutation_result_policies(true), &dirs, Some(sink));
+    let c = call("tracker", "close_issue", json!({"id":3}));
+    let result = gw.call(&c).unwrap();
+    assert_eq!(result.provenance, Provenance::Live);
+    assert_eq!(result.content_for_model["tabId"], 178);
+    assert!(result.content_for_model["body"].is_object());
+    assert_eq!(read_result_artifact(&dirs), payload);
+    assert!(result
+        .artifacts
+        .contains(&dirs.path().join("artifacts/page.json")));
+    assert_eq!(server.count("call:close_issue"), 1);
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["mutation_passthrough", "live_call", "shaped_to_file"]
+    );
+    // A second explicit caller request is another effect, never a cache hit.
+    let again = gw.call(&c).unwrap();
+    assert_eq!(again.provenance, Provenance::Live);
+    assert_eq!(server.count("call:close_issue"), 2);
+    let hash = trollm_mcp::CacheStore::hash_args(&c.args, Some(&["id".into()]), None);
+    assert!(gw
+        .cache()
+        .fresh_entry("tracker", "close_issue", &hash)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn malformed_or_oversized_mutation_results_are_not_published_or_retried() {
+    for payload in [
+        json!({"result":"opened","tabId":"private-invalid-id"}),
+        json!({"result":"opened","tabId":178,"body":"x".repeat(300)}),
+    ] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("mutation-result-rejected");
+        server
+            .tool_payloads
+            .lock()
+            .unwrap()
+            .insert("close_issue".into(), payload.clone());
+        let (events, sink) = collecting_sink();
+        let mut gw = gateway(&server, mutation_result_policies(true), &dirs, Some(sink));
+        let error = format!(
+            "{:#}",
+            gw.call(&call("tracker", "close_issue", json!({"id":3})))
+                .unwrap_err()
+        );
+        assert!(error.contains("tool result"), "{error}");
+        assert!(!error.contains("private-invalid-id"), "{error}");
+        if payload.get("body").is_some() {
+            assert!(error.contains("serialized size limit"), "{error}");
+        }
+        assert_eq!(server.count("call:close_issue"), 1);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["mutation_passthrough", "live_call"]
+        );
+        assert!(!dirs.path().join("artifacts/page.json").exists());
+        assert!(!dirs.path().join("artifacts/tracker").exists());
+        let meta: Value = serde_json::from_slice(
+            &std::fs::read(dirs.path().join("artifacts/page.json.meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["complete"], false);
+    }
+}
+
+#[test]
+fn invalid_mutation_replacement_marks_prior_artifact_incomplete_without_replay() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("mutation-result-replacement");
+    let good = json!({"result":"opened","tabId":178});
+    server
+        .tool_payloads
+        .lock()
+        .unwrap()
+        .insert("close_issue".into(), good.clone());
+    let mut gw = gateway(&server, mutation_result_policies(false), &dirs, None);
+    let c = call("tracker", "close_issue", json!({"id":3}));
+    gw.call(&c).unwrap();
+    assert_eq!(read_result_artifact(&dirs), good);
+    server
+        .tool_payloads
+        .lock()
+        .unwrap()
+        .insert("close_issue".into(), json!({"result":"opened"}));
+    assert!(gw.call(&c).is_err());
+    assert_eq!(server.count("call:close_issue"), 2);
+    let path = dirs.path().join("artifacts/page.json");
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(path.with_file_name("page.json.meta.json")).unwrap())
+            .unwrap();
+    assert_eq!(meta["complete"], false);
+    let prior: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(prior, good);
+}
+
+#[test]
+fn mutation_publication_or_shape_failure_after_effect_does_not_replay() {
+    for block_shape in [false, true] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("mutation-result-write-failure");
+        server.tool_payloads.lock().unwrap().insert(
+            "close_issue".into(),
+            json!({"result":"opened","tabId":178,"body":"exact result"}),
+        );
+        let (events, sink) = collecting_sink();
+        let mut gw = gateway(&server, mutation_result_policies(true), &dirs, Some(sink));
+        let artifact_dir = dirs.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        if block_shape {
+            std::fs::write(artifact_dir.join("tracker"), b"blocked").unwrap();
+        } else {
+            std::fs::create_dir(artifact_dir.join("page.json")).unwrap();
+        }
+        assert!(gw
+            .call(&call("tracker", "close_issue", json!({"id":3})))
+            .is_err());
+        assert_eq!(server.count("call:close_issue"), 1);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["mutation_passthrough", "live_call"]
+        );
+        let meta: Value = serde_json::from_slice(
+            &std::fs::read(artifact_dir.join("page.json.meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["complete"], false);
+    }
 }
 
 #[test]
@@ -1094,7 +1252,7 @@ fn validation_policies(extra: Value, max_bytes: usize, schema: Value) -> PolicyS
 }
 
 #[test]
-fn result_validation_policy_is_bounded_read_only_and_strict_inside_its_object() {
+fn result_validation_policy_is_bounded_non_paginated_and_strict_inside_its_object() {
     for invalid in [
         json!({"maxBytes":0,"schema":true}),
         json!({"maxBytes":262145,"schema":true}),
@@ -1109,16 +1267,17 @@ fn result_validation_policy_is_bounded_read_only_and_strict_inside_its_object() 
         )
         .is_err());
     }
-    for extra in [
-        json!({"class":"mutation"}),
-        json!({"paginate":{"param":"cursor","deliver":"first_page","backgroundFetch":"all"}}),
-    ] {
-        let mut policy = extra;
+    for class in ["read", "mutation"] {
+        let mut policy = json!({"class":class,"paginate":{"param":"cursor","deliver":"first_page","backgroundFetch":"all"}});
         policy["resultValidation"] = json!({"maxBytes":64,"schema":true});
         assert!(
             PolicySet::from_yaml_str(&json!({"tracker.get_issue":policy}).to_string()).is_err()
         );
     }
+    assert!(PolicySet::from_yaml_str(
+        r#"tracker.close_issue: {class: mutation, resultValidation: {maxBytes: 64, schema: true}}"#
+    )
+    .is_ok());
     // Existing policy compatibility is unchanged outside the new strict object.
     assert!(PolicySet::from_yaml_str(r#"tracker.get_issue: {existingUnknown: true, resultValidation: {maxBytes: 262144, schema: true}}"#).is_ok());
 }

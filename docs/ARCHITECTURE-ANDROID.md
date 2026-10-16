@@ -228,10 +228,42 @@ tasks:
       allowNoop: true
 ```
 
-Task loop semantics (coder-loop): render prompt → generate → if output contains a tool-call
+Task loop semantics (`completion: model-prose`, the default): render prompt → generate → if output contains a tool-call
 fence → gateway executes → append result → repeat → else the text is the node's prose output
 → verify contract → transition. Loop exit without prose after `maxSteps` =
 `verification-failed`.
+
+Tasks may opt into `completion: tool-result` to finish an attempt after one
+successful tool call, without a follow-up model generation. This mode requires a
+nonempty tool allowlist, `loop.maxSteps: 1` (or an omitted loop),
+`outputContract.allowNoop: false` (the default), and no model-derived outputs in
+the contract or plan-node bindings. Invalid configuration fails before generation.
+The single generation must contain exactly one parsed tool-call fence; zero or
+multiple calls fail before any mutation intent or tool dispatch. The normal
+allowlist, argument/schema validation, mutation journal, gateway error handling,
+artifact accounting and output/completeness verification still apply. A successful
+gateway return is necessary but does not bypass artifact verification. Authored
+`onError` handling, including retries, remains unchanged: this is one call per
+attempt, not an at-most-once guarantee across retries or recovery.
+
+Single-call tasks may bind arguments to typed values already in their frame:
+
+```yaml
+toolArguments:
+  e2llm.read_page:
+    fromVars:
+      tabId: open_page.outputs.opened.tabId
+```
+
+This optional task field requires `completion: tool-result` and names only
+granted tools. `fromVars` uses dotted variable paths, without expressions or
+filters. All sources resolve before generation; missing values fail the task.
+After parsing and checking the tool grant, the executor supplies an omitted bound
+argument, accepts an identical model-supplied value, and rejects a conflicting
+value before schema validation, mutation journaling or dispatch. JSON types are
+preserved. The model can therefore request an operation without choosing an ID
+already established by an earlier tool result. Setup's separate `fromInput`
+constraints still apply to the effective arguments.
 
 ## 5.1 Tool-call fence (the ONLY structured model output)
 
@@ -242,8 +274,10 @@ fence → gateway executes → append result → repeat → else the text is the
 - GBNF grammar constrains fence content to a JSON object with `server`, `tool`, `args`
   (object). Arg-level correctness is validated post-hoc against the tool's input schema;
   invalid args = `tool-call-parse` error (counts against retry/limits).
-- Everything outside fences is prose. Multiple fences per generation allowed; executed in
-  order. A generation with no fence terminates the loop with prose output.
+- Everything outside fences is prose. In the default `model-prose` mode, multiple
+  fences per generation are allowed and executed in order; a generation with no
+  fence terminates the loop with prose output. `tool-result` mode instead requires
+  exactly one fence and does not bind surrounding prose as output.
 
 After the exact task grant check, `ToolGateway::validate_call` checks arguments
 before the executor records any mutation intent. `McpGateway::call` also checks
@@ -611,28 +645,40 @@ Pre-executor failures persist in `worker-failure.json`, and successful executor
 reconstruction clears an obsolete failure. The UI defaults to one live run;
 the core still supports explicit concurrent callers.
 
-An ordinary read policy can set `resultArtifact: page` to publish the parsed
-tool JSON as `page.json` before any shaping. Names match
-`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; mutations and paginated policies cannot use this
+An ordinary read or mutation policy can set `resultArtifact: page` to publish
+the parsed tool JSON as `page.json` before any shaping. Names match
+`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; paginated policies cannot use this
 field. Live, cache and `serveFrom` paths share publication behavior. A successful
 replacement is atomic and gains a complete sidecar; a local publication failure
 does not mark new data complete. Existing `fromArtifact: page, format: json`
 bindings let the next task consume the actual result independently of model
 prose. Task errors still follow their authored error transitions.
 
-Ordinary read policies may also declare `resultValidation: {maxBytes: 16384,
-schema: {...}}`. Both fields are required; `maxBytes` accepts 1–262144 serialized
+Ordinary read and mutation policies may also declare
+`resultValidation: {maxBytes: 16384, schema: {...}}`. Both fields are required;
+`maxBytes` accepts 1–262144 serialized
 JSON bytes. The gateway compiles the schema once with the existing bounded,
 offline validator and checks the original payload before shaping, caching or
 marking a named artifact complete. Live, cache-hit and `serveFrom` results use
 the same check. Rejected replacements invalidate the old artifact's completeness
-marker; a retry can fetch a corrected upstream response. Mutations and paginated
-policies cannot use this option. Errors identify the failing schema path without
+marker; a read retry can fetch a corrected upstream response. Paginated policies
+cannot use this option. Each mutation gateway call dispatches once: validation,
+publication or shaping failure after its remote effect propagates without a
+gateway retry. Existing journal/recovery and authored error policies still apply.
+Errors identify the failing schema path without
 including result values. A browser flow can therefore require nonempty content,
 positive content-node counts and `stats.truncated: false`. This depends on the
 server reporting truncation accurately. The byte cap is not a model-token
 guarantee; the native model separately checks its rendered prompt against its
 configured context before prefill.
+
+Browser starter v4 saves the validated `act(open)` result as `opened.json`, then
+binds its positive integer `tabId` directly into `read_page`. It does not list
+other tabs or ask a model to match URLs. Reads stay in the just-opened tab,
+including ordinary redirects; the final answer uses the actual returned source
+URL. The complete page artifact, still capped at 8192 serialized bytes, goes to
+the tool-free reasoner. This runtime contract requires a new APK; importing the
+v4 bundle into an older runtime does not establish support for its bindings.
 
 The Android OAuth client uses AppAuth with browser PKCE, encrypted state and
 endpoint-bound local grant IDs. Refresh updates use the same grant identity so

@@ -11,12 +11,14 @@ Tokens and OAuth state use Keystore-backed encrypted storage by MCP server name.
 The source includes advanced per-flow overrides and bundled **Summarize text**
 and **Browse and summarize** starters, installed idempotently before flow listing. Flows
 appear above retained history, using their setup titles when available.
-Integrated setup/download and live browser OAuth/refresh still need device
-acceptance; these are implementation claims, not a ready consumer journey.
+Ordinary unattended download admission and live browser OAuth/refresh still need
+device acceptance; this is not a ready consumer journey.
 
 The browser starter asks for a browser name/ID, a page URL and an optional
 question. Runtime argument checks keep calls on that browser and bind the open
-action to the supplied URL. Qwen opens and reads the page; Gemma receives its
+action to the supplied URL. The runtime supplies the exact newly opened tab ID
+to reading; it rejects a conflicting model ID before dispatch and does not list
+other tabs. Qwen opens and reads the page; Gemma receives its
 exact artifact and has no tools. Empty, truncated or oversized results fail.
 
 Edit starters under `flows/starters/`, update their setup pins if needed, and run
@@ -25,11 +27,19 @@ Python helper tests verify that both committed assets match their sources.
 Setup pins Hugging Face revision URLs, sizes and SHA-256 hashes for the GGUF
 weights; no vision/audio projectors are downloaded.
 
-Developer-run API 36 x86_64 probes completed Qwen3.5-0.8B generation,
-authenticated live MCP and result counting on 2026-10-14. Result accuracy and
-repeatability remain under validation. Active background/return and completed-run
-cold restart passed; in-flight lifecycle, paired-model execution and
-physical-phone acceptance remain open. This is not consumer release validation.
+On an 8 GiB API 36 x86_64 emulator, the native text-summary starter and
+Qwen/Gemma tool-free handoff passed. Browser v4 also passed with manual Bearer
+authentication: one example.org open call, reading bound to its returned tab ID,
+a complete nontruncated page and an accurate visible summary from tool-free
+Gemma. Qwen took 31.711 seconds to open and 22.295 seconds to read; Gemma took
+103.351 seconds to answer. Executor time was 159.364 seconds; total time was
+about 3 minutes 12 seconds including model loading. Native Pause/Resume, Cancel
+and background/return also passed. Upgrade checks preserved all prior history.
+
+OAuth provider login/refresh, setup interruption and active-process recovery, ordinary unattended
+download admission, physical arm64 acceptance and signed-release updates remain
+open. Deployment of the upstream truncation-reporting fix is unverified. This
+is not consumer release validation.
 
 ## Local prerequisites
 
@@ -106,8 +116,11 @@ effective model paths/settings are saved per run for cold resume.
 Legacy `models/<slot>.gguf` plus matching `models/<slot>.gguf.sha256` remain
 supported. Manual Bearer tokens are captured per gateway. OAuth runs retain the
 same grant and endpoint through refresh and cold resume; logout or a replacement
-login cannot silently switch their account. Live sign-in/refresh acceptance,
-Gemma paired execution, browser-starter device acceptance and release delivery remain open.
+login cannot silently switch their account. Live sign-in/refresh, setup interruption
+and active-process recovery, unattended downloads, physical arm64 acceptance and signed-release
+updates remain open. The browser starter passed on the emulator with manual
+Bearer setup. The tool-free Qwen/Gemma pair and advanced model overrides also
+passed on an 8 GiB emulator.
 Never put credentials in a flow bundle.
 
 ## Android-installed corporate CAs
@@ -163,6 +176,6 @@ not establish authenticated MCP acceptance until the actual request succeeds.
 
 See [current architecture](../../docs/ARCHITECTURE-ANDROID.md),
 [product direction](../../docs/PRODUCT-PLAN.md) and
-[contributor checks](../../CONTRIBUTING.md). Real-model generation, live MCP,
-lifecycle behavior and final arm64 phone acceptance need evidence from the
+[contributor checks](../../CONTRIBUTING.md). Emulator passes do not replace
+interruption/recovery, signed-release update or physical arm64 evidence from the
 actual installed APK.

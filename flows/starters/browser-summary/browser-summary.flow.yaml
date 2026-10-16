@@ -1,12 +1,12 @@
 schemaVersion: ledger.execution-plan.v1
 id: browser-summary
-version: 1
+version: 4
 setup:
   path: setup.json
-  sha256: 3aef634120c8c2a03df960db984eec47316a143e192969958ac17a334089d12e
+  sha256: 7ce6031b458969760322973f17260299dc8dc3beee0128a4a1bb2d777efc72a4
 input:
   promptTemplate: "{{ user_input }}"
-limits: { maxSteps: 6, maxReasonerCalls: 1, maxTokensTotal: 24576, timeoutS: 600, artifactMaxMb: 1 }
+limits: { maxSteps: 3, maxReasonerCalls: 1, maxTokensTotal: 24576, timeoutS: 600, artifactMaxMb: 1 }
 onLimit: abort
 models:
   coder: { ctx: 4096 }
@@ -15,27 +15,20 @@ mcp:
   servers:
     - { name: e2llm, url: "https://mcp.e2llm.com/mcp" }
   policies:
-    e2llm.act: { class: mutation, passthrough: true, timeoutS: 30 }
-    e2llm.list_tabs:
-      class: read
+    e2llm.act:
+      class: mutation
+      passthrough: true
       timeoutS: 30
+      resultArtifact: opened
       resultValidation:
-        maxBytes: 8192
+        maxBytes: 4096
         schema:
           type: object
-          required: [tabs]
+          required: [result, tabId, url]
           properties:
-            tabs:
-              type: array
-              minItems: 1
-              items:
-                type: object
-                required: [id, url, title]
-                properties:
-                  id: { type: integer }
-                  url: { type: string }
-                  title: { type: string }
-                  browser: { type: string }
+            result: { const: opened }
+            tabId: { type: integer, minimum: 1 }
+            url: { type: string, minLength: 1 }
     e2llm.read_page:
       class: read
       timeoutS: 30

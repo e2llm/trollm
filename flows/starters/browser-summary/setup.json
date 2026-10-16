@@ -50,11 +50,6 @@
           "target": "url"
         }
       },
-      "e2llm.list_tabs": {
-        "fromInput": {
-          "browser": "browser"
-        }
-      },
       "e2llm.read_page": {
         "forbid": [
           "sessionId",
