@@ -5,36 +5,38 @@ models, MCP tools and persistent working data. Explicit execution plans control
 steps, budgets, artifacts and recovery. The name draws on TRM and RLM, with “o”
 for open.
 
-This repository is a **source-only prototype preview**. There is no ready
-consumer APK or supported end-to-end quickstart here. The source includes a
-Rust workspace and Kotlin/Compose app with bundle installation, run history and
-execution controls, model download/verification and browser OAuth client code.
-The source includes per-flow advanced overrides and bundled text-summary and
-browser-summary starters, installed before listing flows above run history.
-Stub execution is useful for development; it does not prove real-model inference
-or live MCP behavior.
+This repository is a **source-only prototype preview**, with a Rust workspace
+and Kotlin/Compose app. No ready consumer APK or supported end-to-end quickstart
+is provided. Android 13/API 33+ and S21-class phones or newer are the target.
+The intended text-only models are Qwen3.5-0.8B Q4_K_M and Gemma 4 E2B IT Q4_K_M.
 
-The hardware target is Android 13/API 33+, on S21-class devices or newer.
-**Intended models:** Qwen3.5-0.8B and Gemma 4 E2B Q4, text-only. Pinned setup
-descriptors provide model identities/settings and connection defaults; the
-text-summary starter uses Qwen alone. Both pinned models completed a coherent,
-tool-free handoff on an API 36 x86_64 emulator with 8 GiB RAM, and the native
-text-summary starter passed. Browser v4 also completed a live example.org run
-with manual Bearer authentication: one open call, reading bound to its returned
-tab ID, a complete nontruncated page and an accurate visible Gemma summary.
-Executor time was about 159 seconds; total time was about 3 minutes 12 seconds
-including model loading. Native Pause/Resume, Cancel and background/return also
-passed. Model download and verification completed after operator intervention
-on the emulator's partially validated network. Ordinary unattended downloads,
-OAuth provider login/refresh, setup interruption and active-process recovery, physical arm64 acceptance
-and signed-release updates remain open. Deployment of an upstream
-truncation-reporting fix remains unverified. Release APK delivery and public
-publication are unfinished.
+Source includes verified model preparation, advanced per-flow settings, browser
+OAuth with grant-bound refresh, manual Bearer setup, and bundled **Summarize
+text** and **Browse and summarize** starters. Native models load on first slot
+use after checksum verification. Status shows verification/loading/generation;
+lost workers require explicit Resume. Safety/review fixes, interruptible retries,
+durable cancellation, readable sorted history and typed bridge errors are also
+present. These changes still need a matching combined native APK/device check.
+
+Earlier APKs completed native paired inference and the browser v4 example.org
+flow on an 8 GiB API 36 x86_64 emulator using manual Bearer authentication.
+Pause/Resume, Cancel, background/return and debug process-loss recovery passed
+within their recorded scope. An older signed APK (`0.1.0 / code 2`) installed by
+ordinary update, preserved history and completed a new paired run, leaving 46
+runs. Queue persistence, Cancel/Retry and free-space preflight also passed;
+ordinary download transfer/recovery and real OAuth provider login/refresh remain
+unaccepted. That APK is held in an older private `v0.1.0-rc.1` draft.
+
+The current build candidate is **0.1.0-rc.2 / code 3**, not a published or accepted
+release. Remaining acceptance includes ordinary download transfer/recovery, real
+provider login/refresh, an updated combined native APK and an S21-class arm64
+phone. Stub/scripted checks establish their own behavior, not real inference or
+live-service acceptance. See [versioning](docs/VERSIONING.md).
 
 The intended experience is install → sign in → choose a supplied flow → provide
 starting input → watch progress and results. A connected browser may run on a PC
-while inference runs on the phone. Remote tools still require their services
-and network access; on-device inference does not make every flow offline.
+while inference runs on the phone. Remote tools require their services and
+network access; on-device inference does not make every flow offline.
 
 - [Product direction and current limits](docs/PRODUCT-PLAN.md)
 - [Android development](apps/android/README.md)
@@ -48,7 +50,5 @@ and network access; on-device inference does not make every flow offline.
 `apps/android/` contains the app. `flows/` and `schemas/` contain current v1
 references; examples using scripted dependencies are development fixtures.
 
-GitLab remains the authority for development and validation. This private GitHub
-repository now holds curated source with separate history and is the intended
-future public destination. It provides source, without a GitHub build/release
-workflow or downloadable release claims. Reports may be filed in its Issues.
+This curated source tree has separate history from the development repository.
+Use this GitHub repository's Issues for reports and feature ideas.

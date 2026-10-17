@@ -47,6 +47,15 @@ fn validate_plan_into(plan: &ExecutionPlan, problems: &mut Vec<String>) {
 fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
     let at = |node: &str| format!("plan '{}' node '{node}'", plan.id);
 
+    // Policies are opaque in the plan model, but their authored keys are closed
+    // by the gateway's typed model, including when a custom gateway is supplied.
+    let policies = serde_yaml::to_value(&plan.mcp.policies)
+        .map_err(anyhow::Error::from)
+        .and_then(|value| trollm_mcp::PolicySet::from_yaml_value(&value));
+    if let Err(error) = policies {
+        problems.push(format!("plan '{}': {error:#}", plan.id));
+    }
+
     if let Some(setup) = &plan.setup {
         if let Err(problem) = setup.validate() {
             problems.push(problem);
@@ -282,9 +291,17 @@ pub fn validate_with_registry(
             registry.schema_version
         ));
     }
-    check_plan_against_registry(plan, registry, &mut problems);
-    for sub in plan.subflows.values() {
-        check_plan_against_registry(sub, registry, &mut problems);
+    fn visit(plan: &ExecutionPlan, registry: &TaskRegistry, problems: &mut Vec<String>) {
+        check_plan_against_registry(plan, registry, problems);
+        for sub in plan.subflows.values() {
+            visit(sub, registry, problems);
+        }
+    }
+    visit(plan, registry, &mut problems);
+    if let Err(error) =
+        validate_mutation_safety(plan, registry, |_, _| trollm_mcp::policy::ToolClass::Read)
+    {
+        problems.push(error.to_string());
     }
     if !problems.is_empty() {
         return Err(ValidationError::new(
@@ -330,5 +347,112 @@ fn check_plan_against_registry(
         if let Err(e) = registry.prompt_template(task) {
             problems.push(format!("task '{task_ref}': {e}"));
         }
+    }
+}
+
+/// Root policies govern the shared run gateway, including nested subflows.
+/// Also consult the actual gateway so composition overrides cannot downgrade
+/// mutation safety. Intent-log tasks conservatively disallow automatic retry,
+/// including those whose current grants are read-only.
+pub(crate) fn validate_mutation_safety(
+    root: &ExecutionPlan,
+    registry: &TaskRegistry,
+    class: impl Fn(&str, &str) -> trollm_mcp::policy::ToolClass,
+) -> Result<(), ValidationError> {
+    fn visit(
+        plan: &ExecutionPlan,
+        root: &ExecutionPlan,
+        registry: &TaskRegistry,
+        class: &impl Fn(&str, &str) -> trollm_mcp::policy::ToolClass,
+        problems: &mut Vec<String>,
+    ) {
+        for (name, node) in &plan.nodes {
+            if node.kind != NodeKind::Task {
+                continue;
+            }
+            let Some(task) = node.task_ref.as_deref().and_then(|id| registry.task(id)) else {
+                continue;
+            };
+            let journaled = task
+                .mutations
+                .as_ref()
+                .is_some_and(|m| m.idempotency == crate::registry::Idempotency::IntentLog);
+            let mutation = task.tools.iter().any(|tool| {
+                let Some((server, tool_name)) = tool.split_once('.') else {
+                    return false;
+                };
+                root.mcp
+                    .policies
+                    .get(tool)
+                    .and_then(|p| p.get("class"))
+                    .and_then(|c| c.as_str())
+                    == Some("mutation")
+                    || class(server, tool_name) == trollm_mcp::policy::ToolClass::Mutation
+            });
+            if mutation && !journaled {
+                problems.push(format!("plan '{}' node '{name}': task granted mutation tools requires mutations.idempotency=intent-log", plan.id));
+            }
+            if (mutation || journaled) && node.on_error.as_ref().is_some_and(|p| p.retry > 0) {
+                problems.push(format!("plan '{}' node '{name}': mutation or intent-log task cannot use automatic onError.retry", plan.id));
+            }
+        }
+        for child in plan.subflows.values() {
+            visit(child, root, registry, class, problems);
+        }
+    }
+    let mut problems = Vec::new();
+    visit(root, root, registry, &class, &mut problems);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            format!("plan '{}' mutation safety", root.id),
+            problems,
+        ))
+    }
+}
+
+/// New authoring/import provenance check. Keep this separate from runtime
+/// validation: installed v1 plans may retain historical string identifiers.
+/// Provenance is optional metadata, never a content pin or trust anchor.
+pub fn validate_authoring_provenance(
+    plan: &ExecutionPlan,
+    registry: &TaskRegistry,
+) -> Result<(), ValidationError> {
+    fn check(source: &Option<SourceBaseline>, at: String, problems: &mut Vec<String>) {
+        if let Some(source) = source {
+            if source.sha256.len() != 64
+                || !source
+                    .sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                problems.push(format!(
+                    "{at}: sourceBaseline.sha256 must be 64 lowercase hexadecimal characters"
+                ));
+            }
+        }
+    }
+    fn visit(plan: &ExecutionPlan, problems: &mut Vec<String>) {
+        check(
+            &plan.source_baseline,
+            format!("plan '{}'", plan.id),
+            problems,
+        );
+        for child in plan.subflows.values() {
+            visit(child, problems);
+        }
+    }
+    let mut problems = Vec::new();
+    visit(plan, &mut problems);
+    check(
+        &registry.source_baseline,
+        "task registry".into(),
+        &mut problems,
+    );
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::new("new authoring provenance", problems))
     }
 }

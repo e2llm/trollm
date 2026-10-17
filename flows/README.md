@@ -3,6 +3,14 @@
 These files illustrate the execution-plan and task-registry contracts. They are
 source inputs, rather than prebuilt bundles ready to install in the Android app.
 
+In the current v1 runtime, `input.promptTemplate` is reserved metadata and is not
+rendered. Task-registry `prompt` files supply model instructions and can reference
+`{{ user_input }}`. Existing example values are retained for compatibility; editing
+them alone does not change the generated prompt. MCP transport `retry` accepts
+only its single-attempt defaults (`attempts: 1, backoffS: 0`); other values reject
+at validation. `backgroundFetch: all` performs a bounded synchronous fetch before
+returning a page, not a detached background download.
+
 For the planned direct-authoring experience, see the
 [LLM authoring guide](../docs/FLOW-AUTHORING.md) and
 [flow contract direction](../docs/FLOW-CONTRACT-DIRECTION.md). They describe

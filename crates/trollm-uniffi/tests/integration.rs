@@ -58,7 +58,7 @@ const GOOD_FLOW: &str = r#"
 schemaVersion: ledger.execution-plan.v1
 id: hello-flow
 version: 1
-sourceBaseline: { sha256: "deadbeef" }
+sourceBaseline: { sha256: "0000000000000000000000000000000000000000000000000000000000000000" }
 input:
   promptTemplate: "Greet {{ user_input }}"
 limits: { maxSteps: 4, maxReasonerCalls: 2, maxTokensTotal: 10000, timeoutS: 60, artifactMaxMb: 10 }
@@ -99,7 +99,7 @@ const PAUSING_FLOW: &str = r#"
 schemaVersion: ledger.execution-plan.v1
 id: pause-flow
 version: 1
-sourceBaseline: { sha256: "deadbeef" }
+sourceBaseline: { sha256: "0000000000000000000000000000000000000000000000000000000000000000" }
 input:
   promptTemplate: "Work on {{ user_input }}"
 limits: { maxSteps: 4, maxReasonerCalls: 2, maxTokensTotal: 10000, timeoutS: 60, artifactMaxMb: 10 }
@@ -137,7 +137,7 @@ const WRONG_NAME_FLOW: &str = r#"
 schemaVersion: ledger.execution-plan.v1
 id: actual-id
 version: 1
-sourceBaseline: { sha256: "deadbeef" }
+sourceBaseline: { sha256: "0000000000000000000000000000000000000000000000000000000000000000" }
 limits: { maxSteps: 4, maxReasonerCalls: 2, maxTokensTotal: 10000, timeoutS: 60, artifactMaxMb: 10 }
 onLimit: abort
 models:
@@ -248,7 +248,7 @@ fn install_verifies_and_lists() {
 fn install_bundle_without_source_baseline_preserves_raw_identity() {
     let base = temp_base("optional-provenance");
     let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
-    let flow = GOOD_FLOW.replace("sourceBaseline: { sha256: \"deadbeef\" }\n", "");
+    let flow = GOOD_FLOW.replace("sourceBaseline: { sha256: \"0000000000000000000000000000000000000000000000000000000000000000\" }\n", "");
     let files: Vec<(&str, &[u8])> = vec![
         ("hello-flow.flow.yaml", flow.as_bytes()),
         ("hello.tasks.yaml", GOOD_REGISTRY.as_bytes()),
@@ -394,25 +394,66 @@ fn startup_rechecks_installed_prompt_integrity() {
 #[cfg(feature = "llama")]
 #[test]
 fn llama_selection_without_weights_fails_asynchronously_even_with_stub_enabled() {
-    let base = temp_base("llama-absent-weights");
-    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
-    let flow = rt.install_flow_bundle(good_bundle()).unwrap();
-    let id = rt.start_run(flow.flow_sha256, "hello".into()).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match rt.poll_status(id.clone()).unwrap().phase {
-            trollm_uniffi::RunPhaseApi::Failed { reason } => {
-                assert!(reason.contains("no sha256 manifest"), "{reason}");
-                break;
-            }
-            trollm_uniffi::RunPhaseApi::Running => {}
-            other => panic!("unexpected phase: {other:?}"),
+    for manifest_present in [false, true] {
+        let base = temp_base("llama-absent-weights");
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let flow = rt.install_flow_bundle(good_bundle()).unwrap();
+        if manifest_present {
+            // Reach first-use verification, beyond legacy metadata capture. A
+            // mistaken stub selection would succeed instead of rejecting the
+            // absent native weights. No GGUF or native context is needed.
+            let models = base.join("trollm/models");
+            std::fs::create_dir_all(&models).unwrap();
+            std::fs::write(models.join("coder.gguf.sha256"), "0".repeat(64)).unwrap();
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker did not fail without weights"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let id = rt.start_run(flow.flow_sha256, "hello".into()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match rt.poll_status(id.clone()).unwrap().phase {
+                trollm_uniffi::RunPhaseApi::Failed { reason } => {
+                    if manifest_present {
+                        assert_eq!(reason, "model-error");
+                        let events = rt.tail_events(id.clone(), 0).unwrap();
+                        assert!(
+                            events.iter().any(|event| {
+                                if event.event_type != "error" {
+                                    return false;
+                                }
+                                let fields: serde_json::Value =
+                                    serde_json::from_str(&event.json).unwrap();
+                                fields["class"] == "model-error"
+                                    && fields["node"] == "greet"
+                                    && fields["detail"].as_str().is_some_and(|detail| {
+                                        detail.contains("no weights for model slot 'coder'")
+                                            && detail.contains("coder.gguf")
+                                    })
+                            }),
+                            "missing first-use weights diagnostic: {events:?}"
+                        );
+                        assert!(
+                            events.iter().all(|event| {
+                                event.event_type != "model_call"
+                                    && event.event_type != "tool_call_intent"
+                            }),
+                            "unexpected inference or tool dispatch: {events:?}"
+                        );
+                    } else {
+                        assert!(
+                            reason.contains("no SHA-256 manifest for model slot 'coder'"),
+                            "{reason}"
+                        );
+                    }
+                    break;
+                }
+                trollm_uniffi::RunPhaseApi::Running => {}
+                other => panic!("unexpected phase: {other:?}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not fail without weights"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -757,6 +798,111 @@ mod lifecycle {
     }
 
     #[test]
+    fn startup_event_polling_recognizes_run_before_executor_initialization() {
+        use std::sync::{mpsc, Mutex};
+        use trollm_uniffi::{ConnectionAuth, TokenProvider, TrollmError};
+
+        struct StartupProvider {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl TokenProvider for StartupProvider {
+            fn bearer_token(&self, _: String, _: String) -> Option<String> {
+                None
+            }
+
+            fn connection_auth(&self, _: String, _: String) -> ConnectionAuth {
+                let _ = self.entered.send(());
+                // Bound the wait even if the test unwinds before releasing us.
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+                ConnectionAuth::Unavailable
+            }
+        }
+        struct ReleaseOnDrop(mpsc::Sender<()>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let base = temp_base("startup-event-polling");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release = ReleaseOnDrop(release_tx);
+        let rt = TrollmRuntime::new(
+            base.to_string_lossy().to_string(),
+            Some(Box::new(StartupProvider {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            })),
+        )
+        .unwrap();
+        let flow_text = GOOD_FLOW.replace(
+            "mcp: { servers: [], policies: {} }",
+            "mcp: { servers: [{ name: browser, url: 'https://example.org/mcp' }], policies: {} }",
+        );
+        let files = vec![
+            ("hello-flow.flow.yaml", flow_text.as_bytes()),
+            ("hello.tasks.yaml", GOOD_REGISTRY.as_bytes()),
+            ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+        ];
+        let manifest = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+        let mut entries = files;
+        entries.push(("manifest.json", &manifest));
+        let flow = rt.install_flow_bundle(build_tar(&entries)).unwrap();
+        let id = rt.start_run(flow.flow_sha256, "x".into()).unwrap();
+
+        // The callback blocks worker startup before model construction and
+        // Executor::new, so this is not a timing race with a fast stub run.
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let run_dir = base.join("trollm/runs").join(&id);
+        assert!(!run_dir.join("state.snapshot.json").exists());
+        assert_eq!(
+            std::fs::metadata(run_dir.join("events.jsonl"))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(rt.tail_events(id.clone(), 0).unwrap().is_empty());
+        assert!(matches!(
+            rt.poll_status(id.clone()).unwrap().phase,
+            RunPhaseApi::Running
+        ));
+        let unknown = "00000000-0000-0000-0000-000000000000".to_string();
+        assert!(matches!(
+            rt.tail_events(unknown.clone(), 0),
+            Err(TrollmError::NotFound(_))
+        ));
+        assert!(matches!(
+            rt.poll_status(unknown),
+            Err(TrollmError::NotFound(_))
+        ));
+
+        // Unavailable authentication fails without network or model loading;
+        // the early empty log must not hide the durable startup error.
+        drop(release);
+        let expected = match wait_for(&rt, &id, |phase| {
+            matches!(phase, RunPhaseApi::Failed { .. })
+        }) {
+            RunPhaseApi::Failed { reason } => reason,
+            _ => unreachable!(),
+        };
+        assert!(expected.contains("needs sign-in"), "{expected}");
+        assert!(!run_dir.join("state.snapshot.json").exists());
+        drop(rt);
+        let reopened = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        assert!(matches!(reopened.poll_status(id.clone()).unwrap().phase,
+            RunPhaseApi::Failed { reason } if reason == expected));
+        assert!(reopened.tail_events(id, 0).unwrap().is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn startup_failure_remains_visible_after_runtime_restart() {
         let base = temp_base("durable-startup-failure");
         let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
@@ -907,5 +1053,130 @@ fn setup_startup_rejects_descriptor_tamper_even_if_manifest_hash_is_updated() {
             .unwrap_err();
         assert!(error.to_string().contains("root flow pin"), "{error}");
     }
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn new_import_rejects_short_provenance_but_installed_legacy_bundle_remains_readable() {
+    let base = temp_base("legacy-provenance");
+    let hash = "0".repeat(64);
+    let legacy_flow = GOOD_FLOW.replace(&hash, "deadbeef");
+    let legacy_registry = format!("{GOOD_REGISTRY}\nsourceBaseline: {{ sha256: deadbeef }}\n");
+    let files: Vec<(&str, &[u8])> = vec![
+        ("hello-flow.flow.yaml", legacy_flow.as_bytes()),
+        ("hello.tasks.yaml", legacy_registry.as_bytes()),
+        ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+    ];
+    let manifest_bytes = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+    let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", &manifest_bytes)];
+    all.extend(files.iter().copied());
+    let archive = build_tar(&all);
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let error = rt.install_flow_bundle(archive.clone()).unwrap_err();
+    assert!(
+        error.to_string().contains("sourceBaseline.sha256"),
+        "{error}"
+    );
+    assert!(rt.list_flows().unwrap().is_empty());
+    drop(rt);
+
+    // Reproduce a materialized pre-upgrade install without passing it through
+    // the new-import boundary. Its raw bytes and manifest remain unchanged.
+    let sha = sha256_hex(legacy_flow.as_bytes());
+    let installed = base.join("trollm/bundles").join(&sha);
+    for (path, bytes) in &all {
+        let path = installed.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    let flow_pin = base.join("trollm/flows").join(format!("{sha}.flow.yaml"));
+    std::fs::create_dir_all(flow_pin.parent().unwrap()).unwrap();
+    std::fs::write(&flow_pin, legacy_flow.as_bytes()).unwrap();
+    let task_sha = sha256_hex(legacy_registry.as_bytes());
+    let task_pin = base
+        .join("trollm/tasks")
+        .join(format!("{task_sha}.tasks.yaml"));
+    std::fs::create_dir_all(task_pin.parent().unwrap()).unwrap();
+    std::fs::write(&task_pin, legacy_registry.as_bytes()).unwrap();
+
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    assert_eq!(rt.list_flows().unwrap()[0].sha256, sha);
+    // This exercises the shared verified loader used by installed run startup.
+    assert!(rt.flow_setup(sha.clone()).unwrap().is_none());
+    std::fs::remove_file(&flow_pin).unwrap();
+    std::fs::remove_file(&task_pin).unwrap();
+    let restored = rt.install_flow_bundle(archive).unwrap();
+    assert_eq!(restored.flow_sha256, sha);
+    assert_eq!(std::fs::read(&flow_pin).unwrap(), legacy_flow.as_bytes());
+    assert_eq!(
+        std::fs::read(&task_pin).unwrap(),
+        legacy_registry.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(installed.join("manifest.json")).unwrap(),
+        manifest_bytes
+    );
+    drop(rt);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn new_bundle_import_rejects_authoring_typos_and_reasoner_tool_grants() {
+    let base = temp_base("closed-authoring");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    for (flow, registry, expected) in [
+        (
+            GOOD_FLOW.replace(
+                "taskRef: greet-task",
+                "taskRef: greet-task\n    onEror: { retry: 2 }",
+            ),
+            GOOD_REGISTRY.to_string(),
+            "onEror",
+        ),
+        (
+            GOOD_FLOW.to_string(),
+            GOOD_REGISTRY.replace(
+                "tools: []",
+                "tools: []\n    mutation: { idempotency: intent-log }",
+            ),
+            "mutation",
+        ),
+        (
+            GOOD_FLOW.to_string(),
+            GOOD_REGISTRY
+                .replace("model: coder", "model: reasoner")
+                .replace("tools: []", "tools: [srv.read]"),
+            "reasoner",
+        ),
+        (
+            GOOD_FLOW.to_string(),
+            format!("{GOOD_REGISTRY}\nsourceBaseline: {{ sha256: deadbeef }}\n"),
+            "sourceBaseline.sha256",
+        ),
+        (
+            GOOD_FLOW.replace(
+                "policies: {}",
+                "policies: { srv.read: { rety: { attempts: 2 } } }",
+            ),
+            GOOD_REGISTRY.to_string(),
+            "rety",
+        ),
+    ] {
+        let files: Vec<(&str, &[u8])> = vec![
+            ("hello-flow.flow.yaml", flow.as_bytes()),
+            ("hello.tasks.yaml", registry.as_bytes()),
+            ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+        ];
+        let manifest_bytes = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+        let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", &manifest_bytes)];
+        all.extend(files);
+        let error = rt.install_flow_bundle(build_tar(&all)).unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected}: {error}"
+        );
+        assert!(rt.list_flows().unwrap().is_empty());
+    }
+    drop(rt);
     std::fs::remove_dir_all(base).unwrap();
 }

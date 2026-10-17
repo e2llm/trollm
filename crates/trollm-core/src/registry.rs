@@ -7,14 +7,18 @@ use std::path::{Path, PathBuf};
 pub const TASK_REGISTRY_SCHEMA: &str = "ledger.task-registry.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskRegistry {
     pub schema_version: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub version: u32,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::plan::deserialize_source_baseline"
+    )]
     pub source_baseline: Option<crate::plan::SourceBaseline>,
     pub tasks: BTreeMap<String, TaskDef>,
 
@@ -25,7 +29,7 @@ pub struct TaskRegistry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskDef {
     /// Slot name only (§5); resolved against the plan's `models` slots.
     pub model: String,
@@ -72,6 +76,10 @@ fn identifier(value: &str) -> bool {
 
 impl TaskDef {
     fn validate_completion(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.model != "reasoner" || self.tools.is_empty(),
+            "canonical reasoner model slot must not grant tools"
+        );
         if let Some(bindings) = &self.tool_arguments {
             anyhow::ensure!(
                 self.completion == TaskCompletion::ToolResult,
@@ -125,14 +133,14 @@ impl TaskDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoopSpec {
     pub max_steps: u32,
 }
 
 /// Mutation journaling policy (§6). Closed keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Mutations {
     pub idempotency: Idempotency,
     pub on_uncertain: OnUncertain,
@@ -152,7 +160,7 @@ pub enum OnUncertain {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutputContract {
     #[serde(default)]
     pub outputs: BTreeMap<String, OutputSpec>,
@@ -166,7 +174,7 @@ pub struct OutputContract {
 /// One declared output (§5). Untagged: either `{ from: model, type: prose }`
 /// or `{ fromArtifact: <name>, format: jsonl, type: list }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum OutputSpec {
     FromModel {
         from: ModelFrom,

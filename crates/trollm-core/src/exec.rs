@@ -6,9 +6,10 @@ use anyhow::{anyhow, Context};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use trollm_mcp::ToolGateway;
-use trollm_models::{GenerateRequest, ModelSlot};
+use trollm_models::{FinishReason, GenerateRequest, ModelSlot};
 use uuid::Uuid;
 
 use crate::artifacts;
@@ -114,6 +115,15 @@ pub enum RunStatus {
     Failed { reason: String },
 }
 
+/// Optional cooperative control at dispatch and retry boundaries. An active
+/// model or tool call remains synchronous; the next boundary observes cancel.
+pub trait ExecutionControl: Send + Sync {
+    /// Hold for a user pause if needed, then return true if cancelled.
+    fn checkpoint(&self) -> bool;
+    /// Wait for retry backoff, preserving any pause and returning true on cancel.
+    fn wait_backoff(&self, duration: Duration) -> bool;
+}
+
 /// Cloned identity of the plan owning the current frame (avoids holding a
 /// borrow into `self.plan` across `&mut self` calls).
 #[derive(Debug, Clone)]
@@ -130,6 +140,13 @@ struct TaskOutcome {
     /// Artifacts reported by the gateway during this task, keyed by logical
     /// name (filename stem — the wiring convention documented in artifacts.rs).
     artifacts: BTreeMap<String, PathBuf>,
+}
+
+/// A successful task loop can stop at a control boundary after all available
+/// call results have been journaled, without inventing an authored error.
+enum TaskLoopOutcome {
+    Completed(TaskOutcome),
+    Cancelled,
 }
 
 pub struct Executor<M: ModelSlot, G: ToolGateway> {
@@ -151,6 +168,7 @@ pub struct Executor<M: ModelSlot, G: ToolGateway> {
     pause_reason: String,
     fail_reason: String,
     cancel_requested: bool,
+    control: Option<Arc<dyn ExecutionControl>>,
 }
 
 impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
@@ -169,6 +187,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         validate::validate_plan(&plan).map_err(|e| anyhow!(e.to_string()))?;
         registry.validate_completion()?;
         validate::validate_with_registry(&plan, &registry).map_err(|e| anyhow!(e.to_string()))?;
+        validate::validate_mutation_safety(&plan, &registry, |server, tool| {
+            gateway.tool_class(server, tool)
+        })
+        .map_err(|e| anyhow!(e.to_string()))?;
         fn check_completion_outputs(
             plan: &ExecutionPlan,
             registry: &TaskRegistry,
@@ -251,6 +273,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             )
         };
 
+        let fail_reason = state
+            .terminal_reason
+            .clone()
+            .unwrap_or_else(|| "run already failed".to_string());
         Ok(Self {
             plan,
             registry,
@@ -266,9 +292,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             unsafe_completed_replay,
             node_retries: 0,
             pause_reason: String::new(),
-            fail_reason: String::new(),
+            fail_reason,
             cancel_requested: false,
+            control: None,
         })
+    }
+
+    /// Install the run's cooperative control before driving this executor.
+    pub fn set_control(&mut self, control: Arc<dyn ExecutionControl>) {
+        self.control = Some(control);
     }
 
     pub fn run_dir(&self) -> &RunDir {
@@ -308,7 +340,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 StateStatus::Succeeded => return Ok(RunStatus::Succeeded),
                 StateStatus::Failed => {
                     return Ok(RunStatus::Failed {
-                        reason: "run already failed".into(),
+                        reason: self.fail_reason.clone(),
                     })
                 }
                 _ => {}
@@ -356,13 +388,19 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     /// §9: cancel. Terminal; recorded in the log.
     pub fn cancel(&mut self) {
+        let _ = self.try_cancel();
+    }
+
+    /// Fallible cancellation for callers that must report durable outcome.
+    pub fn try_cancel(&mut self) -> anyhow::Result<()> {
         self.cancel_requested = true;
-        if self.state.status == StateStatus::Running || self.state.status == StateStatus::Paused {
-            let _ = self.emit(EventType::RunEnded, json!({ "outcome": "cancelled" }));
-            self.state.status = StateStatus::Failed;
-            self.fail_reason = "cancelled".to_string();
-            let _ = self.persist_snapshot();
+        if matches!(
+            self.state.status,
+            StateStatus::Running | StateStatus::Paused
+        ) {
+            self.finish_cancelled()?;
         }
+        Ok(())
     }
 
     /// §9: persist RunState without committing additional log progress.
@@ -390,8 +428,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 }
                 StateStatus::Running => {}
             }
-            if self.cancel_requested {
-                self.finish_failed("cancelled")?;
+            if self.control_cancelled() {
+                self.finish_cancelled()?;
                 continue;
             }
 
@@ -465,7 +503,24 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         )?;
         self.state.status = StateStatus::Failed;
         self.fail_reason = reason.to_string();
+        self.state.terminal_reason = Some(reason.to_string());
         self.persist_snapshot()
+    }
+
+    fn finish_cancelled(&mut self) -> anyhow::Result<()> {
+        self.emit(EventType::RunEnded, json!({ "outcome": "cancelled" }))?;
+        self.state.status = StateStatus::Failed;
+        self.fail_reason = "cancelled".to_string();
+        self.state.terminal_reason = Some(self.fail_reason.clone());
+        self.persist_snapshot()
+    }
+
+    fn control_cancelled(&self) -> bool {
+        self.cancel_requested
+            || self
+                .control
+                .as_ref()
+                .is_some_and(|control| control.checkpoint())
     }
 
     fn finish_succeeded(&mut self, outcome: &str) -> anyhow::Result<()> {
@@ -572,8 +627,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     // task nodes (§5)
 
     fn step_task(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
-        // Timeout is a run-level budget, checked at node boundaries (§4.4:
-        // transitions happen only at node boundaries).
+        // Timeout is frame-scoped and checked on task entry only. A final long
+        // task may exceed it and still succeed; inference is not preempted.
         let started = self
             .state
             .stack
@@ -594,14 +649,26 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .cloned()
             .ok_or_else(|| anyhow!("taskRef {:?} not in registry", node.task_ref))?;
 
-        match self.run_task_loop(node_id, node, &task, fp) {
-            Ok(outcome) => match self.verify_and_bind(node_id, node, &task, &outcome) {
-                Ok(()) => {
-                    let t = node.on_verified.clone().expect("validated");
-                    self.transit("onVerified", &t)
+        let outcome = self.run_task_loop(node_id, node, &task, fp);
+        let cancelled = self.control_cancelled();
+        match outcome {
+            // A failed journal write must never be reported as a durable
+            // cancellation, even if the user cancels while that write fails.
+            Err(f) if cancelled && f.class == ErrorClass::ArtifactIo => Err(anyhow!(f)),
+            Ok(TaskLoopOutcome::Cancelled) => self.finish_cancelled(),
+            _ if cancelled => self.finish_cancelled(),
+            Ok(TaskLoopOutcome::Completed(outcome)) => {
+                match self.verify_and_bind(node_id, node, &task, &outcome) {
+                    Ok(()) => {
+                        if self.control_cancelled() {
+                            return self.finish_cancelled();
+                        }
+                        let t = node.on_verified.clone().expect("validated");
+                        self.transit("onVerified", &t)
+                    }
+                    Err(f) => self.handle_task_error(node_id, node, fp, f),
                 }
-                Err(f) => self.handle_task_error(node_id, node, fp, f),
-            },
+            }
             Err(f) if f.class == ErrorClass::BudgetExhausted => self.apply_run_limit(fp, &f.detail),
             Err(f) => self.handle_task_error(node_id, node, fp, f),
         }
@@ -618,7 +685,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         node: &Node,
         task: &TaskDef,
         fp: &FramePlan,
-    ) -> Result<TaskOutcome, TaskFailure> {
+    ) -> Result<TaskLoopOutcome, TaskFailure> {
         let task_ref = node.task_ref.clone().unwrap_or_default();
         let frame_vars = self
             .state
@@ -710,9 +777,18 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 json!({
                     "slot": task.model, "node": node_id,
                     "tokensIn": resp.tokens_in, "tokensOut": resp.tokens_out, "ms": ms,
+                    "finishReason": match resp.finish {
+                        FinishReason::Stop => "stop",
+                        FinishReason::Length => "length",
+                        FinishReason::GrammarReject => "grammar-reject",
+                    },
                 }),
             )
             .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, format!("event log: {e}")))?;
+
+            if self.control_cancelled() {
+                return Ok(TaskLoopOutcome::Cancelled);
+            }
 
             if let Some(frame) = self.state.stack.last() {
                 if frame.counters.tokens > fp.limits.max_tokens_total {
@@ -725,6 +801,22 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     return Err(TaskFailure::new(
                         ErrorClass::BudgetExhausted,
                         format!("maxTokensTotal {} exceeded", fp.limits.max_tokens_total),
+                    ));
+                }
+            }
+
+            match resp.finish {
+                FinishReason::Stop => {}
+                FinishReason::Length => {
+                    return Err(TaskFailure::new(
+                        ErrorClass::ModelError,
+                        "model capacity exhausted: generation reached its token limit (Length)",
+                    ));
+                }
+                FinishReason::GrammarReject => {
+                    return Err(TaskFailure::new(
+                        ErrorClass::ModelError,
+                        "model grammar rejected generation (GrammarReject)",
                     ));
                 }
             }
@@ -777,6 +869,29 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     }
                 }
 
+                // Recheck the actual dispatch policy; plan/gateway composition
+                // must never allow an unjournaled declared mutation.
+                let journaled = task
+                    .mutations
+                    .as_ref()
+                    .is_some_and(|m| m.idempotency == Idempotency::IntentLog);
+                if (self.gateway.tool_class(&call.server, &call.tool)
+                    == trollm_mcp::policy::ToolClass::Mutation
+                    || self
+                        .plan
+                        .mcp
+                        .policies
+                        .get(&fqn)
+                        .and_then(|p| p.get("class"))
+                        .and_then(|c| c.as_str())
+                        == Some("mutation"))
+                    && !journaled
+                {
+                    return Err(TaskFailure::new(
+                        ErrorClass::McpError,
+                        format!("mutation '{fqn}' requires intent-log before dispatch"),
+                    ));
+                }
                 self.gateway.validate_call(call).map_err(|e| {
                     TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
                 })?;
@@ -831,35 +946,27 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             json!({ "path": art, "bytes": bytes.len(), "sha256": sha }),
                         )
                         .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                        self.state.counters.artifact_bytes += bytes.len() as u64;
-                        if let Some(f) = self.state.stack.last_mut() {
-                            f.counters.artifact_bytes += bytes.len() as u64;
-                        }
+                        self.account_artifact_bytes(bytes.len() as u64, fp)?;
                         if let Some(name) = artifacts::logical_name(art) {
                             artifacts.insert(name, art.clone());
-                        }
-                        let limit_bytes = fp.limits.artifact_max_mb * 1024 * 1024;
-                        if self.state.counters.artifact_bytes > limit_bytes {
-                            self.emit(
-                                EventType::BudgetExhausted,
-                                json!({ "budget": "artifactMaxMb", "limit": fp.limits.artifact_max_mb }),
-                            )
-                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                            return Err(TaskFailure::new(
-                                ErrorClass::BudgetExhausted,
-                                "artifactMaxMb exceeded",
-                            ));
                         }
                     }
                 }
 
+                // The result, including a mutation's intent linkage, is
+                // durable before honoring a cancellation during the call.
+                // This typed outcome bypasses authored onError.
+                if self.control_cancelled() {
+                    return Ok(TaskLoopOutcome::Cancelled);
+                }
+
                 if task.completion == TaskCompletion::ToolResult {
-                    return Ok(TaskOutcome {
+                    return Ok(TaskLoopOutcome::Completed(TaskOutcome {
                         // This mode forbids all model-prose output bindings.
                         prose: String::new(),
                         tool_calls_made,
                         artifacts,
-                    });
+                    }));
                 }
 
                 // Append result, repeat (§5).
@@ -882,11 +989,33 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 format!("coder loop exhausted maxSteps={max_steps} without prose output"),
             )
         })?;
-        Ok(TaskOutcome {
+        Ok(TaskLoopOutcome::Completed(TaskOutcome {
             prose,
             tool_calls_made,
             artifacts,
-        })
+        }))
+    }
+
+    /// Charge every written artifact to its owning frame and the run mirror.
+    /// The aggregate is diagnostic; a child's allowance excludes other frames.
+    fn account_artifact_bytes(&mut self, bytes: u64, fp: &FramePlan) -> Result<(), TaskFailure> {
+        self.state.counters.artifact_bytes += bytes;
+        let frame = self.state.stack.last_mut().expect("active frame");
+        frame.counters.artifact_bytes += bytes;
+        let value = frame.counters.artifact_bytes;
+        let limit = fp.limits.artifact_max_mb.saturating_mul(1024 * 1024);
+        if value > limit {
+            self.emit(
+                EventType::BudgetExhausted,
+                json!({ "budget": "artifactMaxMb", "value": value, "limit": limit }),
+            )
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+            return Err(TaskFailure::new(
+                ErrorClass::BudgetExhausted,
+                "artifactMaxMb exceeded",
+            ));
+        }
+        Ok(())
     }
 
     /// Frame-scoped run budgets (§4.4: "own counter scope"; counters persist
@@ -949,6 +1078,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         fp: &FramePlan,
         failure: TaskFailure,
     ) -> anyhow::Result<()> {
+        if self.control_cancelled() {
+            if failure.class == ErrorClass::ArtifactIo {
+                return Err(anyhow!(failure));
+            }
+            return self.finish_cancelled();
+        }
         self.emit(
             EventType::Error,
             json!({
@@ -968,8 +1103,28 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         });
         if self.node_retries < policy.retry {
             self.node_retries += 1;
+            if self.control_cancelled() {
+                return self.finish_cancelled();
+            }
             if policy.backoff_s > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(policy.backoff_s));
+                let delay = Duration::from_secs(policy.backoff_s);
+                let cancelled = if let Some(control) = &self.control {
+                    control.wait_backoff(delay)
+                } else {
+                    let mut remaining = delay;
+                    while !remaining.is_zero() {
+                        let chunk = remaining.min(Duration::from_secs(60));
+                        std::thread::sleep(chunk);
+                        remaining -= chunk;
+                    }
+                    false
+                };
+                if cancelled {
+                    return self.finish_cancelled();
+                }
+            }
+            if self.control_cancelled() {
+                return self.finish_cancelled();
             }
             // Frame stays on this node: the task re-executes from entry
             // (per-node loop budget resets, §4.4).
@@ -1151,7 +1306,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     fn step_foreach(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
         if !self.state.foreach_cursors.contains_key(node_id) {
-            self.foreach_enter(node_id, node)?;
+            self.foreach_enter(node_id, node, fp)?;
             if self.state.status != StateStatus::Running {
                 return Ok(()); // onEmpty fired a terminal/pause transition
             }
@@ -1175,7 +1330,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     /// First entry: resolve `items`, take the snapshot (enumeration: snapshot
     /// is the only legal value in v1, §3), persist it as an artifact.
-    fn foreach_enter(&mut self, node_id: &str, node: &Node) -> anyhow::Result<()> {
+    fn foreach_enter(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
         let binding = node.items.as_ref().expect("validated").from.clone();
         let vars = self
             .state
@@ -1224,7 +1379,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             EventType::ArtifactWritten,
             json!({ "path": written.path, "bytes": written.bytes, "sha256": written.sha256 }),
         )?;
-        self.state.counters.artifact_bytes += written.bytes;
+        if let Err(failure) = self.account_artifact_bytes(written.bytes, fp) {
+            if failure.class == ErrorClass::BudgetExhausted {
+                return self.apply_run_limit(fp, &failure.detail);
+            }
+            return Err(anyhow!(failure.detail));
+        }
 
         if items.is_empty() {
             // onEmpty fires when the snapshot length is 0 (§4.6).
@@ -1495,43 +1655,26 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     fn handle_uncertain(&mut self) -> anyhow::Result<()> {
         let pending = std::mem::take(&mut self.pending_uncertain);
-        for intent in pending {
+        if let Some(intent) = pending.into_iter().next() {
             let policy = self
                 .registry
                 .task(&intent.task_ref)
                 .and_then(|t| t.mutations.as_ref())
                 .map(|m| m.on_uncertain);
-            match policy {
-                Some(OnUncertain::RefetchState) => {
-                    // refetch-state, core side: mark the mutation skipped with a
-                    // log note so the intent is closed. Querying the server's
-                    // current state and deciding whether the write already
-                    // applied is the gateway's concern (§6 places serveFrom/
-                    // cache state there); core only guarantees the journal
-                    // closes and the task re-executes from its node boundary.
-                    self.emit(
-                        EventType::ToolCallResult,
-                        json!({
-                            "intentSeq": intent.seq,
-                            "server": intent.server,
-                            "tool": intent.tool,
-                            "skipped": true,
-                            "note": "onUncertain=refetch-state: intent without result on resume; mutation marked skipped, state refetch delegated to gateway",
-                        }),
-                    )?;
-                }
-                Some(OnUncertain::FailRun) | None => {
-                    let reason = format!(
-                        "uncertain mutation {}.{} (onUncertain=fail-run)",
-                        intent.server, intent.tool
-                    );
-                    self.emit(
-                        EventType::Error,
-                        json!({ "class": ErrorClass::McpError.as_str(), "detail": reason, "node": intent.node }),
-                    )?;
-                    return self.finish_failed(&reason);
-                }
-            }
+            let detail = match policy {
+                Some(OnUncertain::RefetchState) =>
+                    "onUncertain=refetch-state: reconciliation is not implemented; write may have applied",
+                Some(OnUncertain::FailRun) | None => "onUncertain=fail-run: write may have applied",
+            };
+            let reason = format!(
+                "uncertain mutation {}.{} ({detail})",
+                intent.server, intent.tool
+            );
+            self.emit(
+                EventType::Error,
+                json!({ "class": ErrorClass::McpError.as_str(), "detail": reason, "node": intent.node }),
+            )?;
+            return self.finish_failed(&reason);
         }
         Ok(())
     }
@@ -1610,7 +1753,20 @@ mod recovery_regressions {
     use trollm_models::MockModel;
 
     struct NoGateway;
+
+    struct CancelControl;
+    impl ExecutionControl for CancelControl {
+        fn checkpoint(&self) -> bool {
+            true
+        }
+        fn wait_backoff(&self, _: Duration) -> bool {
+            true
+        }
+    }
     impl ToolGateway for NoGateway {
+        fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+            trollm_mcp::policy::ToolClass::Read
+        }
         fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>> {
             Ok(vec![])
         }
@@ -1676,6 +1832,38 @@ nodes:
             run,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cancelled_task_keeps_artifact_io_error_without_terminal_claim() {
+        // The actual EventLog append failure is not injected here; this covers
+        // its classified error at the handler boundary without a logger seam.
+        let base = std::env::temp_dir().join(format!("cancel-io-{}", Uuid::new_v4()));
+        let mut exec = executor(
+            plan(
+                "cancel-io",
+                "done",
+                "  done: { kind: end, outcome: succeeded }",
+            ),
+            RunDir::under(&base),
+        );
+        exec.set_control(Arc::new(CancelControl));
+        let node = exec.plan.nodes.get("done").unwrap().clone();
+        let frame = exec.frame_plan("cancel-io").unwrap();
+        let error = exec
+            .handle_task_error(
+                "done",
+                &node,
+                &frame,
+                TaskFailure::new(ErrorClass::ArtifactIo, "journal append failed"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("journal append failed"));
+        assert_eq!(exec.state.status, StateStatus::Running);
+        let events = EventLog::read_all(&exec.run_dir.events_path()).unwrap();
+        assert!(!events.iter().any(|event| event["type"] == "run_ended"));
+        drop(exec);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn advance_foreach(exec: &mut Executor<MockModel, NoGateway>, id: &str) {
@@ -1931,5 +2119,194 @@ nodes:
         );
         drop(exec);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    fn budget_events(exec: &Executor<MockModel, NoGateway>) -> Vec<Value> {
+        std::fs::read_to_string(exec.run_dir.events_path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn artifact_allowance_excludes_parent_and_previous_siblings() {
+        let root = plan("root", "done", "  done: { kind: end, outcome: succeeded }");
+        let run =
+            RunDir::under(&std::env::temp_dir().join(format!("frame-bytes-{}", Uuid::new_v4())));
+        let mut exec = executor(root, run.clone());
+        let mut fp = exec.frame_plan("root").unwrap();
+        fp.limits.artifact_max_mb = 1;
+        let mib = 1024 * 1024;
+        exec.account_artifact_bytes(mib, &fp).unwrap(); // parent at exact limit
+        let parent = exec.state.stack[0].clone();
+        let mut child = parent.clone();
+        child.counters = Counters::default();
+        exec.state.stack.push(child.clone());
+        exec.account_artifact_bytes(mib, &fp).unwrap(); // first child exact limit
+        exec.state.stack.pop();
+        exec.state.stack.push(child);
+        exec.account_artifact_bytes(mib, &fp).unwrap(); // sibling exact limit
+        assert_eq!(exec.state.counters.artifact_bytes, 3 * mib);
+        assert_eq!(exec.state.stack[0].counters.artifact_bytes, mib);
+        assert!(!budget_events(&exec)
+            .iter()
+            .any(|e| e["type"] == "budget_exhausted"));
+        let failure = exec.account_artifact_bytes(1, &fp).unwrap_err();
+        assert_eq!(failure.class, ErrorClass::BudgetExhausted);
+        assert_eq!(exec.state.counters.artifact_bytes, 3 * mib + 1);
+        assert_eq!(
+            exec.state.stack.last().unwrap().counters.artifact_bytes,
+            mib + 1
+        );
+        let events = budget_events(&exec);
+        let event = events
+            .iter()
+            .find(|e| e["type"] == "budget_exhausted")
+            .unwrap();
+        assert_eq!(event["budget"], "artifactMaxMb");
+        assert_eq!(event["value"], mib + 1);
+        assert_eq!(event["limit"], mib);
+        drop(exec);
+        std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unrepresentably_large_artifact_allowance_saturates() {
+        let root = plan("root", "done", "  done: { kind: end, outcome: succeeded }");
+        let run = RunDir::under(
+            &std::env::temp_dir().join(format!("large-artifact-limit-{}", Uuid::new_v4())),
+        );
+        let mut exec = executor(root, run.clone());
+        let mut fp = exec.frame_plan("root").unwrap();
+        fp.limits.artifact_max_mb = u64::MAX;
+        exec.account_artifact_bytes(1, &fp).unwrap();
+        assert_eq!(exec.state.counters.artifact_bytes, 1);
+        assert_eq!(exec.state.stack[0].counters.artifact_bytes, 1);
+        assert!(!budget_events(&exec)
+            .iter()
+            .any(|e| e["type"] == "budget_exhausted"));
+        drop(exec);
+        std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn foreach_snapshot_alone_charges_owning_frame_and_obeys_on_limit() {
+        for policy in [RunLimitPolicy::Abort, RunLimitPolicy::RespondPartial] {
+            for items in [json!([]), json!([{"id": 1}])] {
+                let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+                root.subflows.insert(
+                    "child".into(),
+                    plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+                );
+                root.limits.artifact_max_mb = 0;
+                root.on_limit = policy;
+                let run = RunDir::under(
+                    &std::env::temp_dir().join(format!("snapshot-budget-{}", Uuid::new_v4())),
+                );
+                let mut exec = executor(root, run.clone());
+                exec.state.stack[0].vars = json!({"items": items});
+                assert_eq!(
+                    exec.run_until_blocked().unwrap(),
+                    if items.as_array().unwrap().is_empty()
+                        || matches!(policy, RunLimitPolicy::RespondPartial)
+                    {
+                        RunStatus::Succeeded
+                    } else {
+                        RunStatus::Failed {
+                            reason: "budget-exhausted: artifactMaxMb exceeded".into(),
+                        }
+                    }
+                );
+                let events = budget_events(&exec);
+                let written = events
+                    .iter()
+                    .find(|e| e["type"] == "artifact_written")
+                    .unwrap()["bytes"]
+                    .as_u64()
+                    .unwrap();
+                assert_eq!(exec.state.counters.artifact_bytes, written);
+                assert_eq!(exec.state.stack[0].counters.artifact_bytes, written);
+                let exhausted: Vec<_> = events
+                    .iter()
+                    .filter(|e| e["type"] == "budget_exhausted")
+                    .collect();
+                if written == 0 {
+                    assert!(exhausted.is_empty());
+                    assert_eq!(events.last().unwrap()["outcome"], "succeeded");
+                } else {
+                    assert_eq!(exhausted.len(), 1);
+                    assert_eq!(exhausted[0]["budget"], "artifactMaxMb");
+                    assert_eq!(
+                        events.last().unwrap()["outcome"],
+                        if matches!(policy, RunLimitPolicy::Abort) {
+                            "failed"
+                        } else {
+                            "partial"
+                        }
+                    );
+                }
+                drop(exec);
+                std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_at_task_entry_exact_zero_and_over_obey_on_limit() {
+        for policy in [RunLimitPolicy::Abort, RunLimitPolicy::RespondPartial] {
+            for expired in [false, true] {
+                let base = std::env::temp_dir().join(format!("timeout-budget-{}", Uuid::new_v4()));
+                std::fs::create_dir_all(&base).unwrap();
+                std::fs::write(base.join("prompt.md"), "go").unwrap();
+                let mut root = plan("root", "work", "  work: { kind: task, taskRef: work, onVerified: done }\n  done: { kind: end, outcome: succeeded }");
+                root.limits.timeout_s = 0;
+                root.on_limit = policy;
+                let run = RunDir::under(&base);
+                let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: prompt.md\n    tools: []\n    outputContract: { outputs: { summary: { from: model, type: prose } } }", &base).unwrap();
+                let mut exec = Executor::new(
+                    root,
+                    registry,
+                    String::new(),
+                    SlotMap::new().with("coder", MockModel::scripted(["done"])),
+                    NoGateway,
+                    run,
+                )
+                .unwrap();
+                // Future persisted start saturates elapsed to exactly zero without
+                // sleeping or introducing a production clock abstraction.
+                exec.state.stack[0].counters.started_at = if expired { 0 } else { u64::MAX };
+                let status = exec.run_until_blocked().unwrap();
+                let events = budget_events(&exec);
+                let exhausted: Vec<_> = events
+                    .iter()
+                    .filter(|e| e["type"] == "budget_exhausted")
+                    .collect();
+                if expired {
+                    assert_eq!(exec.state.counters.steps, 0);
+                    assert_eq!(exhausted.len(), 1);
+                    assert_eq!(exhausted[0]["budget"], "timeoutS");
+                    assert_eq!(exhausted[0]["limit"], 0);
+                    assert_eq!(
+                        matches!(status, RunStatus::Failed { .. }),
+                        matches!(policy, RunLimitPolicy::Abort)
+                    );
+                    assert_eq!(
+                        events.last().unwrap()["outcome"],
+                        if matches!(policy, RunLimitPolicy::Abort) {
+                            "failed"
+                        } else {
+                            "partial"
+                        }
+                    );
+                } else {
+                    assert_eq!(status, RunStatus::Succeeded);
+                    assert_eq!(exec.state.counters.steps, 1);
+                    assert!(exhausted.is_empty());
+                }
+                drop(exec);
+                std::fs::remove_dir_all(base).unwrap();
+            }
+        }
     }
 }

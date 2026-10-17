@@ -17,8 +17,11 @@ data class PinnedOAuthGrant(val grantId: String, val serverUrl: String)
 
 enum class SelectedAuthMode { ANONYMOUS, BEARER, OAUTH, UNAVAILABLE }
 
-/** One encrypted transaction includes selection, legacy manual token and grant. */
-class StoredConnection(val mode: SelectedAuthMode?, val manualToken: String?, val grant: OAuthGrant?) {
+/** One encrypted transaction includes selection, endpoint-bound manual token and grant. */
+class StoredConnection(
+    val mode: SelectedAuthMode?, val manualToken: String?, val grant: OAuthGrant?,
+    val manualEndpoint: String? = null,
+) {
     override fun toString() = "StoredConnection(redacted)"
 }
 
@@ -33,20 +36,25 @@ class OAuthGrants(
             require(ConnectionInput.validServer(server))
             OAuthGrant(UUID.randomUUID().toString(), server, ConnectionInput.canonicalEndpoint(endpoint),
                 state, request).also {
-                    write(server, StoredConnection(SelectedAuthMode.OAUTH, read(server).manualToken, it))
+                    write(server, StoredConnection(SelectedAuthMode.OAUTH, read(server).manualToken,
+                        it, read(server).manualEndpoint))
                 }
         }
 
     private fun selected(server: String): StoredConnection {
         val stored = read(server)
-        if (stored.mode != null) return stored
-        // Migration happens once. A retained OAuth tombstone must never become Bearer.
+        if (stored.mode != null &&
+            !(stored.mode == SelectedAuthMode.BEARER && stored.manualEndpoint == null)) return stored
+        // Legacy name-only secrets stay stored, but need an explicit endpoint re-save.
+        // A retained OAuth tombstone must never become Bearer.
         val mode = when {
+            stored.mode == SelectedAuthMode.BEARER -> SelectedAuthMode.UNAVAILABLE
             stored.grant != null -> SelectedAuthMode.OAUTH
-            stored.manualToken != null -> SelectedAuthMode.BEARER
+            stored.manualToken != null && stored.manualEndpoint != null -> SelectedAuthMode.BEARER
+            stored.manualToken != null -> SelectedAuthMode.UNAVAILABLE
             else -> SelectedAuthMode.ANONYMOUS
         }
-        return StoredConnection(mode, stored.manualToken, stored.grant).also { write(server, it) }
+        return StoredConnection(mode, stored.manualToken, stored.grant, stored.manualEndpoint).also { write(server, it) }
     }
 
     fun mode(server: String): SelectedAuthMode = synchronized(lock) { selected(server).mode!! }
@@ -55,9 +63,21 @@ class OAuthGrants(
         selected(server).takeIf { it.mode == SelectedAuthMode.OAUTH }?.grant
     }
 
-    fun selectManual(server: String, token: String?) = synchronized(lock) {
+    fun selectManual(server: String, endpoint: String?, token: String?) = synchronized(lock) {
+        require(ConnectionInput.validServer(server))
+        val canonical = if (token == null) null
+            else ConnectionInput.canonicalEndpoint(requireNotNull(endpoint))
+        require(token == null || ConnectionInput.validToken(token))
         write(server, StoredConnection(if (token == null) SelectedAuthMode.ANONYMOUS
-            else SelectedAuthMode.BEARER, token, null))
+            else SelectedAuthMode.BEARER, token, null, canonical))
+    }
+
+    /** Selection, endpoint match and secret read share the connection-edit lock. */
+    fun manualToken(server: String, endpoint: String): String? = synchronized(lock) {
+        val canonical = ConnectionInput.canonicalEndpoint(endpoint)
+        selected(server).takeIf {
+            it.mode == SelectedAuthMode.BEARER && it.manualEndpoint == canonical
+        }?.manualToken?.takeIf(ConnectionInput::validToken)
     }
 
     fun pin(server: String, endpoint: String): PinnedOAuthGrant? = synchronized(lock) {
@@ -77,7 +97,7 @@ class OAuthGrants(
         synchronized(lock) {
             if (matching(server, id, endpoint)?.pendingRequest == null) return@synchronized false
             write(server, StoredConnection(SelectedAuthMode.OAUTH, read(server).manualToken,
-                OAuthGrant(id, server, endpoint, state, request)))
+                OAuthGrant(id, server, endpoint, state, request), read(server).manualEndpoint))
             true
         }
 
@@ -90,12 +110,13 @@ class OAuthGrants(
         synchronized(lock) {
             if (matching(server, id, endpoint) == null) return@synchronized false
             write(server, StoredConnection(SelectedAuthMode.OAUTH, read(server).manualToken,
-                OAuthGrant(id, server, endpoint, state)))
+                OAuthGrant(id, server, endpoint, state), read(server).manualEndpoint))
             true
         }
 
     fun logout(server: String) = synchronized(lock) {
-        write(server, StoredConnection(SelectedAuthMode.UNAVAILABLE, read(server).manualToken, null))
+        write(server, StoredConnection(SelectedAuthMode.UNAVAILABLE, read(server).manualToken,
+            null, read(server).manualEndpoint))
     }
 
     fun invalidate(server: String, id: String) = synchronized(lock) {

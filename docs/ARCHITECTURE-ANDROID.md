@@ -72,7 +72,7 @@ version: 3
 sourceBaseline: { sha256: "..." }          # optional recorded-source provenance
 
 input:
-  promptTemplate: "..."                     # may reference {{ user_input }}
+  promptTemplate: "..."                     # reserved metadata; not rendered
 
 limits:                                     # run-level budgets, ledger-enforced
   maxSteps: 24
@@ -139,10 +139,25 @@ omits it; use an updated build for the minimal summary example. File pins and
 installed-flow identity still hash the original YAML bytes, including any
 provenance that is present.
 
+`input.promptTemplate` is reserved metadata and is not rendered by this runtime.
+The task-registry `prompt` file supplies the model prompt, including supported
+bindings such as `{{ user_input }}`. Changing the reserved field alone has no
+effect on generation.
+
+New bundle imports require a present `sourceBaseline.sha256` to be 64 lowercase
+hexadecimal characters, in both plans (including subflows) and the registry.
+Installed v1 bundles with older string identifiers remain readable, and an exact
+verified reinstall can repair their canonical pins without changing their bytes.
+Provenance remains optional descriptive metadata, not a trust anchor. Closed
+plan, node, registry and policy objects reject unknown keys; intentionally named
+maps (nodes, slots, outputs, tool arguments and result schemas) remain extensible.
+
 ### 4.1 Node kinds — closed set
 
 `task` | `foreach` | `end`. Nothing else in v1. A reasoner consult is a `task` whose
 taskRef binds the reasoner slot and grants no tools.
+The literal `reasoner` slot is enforced as tool-free during registry and executor
+validation. Other slot names do not acquire an inferred semantic role.
 
 ### 4.2 Transition keys — closed set
 
@@ -181,11 +196,20 @@ step is the canonical case.
   is re-executed — see §6 mutation journaling for write safety).
 - Counters persist across pause/resume. Per-node budgets (e.g. `maxSteps` on a coder-loop
   task) reset on node entry; run-level budgets never reset.
+- Failed and cancelled runs save an optional `terminalReason` alongside the
+  existing status. Older snapshots without it remain readable. Cancellation
+  records `run_ended` with `outcome: cancelled` and remains `Failed` with reason
+  `cancelled` in the public API.
 
 ### 4.5 onError
 
 Every `task` may declare `onError: { retry: N, backoffS: S, then: <nodeId|{status...}> }`.
 Default if absent: `retry: 0`, then `{ status: failed, reason: <error-class> }`.
+Automatic retry is rejected for tasks granted mutation tools and for any task
+declaring `mutations.idempotency: intent-log`, including a journaled read-only task.
+Read-only tasks without intent logging retain automatic retries. This prevents
+whole-task retries from repeating a possibly applied write; explicit authored
+graph transitions remain separate flow control.
 Error classes (closed enum): `mcp-unreachable`, `mcp-error`, `tool-call-parse`,
 `verification-failed`, `artifact-io`, `budget-exhausted`, `model-error`.
 
@@ -222,7 +246,7 @@ tasks:
     prompt: prompts/execute-decision.md
     tools: [tracker.close_issue, tracker.update_issue, tracker.add_comment]
     loop: { maxSteps: 4 }
-    mutations: { idempotency: intent-log, onUncertain: refetch-state }  # §6
+    mutations: { idempotency: intent-log, onUncertain: fail-run }  # §6
     outputContract:
       outputs: { outcome: { from: model, type: prose } }
       allowNoop: true
@@ -232,6 +256,13 @@ Task loop semantics (`completion: model-prose`, the default): render prompt → 
 fence → gateway executes → append result → repeat → else the text is the node's prose output
 → verify contract → transition. Loop exit without prose after `maxSteps` =
 `verification-failed`.
+
+Every `model_call` records `finishReason`: `stop`, `length` or `grammar-reject`.
+Length-limited or grammar-rejected responses fail as `model-error` before prose
+acceptance or tool-call parsing/dispatch, even if their text contains a complete
+fence. No automatic continuation is added. Token use is still counted; if that
+response also exceeds its frame's token budget, the existing `onLimit` policy
+takes precedence and cannot consume the rejected response as a valid result.
 
 Tasks may opt into `completion: tool-result` to finish an attempt after one
 successful tool call, without a follow-up model generation. This mode requires a
@@ -321,7 +352,7 @@ policies:
     class: mutation
     passthrough: true                        # never cached, never shaped, always logged
     timeoutS: 10
-    retry: { attempts: 2, backoffS: 3 }      # transport-level only; never re-executes business logic
+    retry: { attempts: 1, backoffS: 0 }      # optional; only these defaults are supported
 ```
 
 Rules:
@@ -332,15 +363,29 @@ Rules:
   `{ fetchedAt, ttlS, complete, pages, totalItems?, sourceArgs }`. Atomic writes
   (tmp + rename). Incomplete fetches are marked `complete: false`; readers must treat them
   as `onMiss`.
-- **Pagination**: first call returns page 1 synchronously to the model; background task
-  fetches remaining pages to the cache file; meta flips to `complete: true` at the end.
-  Subsequent paginated calls for the same normalized args slice the file.
+- **Pagination**: a cache miss synchronously fetches the bounded result set before
+  returning the requested page. `backgroundFetch: all` does not spawn detached work.
+  Meta becomes `complete: true` after completion; subsequent calls slice the file.
+- **Transport retry**: omitted/empty `retry` and `attempts: 1, backoffS: 0` are
+  accepted. Other values are rejected as unsupported before dispatch. Mutations
+  remain single-attempt; this does not change task-level `onError` restrictions.
 - **serveFrom**: resolve `match` field value from args, look up item in the source tool's
   cache file by that key; return it as if the tool answered. `onMiss` governs absence.
-- **Mutation journaling** (crash safety): log `tool_call_intent` (tool, args, args hash)
-  to the event log BEFORE executing; log `tool_call_result` after. On resume, an intent
-  without a result triggers the task's `onUncertain` policy:
-  `refetch-state` (query current server state; skip write if already applied) | `fail-run`.
+- **Mutation journaling** (process-crash safety): tasks granted a tool classified
+  as a mutation by the root policy or effective gateway must declare intent logging.
+  Validation includes nested subflows; the dispatcher checks classification again.
+  Core logs `tool_call_intent` before executing and `tool_call_result` after.
+  An unresolved intent stops recovery with an explicit uncertain-write failure.
+  Legacy `refetch-state` still parses but also fails closed: no reconciliation query
+  is implemented, and no synthetic result or automatic redispatch is allowed.
+  Completed journaled writes beyond the snapshot watermark also block replay.
+  These checks use authored policy classifications; they cannot infer a remote
+  tool's actual side effects or establish power-loss durability.
+- **Filesystem paths**: cache/worklist server and tool components, and shaped
+  JSON field components, use deterministic safe names. Ordinary short ASCII
+  alphanumeric/underscore/hyphen names stay readable; other names use a reserved
+  prefix plus SHA256. Cache keys must be lowercase SHA256 hex. Remote names stay
+  unchanged on the wire, and unsafe old paths are never used as a fallback.
 - Every proxy decision (cache hit/miss, reshape, page fetch, rewrite) is an event-log line.
 
 ## 7. Event log (normative format)
@@ -348,15 +393,24 @@ Rules:
 `runs/<uuid>/events.jsonl`, one JSON object per line, fields:
 
 ```json
-{ "ts": "...", "runId": "...", "seq": 118, "type": "...", "...": "type-specific" }
+{ "ts": 1700000000000, "runId": "...", "seq": 118, "type": "...", "...": "type-specific" }
 ```
 
 Event types (closed set): `run_started`, `plan_loaded`, `node_entered`, `node_exited`,
-`model_call` (slot, tokens, ms), `tool_call_intent`, `tool_call_result` (or `cache_hit`,
+`model_call` (slot, tokens, ms, finishReason), `tool_call_intent`, `tool_call_result` (or `cache_hit`,
 `served_from_file`), `artifact_written` (path, bytes, sha256), `fetch_progress`,
 `transition` (from, to, key), `budget_exhausted`, `paused`, `resumed`, `error` (class,
 detail), `run_ended` (outcome). `seq` is monotonic per run. Tech debt: hash-chaining
 (see SECURITY doc).
+
+Open/recovery and reads reject malformed nonblank records, invalid envelopes,
+mixed run identities and duplicate/decreasing sequence numbers. Positive
+increasing sequence gaps and blank lines are allowed. Corrupt bytes are retained;
+errors identify the file and line without reproducing tool arguments. A complete
+valid last record lacking a newline gets a delimiter before the next append;
+torn JSON never gets silently skipped or repaired. Payload fields cannot replace
+the envelope. Flush-before-dispatch remains a process-crash ordering measure,
+not an fsync or power-loss durability guarantee.
 
 ## 8. Storage layout (Android app filesDir)
 
@@ -369,9 +423,19 @@ trollm/
   cache/mcp/...
 ```
 
-Flow/task distribution: downloaded bundle = {flow, registry, prompt files, manifest with
-sha256s}; verified before install; cached for offline. Plan pins `sourceBaseline.sha256`;
-app verifies registry+weights hashes match manifest.
+This tree lives in internal `filesDir`, not Android's evictable `cacheDir`.
+Downloaded models use `getExternalFilesDir("models")/<sha256>.gguf`; partial
+transfers use the same persistent directory with a `.download` suffix. The
+internal `models/<slot>.gguf` paths above remain supported for legacy installs.
+Run records, configuration and artifacts stay under internal `filesDir/trollm`.
+App-specific files survive ordinary process death and APK updates; uninstalling
+or clearing app data removes them. External storage can become unavailable and
+must produce an access error rather than silently selecting different weights.
+
+Flow/task distribution: downloaded bundle = {flow, registry, prompt files, manifest
+with sha256s}; files are verified before install and retained for offline access.
+Model identities come from the pinned setup descriptor/effective run configuration,
+or the legacy model sidecar manifests, and are verified separately from the bundle.
 
 ## 9. Crate contracts (pin these signatures)
 
@@ -401,6 +465,7 @@ pub struct ToolResult { pub content_for_model: serde_json::Value,
 pub enum Provenance { Live, Cache, ServedFromFile }
 pub trait ToolGateway: Send {
     fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>>;
+    fn tool_class(&self, server: &str, tool: &str) -> ToolClass; // stable effective policy
     fn validate_call(&self, call: &ToolCall) -> anyhow::Result<()>; // before mutation intent
     fn call(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult>; // applies policies
 }
@@ -433,20 +498,29 @@ gateway. No network, no real models in core tests.
 
 Thin UniFFI wrapper exposing: `list_flows()`, `install_flow_bundle(bytes)`,
 `start_run(flow_sha, user_input) -> run_id`, `poll_status(run_id)`, `pause/resume/cancel`,
-`tail_events(run_id, from_seq)`. No logic beyond marshalling.
+`tail_events(run_id, from_seq)`. It also owns worker controls, model preparation
+and persisted Android run configuration. `poll_status` exposes the durable phase
+alongside `worker_active` and optional ephemeral `activity` (starting, verifying
+a model, loading a model, generating). These fields describe this process;
+they are not synthetic journal events or evidence of task completion.
 
 ## 10. Android app
 
-- Kotlin + Jetpack Compose. Min SDK 28 (subject to llama.cpp/UniFFI constraints — may
-  adjust, non-consequential).
+- Kotlin + Jetpack Compose. Min SDK 33 (Android 13).
 - UniFFI bindings from `trollm-uniffi` (generated, not handwritten).
-- Runs execute in a **foreground service** with partial wake lock; UI observes by tailing
-  the event log (no separate progress API).
+- Rust worker threads execute runs. A **foreground service** observes active work,
+  holds a bounded partial wake lock and displays current progress. It releases
+  its observer and wake lock when all attached runs pause or finish. Resume
+  restarts observation. Foreground execution supports background work; it does
+  not guarantee exemption from Doze or process reclamation.
 - Secrets (MCP bearer tokens) in Android Keystore-backed EncryptedSharedPreferences;
   TLS-only egress to plan-declared MCP server hosts (network security config allowlist).
-- Models + flow bundles sideloaded/downloaded over the enterprise channel; sha256 verified
-  at install (airgap path: USB/ADB bundle transfer).
-- App never parses prose; renders run progress from event-log entries only.
+- Model downloads are size/SHA-256 verified before publication. Native model
+  construction independently rechecks SHA-256 on first use of each slot. Opening
+  the app, history, or setup does not load models; there is no boot-time preload.
+- App never parses prose. It renders durable event entries and current worker
+  activity. Notification permission is requested on the first user Start/Resume;
+  denial does not block execution and is explained in the app.
 
 ## 11. Testing strategy
 
@@ -497,6 +571,11 @@ refine §3–§9 without changing them:
 1. **Counter scope**: budgets are enforced per frame (each flowRef frame enforces its own
    plan's limits); `RunState.counters` is the run-wide aggregate mirror. Rationale: the
    example flows only work per-frame (`return-to-list` gets maxSteps:2 per invocation).
+   Gateway artifact bytes and foreach worklist snapshots charge their owning frame
+   and the aggregate; parent/sibling bytes do not consume a child's allowance.
+   Artifact limits are checked after writing, with `value` and `limit` expressed
+   in bytes in `budget_exhausted` events. Timeout is checked only at task entry:
+   a final long task can exceed it and still succeed. It is not a hard deadline.
 2. **`maxItems`**: per-dispatch-session window; resets on resume. The foreach cursor is
    absolute and persists. Otherwise `maxItems → paused` could never resume.
 3. **Artifact logical names**: `fromArtifact: tracker.list_issues.latest` maps to gateway
@@ -512,9 +591,12 @@ refine §3–§9 without changing them:
    (or top-level array); cursors are 1-based integer page numbers for file slicing, with an
    internal `<hash>.pages.json` index. Opaque string cursors from real servers = **M2
    decision point** (current fallback: serve page 1 from cache).
-7. **Mutation journaling wiring**: gateway emits `MutationPassthrough` BEFORE executing
-   (core journals as `tool_call_intent`), `LiveCall` after; on resume, dangling intents are
-   closed as skipped per `onUncertain`; the real state-refetch lands with real servers in M2.
+7. **Mutation journaling wiring**: core writes its intent before gateway dispatch;
+   proxy events are separate observations. Required gateway classification is
+   forwarded through adapters and checked with root policies. Unresolved intents
+   fail closed on resume, including legacy `refetch-state`; actual per-tool
+   reconciliation remains future work. Mutation-grant and intent-log tasks cannot
+   enable automatic `onError.retry`.
 
 ## 15. Wrapper-integration decisions (post-M3) and core gaps
 
@@ -531,15 +613,27 @@ iteration.
    write into the run's `events.jsonl`, but `Executor` owns `EventLog` seq internally; a
    second writer breaks §7's monotonic seq. Stopgap (accepted): gateway events go to
    `runs/<uuid>/proxy.events.jsonl` (same envelope, own seq); `tail_events` serves the main
-   log only, so `cache_hit`/`fetch_progress` don't reach the UI yet. **Specified fix**:
+   log only, so `cache_hit`/`fetch_progress` don't reach the UI yet. Opening the
+   required sidecar validates its records and continues its positive increasing
+   sequence (gaps allowed). Duplicate/decreasing sequences, corrupt records and
+   write/flush failures stop the worker or dispatch; replacing a failed sink does
+   not reset that gateway's failure. Legacy sidecars whose sequence restarted
+   cannot resume until repaired deliberately; completed history remains readable
+   through the main log. Records are bounded to 1 MiB on scan and append. A valid
+   last record without a newline is delimited before appending. Remote `isError`
+   details are omitted from persistent errors, retaining only bounded escaped
+   tool context and the error category. **Specified future fix**:
    core exposes a shared sequenced sink (`Arc<Mutex<EventLog>>`) that the gateway writes
    through; sidecar is retired.
-4. **CORE GAP B — user-initiated pause/cancel of a running run.** `run_until_blocked` has
-   no step API, so a foreign thread cannot inject `cancel()` mid-dispatch. Stopgap
-   (accepted): cooperative hold at the next model/tool boundary for pause; cancel trips a
-   marker error ending the run as failed/cancelled. **Specified fix**: core gains a
-   `cancel_flag: Arc<AtomicBool>` checked between nodes (and between coder-loop steps),
-   producing a real `paused`/`run_ended{cancelled}` event.
+4. **Cooperative run controls.** The bridge injects an `ExecutionControl` hook
+   at dispatch, model/tool and retry boundaries. Retry delays use the existing
+   condition variable: Pause wakes and holds the delay, Resume continues its
+   remaining duration, and Cancel wakes it without retrying. Cancellation bypasses
+   authored `onError` routes and records a durable cancelled outcome. A successful
+   mutation's result is journaled before honoring post-call cancellation; journal
+   or snapshot failures remain errors. Running model/tool calls remain synchronous
+   and cooperative. A user pause is still an in-process hold, not a persisted
+   authored pause; process loss requires explicit recovery.
 5. **`user_input` persistence**: not in `RunState`; wrapper stores
    `runs/<uuid>/user_input.txt` sidecar so cold resume re-renders prompts faithfully.
    Additive; a later core version may absorb it into RunState.
@@ -548,7 +642,7 @@ iteration.
    and deliberately does not enforce plan↔registry equality.
 7. **Final report access**: §9 has no result accessor; on `Succeeded`, `poll_status` derives
    `final_report` from the run's own records (terminal node's bound prose outputs). A core
-   `run_result()` accessor is the cleaner long-term API — same iteration as gaps A/B.
+   `run_result()` accessor remains a possible later API.
 
 ## 16. Constraints after baseline-review remediation
 
@@ -583,8 +677,10 @@ These implementation choices keep the current prototype bounded:
    of the native inference feature using a standard digest vector.
 6. **Controls and Android:** cooperative holds share one wait-predicate mutex with
    resume/cancel. Only an acknowledged authored pause accepts an authored resume
-   command. Android persists/discovers run UUIDs and the foreground service retains
-   ownership until all attached runs complete. Native library packaging and device
+   command. Android persists/discovers run UUIDs and distinguishes a live worker
+   from interrupted saved progress. Cold Resume is explicit; overlapping Resume
+   requests are serialized before reconstruction. The foreground service retains
+   ownership only while attached runs are actively running. Native library packaging and device
    lifecycle behavior require the Android CI/device checks described in the app README.
 7. **Tool input validation:** the fix for
    INPUT-003 (tool argument schema validation) adds schema
@@ -638,12 +734,43 @@ IDs and removes identifiable orphaned partial transfers on return.
 `start_run_configured` accepts app-resolved JSON with `version: 1`, a `models`
 map (`path`, `sha256`, `ctx`, `temperature`, `topP`) and a `connections` map
 (`url`). The bridge persists normalized effective settings in the run's
-`configuration.json`; cold resume reloads them. Native startup verifies weight
-hashes and applies the recorded sampling settings. New native runs using legacy
+`configuration.json`; cold resume reloads them. Each model slot verifies weight
+hashes and applies the recorded sampling settings when first used. Unused slots
+are not hashed or loaded. Loaded slots are reused within that executor and
+released when it terminates; a reconstructed executor verifies and loads again.
+Pausing does not proactively evict a loaded model, and ordinary backgrounding
+does not launch a second worker or reload a model still owned by the first.
+New native runs using legacy
 slot files also capture their settings; old snapshots remain readable.
-Pre-executor failures persist in `worker-failure.json`, and successful executor
+Worker startup and executor persistence failures persist in `worker-failure.json`, and successful executor
 reconstruction clears an obsolete failure. The UI defaults to one live run;
 the core still supports explicit concurrent callers.
+
+The in-process registry retains live workers and at most 32 ordinary inactive
+handles, evicting the oldest registered inactive entries during registry access.
+Status and history fall back to saved files; eviction deletes no run data or
+models. A failure whose diagnostic could not be written remains in memory outside
+that bound, so cache cleanup cannot discard its only error detail. Completed
+snapshots never reconstruct on Resume. Explicit Resume of unfinished saved
+progress can repair a worker failure consistently before or after handle eviction;
+the existing journal safeguards still apply. Failures without a saved snapshot
+require a new run, and an unwritten failure remains visible until process exit.
+
+`run_summary(run_id)` reads a small projection of the snapshot and worker failure
+record for history, without scanning events or loading models. The list shows
+flow title/id, start time and current outcome, with the UUID retained; known
+times sort newest first and missing metadata stays accessible. Active rows refresh
+only while the screen is started. API errors are classified at their bundle,
+runtime or filesystem operation boundary, not by words in paths or messages.
+
+After process loss, a persisted running/paused phase has `worker_active: false`.
+The UI shows interrupted progress with Resume available and disables live-only
+Pause/Cancel; merely reopening a run performs no inference or tool dispatch.
+An interruption before the first saved snapshot is reported as an explicit
+startup failure requiring a new run. Resume retains the existing journal safety
+checks, including refusal to repeat uncertain writes. Doze/suspension does not
+itself imply model destruction; CPU/network resumption and process-death recovery
+are separate device checks. See [Android's power-management guidance](https://developer.android.com/training/monitoring-device-state/doze-standby).
 
 An ordinary read or mutation policy can set `resultArtifact: page` to publish
 the parsed tool JSON as `page.json` before any shaping. Names match
@@ -689,9 +816,16 @@ operator PEM augments platform roots while retaining normal hostname checks.
 The app now supplies the selected authentication mode and grant-aware token
 callback to Rust. Each run records only modes, endpoints and local grant IDs in
 `connection-auth.json`; it never stores access or refresh tokens there. Cold
-resume reuses those identities. Older runs without this file retain manual
-authentication but cannot silently adopt a newly signed-in OAuth account.
+resume reuses those identities. Older runs without this file cannot silently
+adopt a newly signed-in OAuth account. Manual tokens are now stored with their
+canonical HTTPS endpoint; the callback receives both name and endpoint and
+checks mode, endpoint and token atomically under the connection-edit lock.
+Name-only legacy tokens remain stored but inactive until explicitly re-saved
+with their intended endpoint. A changed flow endpoint cannot adopt that secret.
+Unsupported URL spelling differences fail closed; broader Kotlin/Rust URL
+normalization compatibility remains a separate follow-up.
 Logout, failed sign-in and pending sign-in do not reactivate a retained manual
 token; explicitly saving a manual token selects that mode and invalidates the
-old grant. HTTP failures do not replay mutations. Real sign-in, refresh and
+old grant. Automatic transport/task retries cannot replay declared mutations.
+Real sign-in, refresh and
 device lifecycle acceptance remain to be exercised on the compiled APK.

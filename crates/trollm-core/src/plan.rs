@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub const EXECUTION_PLAN_SCHEMA: &str = "ledger.execution-plan.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionPlan {
     pub schema_version: String,
     pub id: String,
@@ -53,6 +53,7 @@ pub struct ExecutionPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceBaseline {
     pub sha256: String,
 }
@@ -100,7 +101,9 @@ where
     Ok(Some(setup))
 }
 
-fn deserialize_source_baseline<'de, D>(deserializer: D) -> Result<Option<SourceBaseline>, D::Error>
+pub(crate) fn deserialize_source_baseline<'de, D>(
+    deserializer: D,
+) -> Result<Option<SourceBaseline>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -116,14 +119,16 @@ where
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanInput {
+    /// Reserved and inactive; accepted for legacy plan compatibility. Generation
+    /// uses the task registry's templates, with `user_input` bound at runtime.
     #[serde(default)]
     pub prompt_template: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
     pub max_steps: u32,
     pub max_reasoner_calls: u32,
@@ -141,22 +146,25 @@ pub enum RunLimitPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelSlotDecl {
     pub ctx: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpSection {
     #[serde(default)]
     pub servers: Vec<McpServer>,
     /// Per-tool policies keyed `<server>.<tool>` (§6). Kept opaque here: the
-    /// policy structs are consumed by trollm-mcp's PolicyEngine; core only
-    /// parses and exposes them.
+    /// policy structs are consumed by trollm-mcp's PolicyEngine. Core also
+    /// checks declared mutation classes when validating task journaling/retry.
     #[serde(default)]
     pub policies: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpServer {
     pub name: String,
     pub url: String,
@@ -171,6 +179,7 @@ pub enum Transition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InlineTransition {
     pub status: InlineStatus,
     #[serde(default)]
@@ -187,6 +196,7 @@ pub enum InlineStatus {
 
 /// Binding reference like `{ from: setup.outputs.items }` or `{ from: item }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FromBinding {
     pub from: String,
 }
@@ -194,7 +204,7 @@ pub struct FromBinding {
 /// Node-level output binding (§3): from an artifact written during the task, or
 /// absent when the registry `outputContract` alone defines the outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum NodeOutputBinding {
     FromArtifact {
         #[serde(rename = "fromArtifact")]
@@ -213,12 +223,13 @@ pub enum ModelOutputFrom {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeVerify {
     pub artifact_complete: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OnError {
     #[serde(default)]
     pub retry: u32,
@@ -229,7 +240,7 @@ pub struct OnError {
 
 /// flowRef invocation (§4.4): pushes a call frame for another plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FlowRef {
     pub flow_ref: String,
     #[serde(default)]
@@ -238,7 +249,7 @@ pub struct FlowRef {
 
 /// foreach output aggregation spec (§4.6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForeachCollect {
     pub collect: CollectFrom,
     pub index_by: String,
@@ -286,9 +297,9 @@ pub enum NodeOutputs {
 
 /// Node model. Fields for all kinds live on one struct with `Option`s; the
 /// validator (validate.rs) enforces which fields are required/forbidden per
-/// kind, keeping deserialization permissive and errors descriptive.
+/// kind. Authored keys are closed; kind-specific validation stays descriptive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Node {
     pub kind: NodeKind,
 

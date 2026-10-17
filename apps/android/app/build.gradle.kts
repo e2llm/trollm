@@ -3,6 +3,7 @@
 // (`--library` mode), and the Rust cross-compiles run through `cargo-ndk`.
 // Both are plain Exec tasks below; see README.md for the exact host setup.
 
+import groovy.json.JsonSlurper
 import org.gradle.api.tasks.Exec
 
 plugins {
@@ -13,6 +14,21 @@ plugins {
 
 val repoDir = rootDir.resolve(findProperty("trollm.repoDir") as String? ?: "../..")
     .canonicalFile
+// Cargo owns the product version and the separate Android release counter.
+// Reading workspace metadata does not fetch or compile dependencies.
+val cargoMetadata = JsonSlurper().parseText(providers.exec {
+    workingDir(repoDir)
+    commandLine("cargo", "metadata", "--format-version", "1", "--no-deps", "--offline", "--locked")
+}.standardOutput.asText.get()) as Map<*, *>
+val productVersions = (cargoMetadata["packages"] as List<*>)
+    .map { (it as Map<*, *>)["version"] as String }.distinct()
+require(productVersions.size == 1) { "Workspace crates must share one product version" }
+val productVersion = productVersions.single()
+val androidVersionCode = ((cargoMetadata["metadata"] as Map<*, *>)["android"] as Map<*, *>)["version-code"]
+    .let { it as? Int ?: error("workspace.metadata.android.version-code must be an integer") }
+require(androidVersionCode in 1..2_100_000_000) {
+    "workspace.metadata.android.version-code must be in 1..2100000000"
+}
 val rustFeatures = findProperty("trollm.rustFeatures") as String? ?: "llama"
 require(rustFeatures == "stub" || rustFeatures == "llama") {
     "trollm.rustFeatures must be stub or llama"
@@ -29,8 +45,8 @@ android {
         applicationId = "com.trollm.app"
         minSdk = 33 // UniFFI's generated JVM Cleaner bindings require Android 13.
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.0"
+        versionCode = androidVersionCode
+        versionName = productVersion
     }
 
     System.getenv("TROLLM_DEBUG_KEYSTORE_PATH")?.let { path ->

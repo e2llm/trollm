@@ -216,6 +216,9 @@ fn handle_connection(
             }
             if let Some(kind) = args.get("toolError").and_then(Value::as_str) {
                 let result = match kind {
+                    "near_cap" => {
+                        json!({"content": [{"type":"text", "text": format!("credential-secret-{}", "x".repeat(32 * 1024 * 1024 - 2048))}], "isError": true})
+                    }
                     "structured" => {
                         json!({"structuredContent": {"failure": true}, "isError": true})
                     }

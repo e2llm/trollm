@@ -14,6 +14,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,11 +23,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import java.text.DateFormat
+import java.util.Date
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import com.trollm.app.FlowSetup
+import com.trollm.app.historyEntries
 import com.trollm.app.StarterFlows
 import uniffi.trollm_uniffi.FlowInfo
+import uniffi.trollm_uniffi.RunSummaryInfo
 import uniffi.trollm_uniffi.TrollmRuntime
 
 /** Installed flows from `list_flows` (§9), content-addressed by sha256. */
@@ -40,9 +49,13 @@ fun FlowListScreen(
     onConnections: () -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var flows by remember { mutableStateOf<List<FlowInfo>>(emptyList()) }
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var summaries by remember { mutableStateOf<Map<String, RunSummaryInfo>>(emptyMap()) }
     var error by remember { mutableStateOf<String?>(null) }
+    val history = remember(runIds, summaries, titles) { historyEntries(runIds, summaries, titles) }
+    val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT) }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         val starterError = runCatching { StarterFlows.ensureInstalled(context, runtime) }.exceptionOrNull()
@@ -59,6 +72,26 @@ fun FlowListScreen(
             titles = listed.associate { it.first.sha256 to it.second }
         }.exceptionOrNull()
         error = (listingError ?: starterError)?.message
+    }
+
+    LaunchedEffect(runtime, runIds, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            // A screen return or foreground transition refreshes every saved row.
+            summaries = withContext(Dispatchers.IO) {
+                runIds.mapNotNull { id -> runCatching { runtime.runSummary(id) }.getOrNull()?.let { id to it } }.toMap()
+            }
+            // While a worker remains live, refresh only its rows. The observer
+            // stops with the screen and never tails an event log.
+            while (true) {
+                val activeIds = summaries.filterValues { it.workerActive }.keys
+                if (activeIds.isEmpty()) break
+                delay(2_000)
+                val refreshed = withContext(Dispatchers.IO) {
+                    activeIds.mapNotNull { id -> runCatching { runtime.runSummary(id) }.getOrNull()?.let { id to it } }.toMap()
+                }
+                summaries = (summaries - activeIds) + refreshed
+            }
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -90,11 +123,19 @@ fun FlowListScreen(
                     }
                 }
             }
-            if (runIds.isNotEmpty()) {
+            if (history.isNotEmpty()) {
                 item { Text("Run history", style = MaterialTheme.typography.titleMedium) }
-                items(runIds) { id ->
-                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpenRun(id) }) {
-                        Text(id, modifier = Modifier.padding(12.dp), fontFamily = FontFamily.Monospace)
+                items(history, key = { it.id }) { entry ->
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpenRun(entry.id) }) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(entry.flowTitle, style = MaterialTheme.typography.titleMedium)
+                            entry.flowId?.takeIf { it != entry.flowTitle }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                            Text(
+                                "${entry.startedAtMs?.let { dateFormat.format(Date(it)) } ?: "Time unavailable"} · ${entry.status}",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(entry.id, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
             }

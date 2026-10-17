@@ -1,5 +1,12 @@
 package com.trollm.app.ui
 
+import android.Manifest
+import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.Lifecycle
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
@@ -40,15 +47,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import com.trollm.app.RunService
+import com.trollm.app.RunPresentation
+import com.trollm.app.presentRun
 import uniffi.trollm_uniffi.FlowInfo
 import uniffi.trollm_uniffi.TrollmRuntime
-import uniffi.trollm_uniffi.RunPhaseApi
 
 /**
  * Run screen: user input → `start_run` → tail the event log via
- * `tail_events` polling (§10: "UI observes by tailing the event log — no
- * separate progress API"). Progress lines come from event types only
- * ([renderEvent]). The foreground service holds the wake lock.
+ * `tail_events` polling. Progress lines come from event types
+ * ([renderEvent]); current worker activity supplies the live status label.
+ * The foreground service holds the wake lock during active execution.
  */
 @Composable
 fun RunScreen(
@@ -72,11 +80,28 @@ fun RunScreen(
     var setupChecked by remember(flow?.sha256) { mutableStateOf(false) }
     var preparing by rememberSaveable(flow?.sha256) { mutableStateOf(false) }
     var configurationJson by rememberSaveable(flow?.sha256) { mutableStateOf<String?>(null) }
-    var phase by remember(runId) { mutableStateOf<RunPhaseApi?>(null) }
     var finalReport by remember(runId) { mutableStateOf<String?>(null) }
     var lines by remember(runId) { mutableStateOf<List<String>>(emptyList()) }
     var error by remember(runId, flow?.sha256) { mutableStateOf<String?>(null) }
     var pollingError by remember(runId) { mutableStateOf<String?>(null) }
+    var presentation by remember(runId) { mutableStateOf<RunPresentation?>(null) }
+    var requesting by remember(runId) { mutableStateOf(false) }
+    var pollingGeneration by remember(runId) { mutableStateOf(0) }
+    val notificationPreferences = remember(context) { context.getSharedPreferences("run-notifications", Context.MODE_PRIVATE) }
+    var notificationsEnabled by remember { mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled()) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+    val prepareNotifications = {
+        notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        if (!notificationsEnabled && !notificationPreferences.getBoolean("requested", false)) {
+            notificationPreferences.edit().putBoolean("requested", true).apply()
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val listState = rememberLazyListState()
     val inputScroll = rememberScrollState()
 
@@ -101,9 +126,10 @@ fun RunScreen(
     }
 
     // Tail loop: incremental cursor over events.jsonl; status via poll_status.
-    LaunchedEffect(runId) {
+    LaunchedEffect(runId, pollingGeneration) {
         val id = runId ?: return@LaunchedEffect
         var cursor = 0uL
+        lines = emptyList()
         while (isActive) {
             val step = runCatching {
                 withContext(Dispatchers.IO) {
@@ -118,13 +144,13 @@ fun RunScreen(
                     lines = lines + events.map(::renderEvent)
                     cursor = events.last().seq
                 }
-                phase = status.phase
+                presentation = presentRun(status.phase, status.workerActive, status.activity)
                 finalReport = status.finalReport
             }.onFailure {
                 if (it is CancellationException) throw it
                 pollingError = it.message
             }
-            if (phase is RunPhaseApi.Succeeded || phase is RunPhaseApi.Failed) break
+            if (presentation?.keepPolling == false) break
             delay(300)
             if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
         }
@@ -196,6 +222,7 @@ fun RunScreen(
                 val submittedConfiguration = configurationJson
                 error = null
                 starting = true
+                prepareNotifications()
                 scope.launch {
                     runCatching {
                         withContext(Dispatchers.IO) {
@@ -216,37 +243,45 @@ fun RunScreen(
                 }
             }) { Text(if (starting) "Starting…" else "Start run") }
         } else if (runId != null) {
-            val phaseText = when (val p = phase) {
-                null -> "starting…"
-                is RunPhaseApi.Running -> "running"
-                is RunPhaseApi.Paused -> "paused: ${p.reason}"
-                is RunPhaseApi.Succeeded -> "succeeded"
-                is RunPhaseApi.Failed -> "failed: ${p.reason}"
-            }
-            Text(phaseText, style = MaterialTheme.typography.titleMedium,
+            Text(presentation?.text ?: "Starting…", style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(vertical = 8.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(enabled = phase is RunPhaseApi.Running, onClick = {
+                Button(enabled = !requesting && presentation?.canPause == true, onClick = {
+                    requesting = true
                     scope.launch {
                         runCatching { withContext(Dispatchers.IO) { runtime.pause(runId) } }
                             .onFailure { error = it.message }
+                        requesting = false
                     }
                 }) { Text("Pause") }
-                Button(enabled = phase is RunPhaseApi.Running || phase is RunPhaseApi.Paused, onClick = {
+                Button(enabled = !requesting && presentation?.canResume == true, onClick = {
+                    requesting = true
+                    prepareNotifications()
                     scope.launch {
+                        var resumed = false
                         runCatching {
                             withContext(Dispatchers.IO) {
                                 runtime.resume(runId)
+                                resumed = true
                                 RunService.start(context.applicationContext, runId)
                             }
                         }.onFailure { error = it.message }
+                        if (resumed) {
+                            // The old disk-only observer stopped. Restart it only
+                            // after this explicit user request restores a worker.
+                            presentation = null
+                            pollingGeneration++
+                        }
+                        requesting = false
                     }
                 }) { Text("Resume") }
-                Button(enabled = phase is RunPhaseApi.Running || phase is RunPhaseApi.Paused, onClick = {
+                Button(enabled = !requesting && presentation?.canCancel == true, onClick = {
+                    requesting = true
                     scope.launch {
                         runCatching { withContext(Dispatchers.IO) { runtime.cancel(runId) } }
                             .onFailure { error = it.message }
+                        requesting = false
                     }
                 }) { Text("Cancel") }
             }
@@ -265,6 +300,9 @@ fun RunScreen(
             }
         }
 
+        if (!notificationsEnabled && (runId != null || starting)) {
+            Text("Background progress notifications are disabled. Enable them in Android app settings.", style = MaterialTheme.typography.bodySmall)
+        }
         error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
         pollingError?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
         Button(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back") }

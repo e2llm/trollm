@@ -44,7 +44,7 @@
       "properties": {
         "promptTemplate": {
           "type": "string",
-          "description": "May reference {{ user_input }}."
+          "description": "Reserved metadata; not rendered by the v1 runtime. Task-registry prompt files supply instructions and may reference {{ user_input }}."
         }
       }
     },

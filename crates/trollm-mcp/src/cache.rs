@@ -2,7 +2,7 @@
 //! plus a `.meta.json` sidecar. Atomic writes (tmp + rename); entries whose meta
 //! is missing, expired, or `complete: false` are treated as misses.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -91,19 +91,24 @@ impl CacheStore {
     }
 
     fn dir(&self, server: &str, tool: &str) -> PathBuf {
-        self.root.join(server).join(tool)
+        self.root
+            .join(safe_path_component(server))
+            .join(safe_path_component(tool))
     }
 
-    fn jsonl_path(&self, server: &str, tool: &str, hash: &str) -> PathBuf {
-        self.dir(server, tool).join(format!("{hash}.jsonl"))
+    fn jsonl_path(&self, server: &str, tool: &str, hash: &str) -> Result<PathBuf> {
+        validate_hash(hash)?;
+        Ok(self.dir(server, tool).join(format!("{hash}.jsonl")))
     }
 
-    fn meta_path(&self, server: &str, tool: &str, hash: &str) -> PathBuf {
-        self.dir(server, tool).join(format!("{hash}.meta.json"))
+    fn meta_path(&self, server: &str, tool: &str, hash: &str) -> Result<PathBuf> {
+        validate_hash(hash)?;
+        Ok(self.dir(server, tool).join(format!("{hash}.meta.json")))
     }
 
-    fn pages_path(&self, server: &str, tool: &str, hash: &str) -> PathBuf {
-        self.dir(server, tool).join(format!("{hash}.pages.json"))
+    fn pages_path(&self, server: &str, tool: &str, hash: &str) -> Result<PathBuf> {
+        validate_hash(hash)?;
+        Ok(self.dir(server, tool).join(format!("{hash}.pages.json")))
     }
 
     /// Returns the entry iff the meta exists, is complete, and is within TTL.
@@ -122,8 +127,8 @@ impl CacheStore {
         tool: &str,
         hash: &str,
     ) -> Result<Option<CacheEntry>> {
-        let meta_path = self.meta_path(server, tool, hash);
-        if !meta_path.exists() || !self.jsonl_path(server, tool, hash).exists() {
+        let meta_path = self.meta_path(server, tool, hash)?;
+        if !meta_path.exists() || !self.jsonl_path(server, tool, hash)?.exists() {
             return Ok(None);
         }
         let meta: CacheMeta =
@@ -149,6 +154,9 @@ impl CacheStore {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if let Some(hash) = name.strip_suffix(".meta.json") {
+                if validate_hash(hash).is_err() {
+                    continue;
+                }
                 if let Some(e) = self.fresh_entry(server, tool, hash)? {
                     out.push(e);
                 }
@@ -159,7 +167,7 @@ impl CacheStore {
 
     /// Reads all JSONL lines of an entry as JSON values.
     pub fn read_items(&self, server: &str, tool: &str, hash: &str) -> Result<Vec<Value>> {
-        let path = self.jsonl_path(server, tool, hash);
+        let path = self.jsonl_path(server, tool, hash)?;
         let file = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
         let mut items = Vec::new();
         for line in BufReader::new(file).lines() {
@@ -199,7 +207,7 @@ impl CacheStore {
     }
 
     fn read_page_index(&self, server: &str, tool: &str, hash: &str) -> Result<Option<PageIndex>> {
-        let path = self.pages_path(server, tool, hash);
+        let path = self.pages_path(server, tool, hash)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -243,6 +251,7 @@ impl CacheStore {
         ttl_s: u64,
         source_args: &Value,
     ) -> Result<()> {
+        validate_hash(hash)?;
         let dir = self.dir(server, tool);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         self.write_items_atomic(server, tool, hash, page1)?;
@@ -250,7 +259,7 @@ impl CacheStore {
             field: field.to_string(),
             counts: vec![page1.len() as u64],
         };
-        self.write_json_atomic(&self.pages_path(server, tool, hash), &index)?;
+        self.write_json_atomic(&self.pages_path(server, tool, hash)?, &index)?;
         let meta = CacheMeta {
             fetched_at: now_secs(),
             ttl_s,
@@ -259,7 +268,7 @@ impl CacheStore {
             total_items: None,
             source_args: source_args.clone(),
         };
-        self.write_json_atomic(&self.meta_path(server, tool, hash), &meta)
+        self.write_json_atomic(&self.meta_path(server, tool, hash)?, &meta)
     }
 
     /// Appends one fetched page to an in-progress entry and updates the index.
@@ -270,7 +279,7 @@ impl CacheStore {
         hash: &str,
         page_items: &[Value],
     ) -> Result<u32> {
-        let path = self.jsonl_path(server, tool, hash);
+        let path = self.jsonl_path(server, tool, hash)?;
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -283,7 +292,7 @@ impl CacheStore {
             .read_page_index(server, tool, hash)?
             .context("page index missing for in-progress entry")?;
         index.counts.push(page_items.len() as u64);
-        self.write_json_atomic(&self.pages_path(server, tool, hash), &index)?;
+        self.write_json_atomic(&self.pages_path(server, tool, hash)?, &index)?;
         Ok(index.counts.len() as u32)
     }
 
@@ -308,7 +317,7 @@ impl CacheStore {
             total_items: Some(total),
             source_args: source_args.clone(),
         };
-        self.write_json_atomic(&self.meta_path(server, tool, hash), &meta)?;
+        self.write_json_atomic(&self.meta_path(server, tool, hash)?, &meta)?;
         Ok(meta)
     }
 
@@ -320,10 +329,11 @@ impl CacheStore {
         items: &[Value],
         meta: &CacheMeta,
     ) -> Result<()> {
+        validate_hash(hash)?;
         let dir = self.dir(server, tool);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         self.write_items_atomic(server, tool, hash, items)?;
-        self.write_json_atomic(&self.meta_path(server, tool, hash), meta)
+        self.write_json_atomic(&self.meta_path(server, tool, hash)?, meta)
     }
 
     fn write_items_atomic(
@@ -333,7 +343,7 @@ impl CacheStore {
         hash: &str,
         items: &[Value],
     ) -> Result<()> {
-        let path = self.jsonl_path(server, tool, hash);
+        let path = self.jsonl_path(server, tool, hash)?;
         let tmp = path.with_extension("jsonl.tmp");
         {
             let mut file =
@@ -431,4 +441,60 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+fn validate_hash(hash: &str) -> Result<()> {
+    ensure!(
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "cache hash must be 64 lowercase hexadecimal characters"
+    );
+    Ok(())
+}
+
+/// Storage identifiers only: preserve common names, hash every other name into
+/// one bounded component. The reserved `~` prefix separates encoded identifiers
+/// from preserved names. Never fall back to reading an unsafe legacy path.
+pub(crate) fn safe_path_component(name: &str) -> String {
+    if !name.is_empty()
+        && name.len() <= 80
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        name.to_string()
+    } else {
+        format!("~{}", hex_encode(&Sha256::digest(name.as_bytes())))
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::safe_path_component;
+
+    #[test]
+    fn encoded_components_are_bounded_and_disjoint_from_preserved_names() {
+        assert_eq!(safe_path_component("list_issues-2"), "list_issues-2");
+        for name in [
+            "",
+            ".",
+            "..",
+            "/absolute",
+            "../relative",
+            "a/b",
+            "a\\b",
+            "café",
+            &"a".repeat(81),
+        ] {
+            let encoded = safe_path_component(name);
+            assert_eq!(encoded.len(), 65);
+            assert!(encoded.starts_with('~'));
+            assert!(encoded[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(safe_path_component(name), encoded);
+            assert_ne!(safe_path_component(&encoded), encoded);
+        }
+        assert_ne!(safe_path_component("a/b"), safe_path_component("a\\b"));
+    }
 }

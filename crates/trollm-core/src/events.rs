@@ -65,40 +65,28 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Append-only JSONL writer. Every line is flushed immediately: the log must
-/// survive a process crash at any point (§6 crash safety depends on a durable
-/// `tool_call_intent` hitting disk before the gateway call happens).
+/// Append-only JSONL writer. Every line is flushed before returning so mutation
+/// intents precede gateway dispatch. This is not an fsync/power-loss guarantee.
 pub struct EventLog {
     path: PathBuf,
     file: File,
     run_id: String,
     seq: u64,
+    needs_delimiter: bool,
 }
 
 impl EventLog {
     /// Open (or create) the log for `run_id`. On an existing log, `seq`
     /// continues after the last recorded line (resume path, §4.4).
     pub fn open(path: &Path, run_id: &str) -> std::io::Result<Self> {
-        let mut seq = 0u64;
-        if path.exists() {
-            for line in BufReader::new(File::open(path)?).lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if let Some(s) = v.get("seq").and_then(|s| s.as_u64()) {
-                        seq = seq.max(s);
-                    }
-                }
-            }
-        }
+        let (seq, needs_delimiter) = scan(path, Some(run_id), |_| {})?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             path: path.to_path_buf(),
             file,
             run_id: run_id.to_string(),
             seq,
+            needs_delimiter,
         })
     }
 
@@ -113,11 +101,23 @@ impl EventLog {
     /// Append one event; returns its seq. `fields` are the type-specific
     /// payload merged into the envelope `{ts, runId, seq, type}`.
     pub fn append(&mut self, ty: EventType, fields: Value) -> std::io::Result<u64> {
-        self.seq += 1;
+        if let Value::Object(extra) = &fields {
+            for key in ["ts", "runId", "seq", "type"] {
+                if extra.contains_key(key) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("event payload cannot override envelope field {key}"),
+                    ));
+                }
+            }
+        }
+        let next_seq = self.seq.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "event sequence exhausted")
+        })?;
         let mut obj = json!({
             "ts": now_ms(),
             "runId": self.run_id,
-            "seq": self.seq,
+            "seq": next_seq,
             "type": ty.as_str(),
         });
         if let (Value::Object(base), Value::Object(extra)) = (&mut obj, &fields) {
@@ -127,28 +127,101 @@ impl EventLog {
         }
         let mut line = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
         line.push('\n');
+        if self.needs_delimiter {
+            self.file.write_all(b"\n")?;
+            self.needs_delimiter = false;
+        }
         self.file.write_all(line.as_bytes())?;
         self.file.flush()?;
+        self.seq = next_seq;
         Ok(self.seq)
     }
 
     /// Read the whole log back (resume / crash-recovery scan).
     pub fn read_all(path: &Path) -> std::io::Result<Vec<Value>> {
         let mut out = Vec::new();
-        if !path.exists() {
-            return Ok(out);
-        }
-        for line in BufReader::new(File::open(path)?).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                out.push(v);
-            }
-        }
+        scan(path, None, |event| out.push(event))?;
         Ok(out)
     }
+}
+
+/// Validate the complete journal before opening a writer or exposing recovery
+/// events. Sequence gaps are allowed; duplicates and decreases are not.
+/// Diagnostics deliberately omit record contents (which can contain secrets).
+fn scan(
+    path: &Path,
+    expected_run_id: Option<&str>,
+    mut event: impl FnMut(Value),
+) -> std::io::Result<(u64, bool)> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, false)),
+        Err(error) => return Err(error),
+    };
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut line_number = 0;
+    let mut seq = 0;
+    let mut run_id = expected_run_id.map(str::to_owned);
+    let mut needs_delimiter = false;
+    loop {
+        buffer.clear();
+        if reader.read_until(b'\n', &mut buffer)? == 0 {
+            break;
+        }
+        line_number += 1;
+        let invalid = |reason| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: line {line_number}: {reason}", path.display()),
+            )
+        };
+        needs_delimiter = !buffer.ends_with(b"\n");
+        let line = std::str::from_utf8(&buffer).map_err(|_| invalid("invalid UTF-8"))?;
+        // Empty/whitespace-only lines carry no event, including at EOF.
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(line).map_err(|_| invalid("malformed JSON record"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid("event must be an object"))?;
+        if !object.get("ts").is_some_and(Value::is_number) {
+            return Err(invalid("ts must be numeric"));
+        }
+        if object
+            .get("type")
+            .cloned()
+            .and_then(|ty| serde_json::from_value::<EventType>(ty).ok())
+            .is_none()
+        {
+            return Err(invalid("type must be a recognized event type"));
+        }
+        let record_run_id = object
+            .get("runId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| invalid("runId must be a nonempty string"))?;
+        if let Some(expected) = &run_id {
+            if expected != record_run_id {
+                return Err(invalid("runId does not match the journal run"));
+            }
+        } else {
+            run_id = Some(record_run_id.to_owned());
+        }
+        let next_seq = object
+            .get("seq")
+            .and_then(Value::as_u64)
+            .filter(|seq| *seq > 0)
+            .ok_or_else(|| invalid("seq must be a positive integer"))?;
+        if next_seq <= seq {
+            return Err(invalid("seq must be strictly increasing"));
+        }
+        seq = next_seq;
+        event(value);
+    }
+    Ok((seq, needs_delimiter))
 }
 
 /// A `tool_call_intent` with no matching `tool_call_result` (§6 mutation

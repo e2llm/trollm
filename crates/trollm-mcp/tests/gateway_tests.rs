@@ -287,6 +287,7 @@ fn collecting_sink() -> (Arc<Mutex<Vec<String>>>, EventSink) {
     let events_clone = events.clone();
     let sink: EventSink = Box::new(move |event| {
         events_clone.lock().unwrap().push(event.kind().to_string());
+        Ok(())
     });
     (events, sink)
 }
@@ -575,7 +576,7 @@ fn mutation_passthrough_never_touches_cache() {
 fn mutation_result_policies(shape: bool) -> PolicySet {
     let mut policy = json!({
         "class":"mutation", "passthrough":true,
-        "retry":{"attempts":3,"backoffS":0},
+        "retry":{"attempts":1,"backoffS":0},
         "cache":{"key":["id"],"ttlS":900},
         "resultArtifact":"page",
         "resultValidation":{"maxBytes":256,"schema":{
@@ -857,7 +858,7 @@ fn ambiguous_mutation_failure_is_not_retried() {
     let server = MockMcpServer::start();
     let dirs = TempDir::new("retry");
     let policies = PolicySet::from_yaml_str(
-        "tracker.drop_mutation: {class: mutation, retry: {attempts: 3, backoffS: 0}}",
+        "tracker.drop_mutation: {class: mutation, retry: {attempts: 1, backoffS: 0}}",
     )
     .unwrap();
     let mut gw = gateway(&server, policies, &dirs, None);
@@ -1213,7 +1214,7 @@ fn grant_mutation_http_401_is_not_replayed_or_retried() {
     let config = ServerConfig::for_local_test("tracker", &server.url)
         .with_grant_token_getter(Arc::new(|| Some("grant-access".into())));
     let policies = PolicySet::from_yaml_str(
-        "tracker.close_issue: {class: mutation, retry: {attempts: 3, backoffS: 0}}",
+        "tracker.close_issue: {class: mutation, retry: {attempts: 1, backoffS: 0}}",
     )
     .unwrap();
     let mut gw = McpGateway::new(
@@ -1278,8 +1279,8 @@ fn result_validation_policy_is_bounded_non_paginated_and_strict_inside_its_objec
         r#"tracker.close_issue: {class: mutation, resultValidation: {maxBytes: 64, schema: true}}"#
     )
     .is_ok());
-    // Existing policy compatibility is unchanged outside the new strict object.
-    assert!(PolicySet::from_yaml_str(r#"tracker.get_issue: {existingUnknown: true, resultValidation: {maxBytes: 262144, schema: true}}"#).is_ok());
+    // The enclosing policy is also a closed authoring object.
+    assert!(PolicySet::from_yaml_str(r#"tracker.get_issue: {existingUnknown: true, resultValidation: {maxBytes: 262144, schema: true}}"#).is_err());
 }
 
 #[test]
@@ -1563,4 +1564,90 @@ fn run_argument_constraints_compile_offline_and_reject_invalid_keys() {
             .with_argument_constraints(std::collections::BTreeMap::from([(key.into(), schema)]))
             .is_err());
     }
+}
+
+#[test]
+fn near_cap_remote_error_is_bounded_and_never_published() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("near-cap-error");
+    let policies = PolicySet::from_yaml_str(
+        "tracker.summarize: {class: read, cache: {key: [query], ttlS: 900}, resultArtifact: page}",
+    )
+    .unwrap();
+    let mut gw = gateway(&server, policies, &dirs, None);
+    let request = call(
+        "tracker",
+        "summarize",
+        json!({"query":"test", "toolError":"near_cap"}),
+    );
+    for _ in 0..2 {
+        let diagnostic = format!("{:#}", gw.call(&request).unwrap_err());
+        assert!(diagnostic.contains("summarize"));
+        assert!(diagnostic.contains("isError"));
+        assert!(
+            diagnostic.len() < 512,
+            "diagnostic length {}",
+            diagnostic.len()
+        );
+        assert!(!diagnostic.contains("credential-secret"));
+    }
+    assert_eq!(server.count("call:summarize"), 2);
+    assert!(!dirs.path().join("artifacts/page.json").exists());
+    assert!(!dirs.path().join("artifacts/page.json.meta.json").exists());
+}
+
+#[test]
+fn audit_failure_after_mutation_blocks_every_subsequent_dispatch() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("audit-after-mutation");
+    let attempts = Arc::new(Mutex::new(0));
+    let captured = attempts.clone();
+    let sink: EventSink = Box::new(move |event| {
+        *captured.lock().unwrap() += 1;
+        if event.kind() == "live_call" {
+            anyhow::bail!("injected audit flush failure");
+        }
+        Ok(())
+    });
+    let mut gw = gateway(&server, fixture_policies(), &dirs, Some(sink));
+    let mutation = call("tracker", "close_issue", json!({"id":1}));
+    assert!(gw
+        .call(&mutation)
+        .unwrap_err()
+        .to_string()
+        .contains("proxy audit write failed"));
+    assert_eq!(server.count("call:close_issue"), 1);
+    let requests = server.request_auth.lock().unwrap().len();
+    for request in [
+        &mutation,
+        &call("tracker", "list_issues", json!({"query":"test"})),
+    ] {
+        assert!(gw
+            .call(request)
+            .unwrap_err()
+            .to_string()
+            .contains("further MCP dispatch prohibited"));
+    }
+    assert!(gw.list_tools().is_err());
+    // A replacement sink cannot erase the lifetime failure latch.
+    gw.set_event_sink(Box::new(|_| Ok(())));
+    assert!(gw.call(&mutation).is_err());
+    assert_eq!(server.request_auth.lock().unwrap().len(), requests);
+    assert_eq!(*attempts.lock().unwrap(), 2);
+}
+
+#[test]
+fn audit_intent_failure_prevents_mutation_dispatch() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("audit-before-mutation");
+    let mut gw = gateway(
+        &server,
+        fixture_policies(),
+        &dirs,
+        Some(Box::new(|_| anyhow::bail!("injected write failure"))),
+    );
+    assert!(gw
+        .call(&call("tracker", "close_issue", json!({"id":1})))
+        .is_err());
+    assert_eq!(server.count("call:close_issue"), 0);
 }

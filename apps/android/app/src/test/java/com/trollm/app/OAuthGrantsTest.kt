@@ -72,29 +72,33 @@ class OAuthGrantsTest {
         assertEquals("StoredConnection(redacted)", StoredConnection(null, "private-token", null).toString())
     }
 
-    @Test fun legacyMigrationPrefersOAuthThenManualThenAnonymousAndPersistsChoice() {
+    @Test fun legacyMigrationRetainsUnboundManualSecretsWithoutActivatingThem() {
         val memory = Memory()
         memory.values["oauth"] = StoredConnection(null, "legacy-token",
             OAuthGrant("grant", "oauth", "https://example.test/mcp", "state"))
         memory.values["manual"] = StoredConnection(null, "legacy-token", null)
         val grants = memory.open()
         assertEquals(SelectedAuthMode.OAUTH, grants.mode("oauth"))
-        assertEquals(SelectedAuthMode.BEARER, grants.mode("manual"))
+        assertEquals(SelectedAuthMode.UNAVAILABLE, grants.mode("manual"))
         assertEquals(SelectedAuthMode.ANONYMOUS, grants.mode("empty"))
         assertEquals(SelectedAuthMode.OAUTH, memory.values["oauth"]?.mode)
-        assertEquals(SelectedAuthMode.BEARER, memory.values["manual"]?.mode)
+        assertEquals(SelectedAuthMode.UNAVAILABLE, memory.values["manual"]?.mode)
+        assertEquals("legacy-token", memory.values["manual"]?.manualToken)
+        assertNull(grants.manualToken("manual", "https://example.test/mcp"))
         assertEquals(SelectedAuthMode.ANONYMOUS, memory.values["empty"]?.mode)
     }
 
     @Test fun pendingFailedAndLoggedOutOAuthNeverFallsBackToRetainedManualToken() {
         val memory = Memory()
         val grants = memory.open()
-        grants.selectManual("browser", "legacy-token")
+        grants.selectManual("browser", "https://example.test/mcp", "legacy-token")
         val attempt = grants.begin("browser", "https://example.test/mcp", "", "preparing")
         assertEquals(SelectedAuthMode.OAUTH, grants.mode("browser"))
         assertNull(grants.pin("browser", attempt.endpoint))
         grants.invalidate("browser", attempt.id)
         assertEquals("legacy-token", memory.values["browser"]?.manualToken)
+        assertEquals("https://example.test/mcp", memory.values["browser"]?.manualEndpoint)
+        assertNull(grants.manualToken("browser", attempt.endpoint))
         assertEquals(SelectedAuthMode.UNAVAILABLE, memory.open().mode("browser"))
         val next = grants.begin("browser", attempt.endpoint, "", "preparing")
         assertTrue(grants.prepare("browser", next.id, next.endpoint, "state", "request"))
@@ -107,14 +111,14 @@ class OAuthGrantsTest {
     @Test fun explicitManualSaveInvalidatesOAuthAndSelectsManualOrAnonymous() {
         val grants = grants()
         val attempt = grants.begin("browser", "https://example.test/mcp", "", "preparing")
-        grants.selectManual("browser", "chosen-token")
+        grants.selectManual("browser", "https://example.test/mcp", "chosen-token")
         assertEquals(SelectedAuthMode.BEARER, grants.mode("browser"))
         assertNull(grants.current("browser"))
         assertFalse(grants.prepare("browser", attempt.id, attempt.endpoint, "late-state", "request"))
         assertFalse(grants.update("browser", attempt.id, attempt.endpoint, "late-token-state"))
         grants.invalidate("browser", attempt.id)
         assertEquals(SelectedAuthMode.BEARER, grants.mode("browser"))
-        grants.selectManual("browser", null)
+        grants.selectManual("browser", null, null)
         assertEquals(SelectedAuthMode.ANONYMOUS, grants.mode("browser"))
     }
 
@@ -133,4 +137,74 @@ class OAuthGrantsTest {
         assertEquals(replacement.id, cold.current("browser")?.id)
         assertEquals(replacement.id, cold.bind("browser", first.endpoint, replacement.id)?.grantId)
     }
+
+    @Test fun manualSecretsAreEndpointBoundAcrossColdOpenAndExplicitReplacement() {
+        val memory = Memory()
+        val grants = memory.open()
+        grants.selectManual("browser", "https://EXAMPLE.TEST:443/mcp", "dummy-a")
+        val cold = memory.open()
+        assertEquals("dummy-a", cold.manualToken("browser", "https://example.test/mcp"))
+        for (url in listOf("https://elsewhere.test/mcp", "https://example.test/other",
+            "https://example.test/mcp?tenant=other", "https://example.test/a/../mcp")) {
+            assertNull(cold.manualToken("browser", url))
+        }
+        assertNull(cold.manualToken("other", "https://example.test/mcp"))
+        // Selection happened before another store instance changed the endpoint.
+        assertEquals(SelectedAuthMode.BEARER, cold.mode("browser"))
+        grants.selectManual("browser", "https://elsewhere.test/mcp", "dummy-b")
+        assertNull(cold.manualToken("browser", "https://example.test/mcp"))
+        assertEquals("dummy-b", cold.manualToken("browser", "https://elsewhere.test/mcp"))
+        grants.selectManual("browser", null, null)
+        assertNull(cold.manualToken("browser", "https://elsewhere.test/mcp"))
+    }
+
+    @Test fun bothLegacyStorageVersionsNeedExplicitSaveAndRetainTheirSecrets() {
+        val memory = Memory()
+        for ((name, mode) in listOf("old" to null, "selected" to SelectedAuthMode.BEARER)) {
+            memory.values[name] = StoredConnection(mode, "dummy-legacy", null)
+            val grants = memory.open()
+            assertEquals(SelectedAuthMode.UNAVAILABLE, grants.mode(name))
+            assertNull(grants.manualToken(name, "https://example.test/mcp"))
+            assertNull(grants.manualToken(name, "https://elsewhere.test/mcp"))
+            assertEquals("dummy-legacy", memory.values[name]?.manualToken)
+            grants.selectManual(name, "https://example.test/mcp", "dummy-confirmed")
+            assertEquals("dummy-confirmed", memory.open().manualToken(name, "https://example.test/mcp"))
+        }
+    }
+
+    @Test fun concurrentEndpointEditsNeverPairAnotherEndpointsTokenWithTheRequestedUrl() {
+        val memory = Memory()
+        val reader = memory.open()
+        val writer = memory.open()
+        writer.selectManual("browser", "https://a.test/mcp", "dummy-a")
+        val start = java.util.concurrent.CountDownLatch(1)
+        val edit = Thread {
+            start.await()
+            repeat(500) {
+                writer.selectManual("browser", "https://b.test/mcp", "dummy-b")
+                writer.selectManual("browser", "https://a.test/mcp", "dummy-a")
+            }
+        }
+        edit.start()
+        start.countDown()
+        try {
+            repeat(500) {
+                val a = reader.manualToken("browser", "https://a.test/mcp")
+                val b = reader.manualToken("browser", "https://b.test/mcp")
+                assertTrue(a == null || a == "dummy-a")
+                assertTrue(b == null || b == "dummy-b")
+            }
+        } finally { edit.join() }
+    }
+
+
+    @Test fun manualEndpointBindingPreservesEscapedPathAndQueryIdentity() {
+        val grants = grants()
+        grants.selectManual("browser", "https://EXAMPLE.TEST:443/a%2Fb?q=%2F", "dummy-query")
+        assertEquals("dummy-query", grants.manualToken("browser", "https://example.test/a%2Fb?q=%2F"))
+        assertNull(grants.manualToken("browser", "https://example.test/a/b?q=%2F"))
+        assertNull(grants.manualToken("browser", "https://example.test/a%2Fb?q=/"))
+        assertNull(grants.manualToken("browser", "https://example.test/a%2Fb?q=%2F&tenant=other"))
+    }
+
 }

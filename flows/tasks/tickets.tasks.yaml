@@ -38,7 +38,7 @@ tasks:
     prompt: prompts/execute-decision.md
     tools: [tracker.close_issue, tracker.update_issue, tracker.add_comment]
     loop: { maxSteps: 4 }
-    mutations: { idempotency: intent-log, onUncertain: refetch-state }
+    mutations: { idempotency: intent-log, onUncertain: fail-run }
     outputContract:
       outputs:
         outcome: { from: model, type: prose }
