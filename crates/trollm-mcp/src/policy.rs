@@ -12,6 +12,7 @@ pub enum ToolClass {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachePolicy {
     /// Arg names participating in the cache hash. Empty = all args.
     #[serde(default)]
@@ -33,6 +34,7 @@ pub enum BackgroundFetch {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaginatePolicy {
     /// Name of the request arg carrying the pagination cursor.
     pub param: String,
@@ -42,6 +44,7 @@ pub struct PaginatePolicy {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShapePolicy {
     #[serde(default)]
     pub strip: Vec<String>,
@@ -50,6 +53,7 @@ pub struct ShapePolicy {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServeFromPolicy {
     /// Source tool key, `<server>.<tool>`, whose complete cache feeds this tool.
     #[serde(rename = "fetchedBy")]
@@ -67,10 +71,12 @@ pub enum OnMiss {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryPolicy {
-    /// Total attempts (>= 1). Transport-level only.
+    /// Reserved transport setting; validation currently requires one attempt.
     #[serde(default = "default_attempts")]
     pub attempts: u32,
+    /// Reserved transport setting; validation currently requires zero backoff.
     #[serde(rename = "backoffS", default)]
     pub backoff_s: u64,
 }
@@ -88,6 +94,7 @@ pub struct ResultValidation {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolPolicy {
     #[serde(default = "default_class")]
     pub class: ToolClass,
@@ -144,7 +151,12 @@ impl PolicySet {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        for policy in self.policies.values() {
+        for (key, policy) in &self.policies {
+            if let Some(retry) = &policy.retry {
+                if retry.attempts != 1 || retry.backoff_s != 0 {
+                    bail!("policy '{key}': transport retries are unsupported; omit retry or set retry.attempts to 1 and retry.backoffS to 0");
+                }
+            }
             if let Some(validation) = &policy.result_validation {
                 if policy.paginate.is_some() {
                     bail!("resultValidation is only allowed for non-paginated policies");
@@ -180,4 +192,125 @@ pub fn policy_key(server: &str, tool: &str) -> String {
 /// Splits a `<server>.<tool>` key on the first dot.
 pub fn split_policy_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('.')
+}
+
+#[cfg(test)]
+mod authoring_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retry_defaults_remain_valid_for_reads_and_mutations() {
+        for class in ["read", "mutation"] {
+            for retry in [
+                None,
+                Some(json!({})),
+                Some(json!({"attempts": 1})),
+                Some(json!({"backoffS": 0})),
+                Some(json!({"attempts": 1, "backoffS": 0})),
+            ] {
+                let mut policy = json!({"class": class});
+                if let Some(retry) = retry {
+                    policy["retry"] = retry;
+                }
+                PolicySet::from_yaml_str(&json!({"custom.tool": policy}).to_string()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_retry_settings_are_rejected_for_reads_and_mutations() {
+        for class in ["read", "mutation"] {
+            for retry in [
+                json!({"attempts": 0}),
+                json!({"attempts": 2}),
+                json!({"backoffS": 1}),
+                json!({"attempts": 1, "backoffS": 3}),
+            ] {
+                let value = json!({"custom.tool": {"class": class, "retry": retry}});
+                let error = PolicySet::from_yaml_str(&value.to_string())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("custom.tool"), "{error}");
+                assert!(
+                    error.contains("transport retries are unsupported"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("retry.attempts to 1 and retry.backoffS to 0"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_revalidates_manually_constructed_retry_policies_before_setup() {
+        use crate::{McpGateway, ServerConfig};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for class in ["read", "mutation"] {
+            // Bypass the parsing helper, as public callers can construct PolicySet.
+            let policies = PolicySet {
+                policies: serde_yaml::from_str(
+                    &json!({"custom.tool": {
+                        "class": class, "retry": {"attempts": 2}
+                    }})
+                    .to_string(),
+                )
+                .unwrap(),
+            };
+            let token_lookups = Arc::new(AtomicUsize::new(0));
+            let lookups = token_lookups.clone();
+            let server = ServerConfig::new("custom", "https://example.invalid/mcp")
+                .with_token_getter(Arc::new(move || {
+                    lookups.fetch_add(1, Ordering::SeqCst);
+                    None
+                }));
+            let error = McpGateway::new(
+                vec![server],
+                policies,
+                Default::default(),
+                Default::default(),
+                None,
+            )
+            .err()
+            .expect("unsupported retry must fail gateway construction");
+            assert!(error
+                .to_string()
+                .contains("transport retries are unsupported"));
+            assert_eq!(token_lookups.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn closed_policy_objects_reject_optional_key_typos() {
+        for policy in [
+            json!({"timoutS": 3}),
+            json!({"cache": {"ttlS": 3, "keys": ["id"]}}),
+            json!({"paginate": {"param": "cursor", "deliver": "first_page", "backgroundFetch": "all", "typo": true}}),
+            json!({"shape": {"toFil": true}}),
+            json!({"serveFrom": {"fetchedBy": "custom.list", "match": "id", "typo": true}}),
+            json!({"retry": {"backofS": 2}}),
+        ] {
+            let value = json!({"custom_server.custom_tool": policy});
+            let error = PolicySet::from_yaml_str(&value.to_string()).unwrap_err();
+            assert!(format!("{error:#}").contains("unknown field"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn result_schemas_and_argument_names_remain_dynamic() {
+        let value = json!({"custom_server.custom_tool": {
+            "cache": {"key": ["custom_argument"], "ttlS": 30},
+            "resultValidation": {"maxBytes": 4096, "schema": {
+                "type": "object", "properties": {"custom_result": {"type": "string"}},
+                "additionalProperties": false, "custom_annotation": "permitted"
+            }}
+        }});
+        PolicySet::from_yaml_str(&value.to_string()).unwrap();
+    }
 }

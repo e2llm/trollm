@@ -6,17 +6,26 @@ here. Nothing in v1 may foreclose anything on this list.
 
 ## Designed-in now (non-negotiable invariants that security builds on)
 
-- **Content-addressed everything**: flows, task registries, model weights, artifacts are
-  sha256-pinned; plans pin `sourceBaseline`. (Foundation for signing and attestation.)
-- **Append-only event log**: every transition, tool call (intent + result), artifact write,
-  and proxy decision is logged. (Foundation for audit.)
+- **Content integrity**: bundle members and model weights are SHA256-verified;
+  raw flow bytes determine flow identity. Optional `sourceBaseline` is descriptive
+  provenance, not a publisher signature or an independently enforced trust anchor.
+- **Append-only event log**: core records transitions, tool results, declared
+  mutation intents and artifact writes. Proxy decisions currently use a separate
+  sidecar; its error reporting and reopen sequencing remain work to complete.
 - **Deterministic control flow**: transitions never depend on model prose → audit can
   reconstruct *why* a run took a path from the log alone.
-- **Mutation journaling**: intent-before-execute for all MCP writes, with reconcile-on-resume.
-  (Foundation for "who/what/when wrote to the ticket system" accountability.)
-- **Single egress choke point**: all MCP traffic passes the in-process gateway; no other
-  network path exists in the architecture.
+- **Mutation journaling**: intent-before-execute is required for policy-classed
+  MCP mutations, including nested flows. Unresolved or unsafe completed writes
+  fail closed on resume; automatic retries are rejected for mutation-grant and
+  intent-log tasks. Real state reconciliation is not implemented. Classification
+  depends on authored policies, and process-crash checks do not establish
+  power-loss durability.
+- **MCP egress control**: all MCP traffic passes the in-process gateway. OAuth and
+  model downloads use separate network clients.
 - **TLS-only** to plan-declared hosts; tokens in Android Keystore-backed storage.
+- **Endpoint-bound credentials**: manual secrets are retrieved only for their
+  explicitly saved canonical HTTPS endpoint. Legacy name-only secrets require
+  re-save; OAuth retains its separate grant/endpoint binding.
 - **No telemetry.** Anywhere. Ever.
 
 ## Deferred (tech debt) — ordered by priority

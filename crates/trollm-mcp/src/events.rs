@@ -2,10 +2,10 @@
 //! event-log line"). Dependency-free: core translates these into its own
 //! event-log types.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProxyEvent {
     CacheHit {

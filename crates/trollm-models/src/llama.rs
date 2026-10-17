@@ -301,16 +301,27 @@ mod tests {
         assert!(error.to_string().contains("context size"));
     }
 
-    /// Smoke test: needs real weights. Set TROLLM_TEST_MODEL to a GGUF path
-    /// to run it; otherwise it passes trivially (docs §11: "llama slot smoke
-    /// test behind feature flag, skipped without weights").
+    fn required_fixture() -> PathBuf {
+        let path = std::env::var_os("TROLLM_TEST_MODEL")
+            .filter(|value| !value.is_empty())
+            .expect(
+                "native acceptance requires TROLLM_TEST_MODEL pointing to an existing GGUF fixture",
+            );
+        let path = PathBuf::from(path);
+        assert!(
+            path.is_file(),
+            "TROLLM_TEST_MODEL is not a file: {}",
+            path.display()
+        );
+        path
+    }
+
+    /// Real generation acceptance, separate from vocabulary-only grammar checks.
     #[test]
+    #[ignore = "requires existing GGUF fixture via TROLLM_TEST_MODEL and real inference"]
     fn generate_smoke_with_real_weights() {
-        let Ok(path) = std::env::var("TROLLM_TEST_MODEL") else {
-            eprintln!("skipping: TROLLM_TEST_MODEL not set");
-            return;
-        };
-        let mut slot = LlamaCppSlot::new(Path::new(&path), 2048).unwrap();
+        let path = required_fixture();
+        let mut slot = LlamaCppSlot::new(&path, 2048).unwrap();
         let resp = slot
             .generate(GenerateRequest {
                 prompt: "The capital of France is".into(),
@@ -329,14 +340,12 @@ mod tests {
     /// Grammar smoke test: with weights, a fence-constrained generation must
     /// parse through `extract_tool_calls`.
     #[test]
+    #[ignore = "requires existing instruction GGUF fixture via TROLLM_TEST_MODEL and real inference"]
     fn grammar_constrained_generation_parses() {
-        let Ok(path) = std::env::var("TROLLM_TEST_MODEL") else {
-            eprintln!("skipping: TROLLM_TEST_MODEL not set");
-            return;
-        };
+        let path = required_fixture();
         let grammar =
             crate::fence::tool_call_grammar(&[("tracker".to_string(), "get_issue".to_string())]);
-        let mut slot = LlamaCppSlot::new(Path::new(&path), 2048).unwrap();
+        let mut slot = LlamaCppSlot::new(&path, 2048).unwrap();
         let resp = slot
             .generate(GenerateRequest {
                 prompt: "Fetch issue 7 from the tracker. Reply with a tool call.".into(),
@@ -352,5 +361,100 @@ mod tests {
             resp.text
         );
         assert!(calls.iter().all(Result::is_ok));
+        assert!(calls.iter().all(|call| {
+            let call = call.as_ref().unwrap();
+            call.server == "tracker" && call.tool == "get_issue"
+        }));
+    }
+
+    /// Deterministic native grammar semantics using the fixture vocabulary only:
+    /// no model tensors, inference context, or generated response is involved.
+    #[test]
+    #[ignore = "requires existing GGUF vocabulary fixture via TROLLM_TEST_MODEL"]
+    fn grammar_semantics_with_fixture_vocabulary() {
+        use llama_cpp_2::token::data::LlamaTokenData;
+        use llama_cpp_2::token::data_array::LlamaTokenDataArray;
+
+        let path = required_fixture();
+        let backend = shared_backend().unwrap();
+        let model = LlamaModel::load_from_file(
+            &backend,
+            &path,
+            &LlamaModelParams::default().with_vocab_only(true),
+        )
+        .expect("failed to load GGUF fixture vocabulary");
+        let vocab = model.vocab();
+        let eos = vocab.eos();
+        assert!(
+            eos.0 >= 0 && vocab.is_eog(eos),
+            "fixture needs an EOS token"
+        );
+        let pairs = [
+            ("tracker".to_string(), "get_issue".to_string()),
+            ("files".to_string(), "read".to_string()),
+            ("we\"ird\\שרת".to_string(), "t\t工具".to_string()),
+        ];
+        let grammar = crate::fence::tool_call_grammar(&pairs);
+        let fence = |server: &str, tool: &str, args: serde_json::Value| {
+            // Preserve the grammar's field order, independently of map ordering.
+            format!(
+                "<tool_call>{{\"server\":{},\"tool\":{},\"args\":{args}}}</tool_call>",
+                serde_json::to_string(server).unwrap(),
+                serde_json::to_string(tool).unwrap()
+            )
+        };
+        let first = fence("tracker", "get_issue", serde_json::json!({"id": 7}));
+        let mut cases = vec![
+            (first.clone(), true),
+            (fence("files", "read", serde_json::json!({})), true),
+            (
+                fence(
+                    &pairs[2].0,
+                    &pairs[2].1,
+                    serde_json::json!({"text": "quote \" \\ <tool_call></tool_call>"}),
+                ),
+                true,
+            ),
+            (format!("{first}\n{first}"), true),
+            ("Finished without tools. <other>".to_string(), true),
+            (fence("tracker", "read", serde_json::json!({})), false),
+            (fence("unknown", "get_issue", serde_json::json!({})), false),
+            (fence("tracker", "get_issue", serde_json::json!([])), false),
+            (format!("prose {first}"), false),
+            (format!("{first} trailing prose"), false),
+            ("prose <tool_call> invalid".to_string(), false),
+            ("prose <<tool_call> invalid".to_string(), false),
+            ("<tool_call>{bad}</tool_call>".to_string(), false),
+            ("<tool_call>{\"server\":\"tracker\"".to_string(), false),
+            (first.trim_end_matches("</tool_call>").to_string(), false),
+        ];
+        cases.push((first.replace("\"id\":7", "\"id\":7,"), false));
+        for (text, expected) in cases {
+            let mut sampler = LlamaSampler::grammar(&model, &grammar, "root").unwrap();
+            let tokens = vocab.tokenize(text.as_bytes(), false, false);
+            assert!(!tokens.is_empty(), "fixture failed to tokenize {text:?}");
+            let decoded: Vec<u8> = tokens
+                .iter()
+                .flat_map(|&token| vocab.token_to_piece(token, false, None))
+                .collect();
+            assert_eq!(
+                decoded,
+                text.as_bytes(),
+                "fixture vocabulary must preserve candidate bytes for {text:?}"
+            );
+            let mut accepted = true;
+            for token in tokens.into_iter().chain(std::iter::once(eos)) {
+                let mut candidate =
+                    LlamaTokenDataArray::new(vec![LlamaTokenData::new(token, 0.0, 0.0)], false);
+                sampler.apply(&mut candidate);
+                if !candidate.data[0].logit().is_finite() {
+                    accepted = false;
+                    break;
+                }
+                // Never accept rejected tokens: llama.cpp assumes admissibility.
+                sampler.accept(token);
+            }
+            assert_eq!(accepted, expected, "native grammar acceptance for {text:?}");
+        }
     }
 }

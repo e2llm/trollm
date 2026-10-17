@@ -20,7 +20,7 @@ pub enum ConnectionAuth {
     Oauth {
         grant_id: String,
     },
-    /// OAuth is selected, but sign-in is pending, absent or invalid.
+    /// Authentication needs sign-in or explicit endpoint-bound manual setup.
     Unavailable,
 }
 
@@ -123,7 +123,7 @@ impl RunAuthentication {
             }
             match &pin.auth {
                 ConnectionAuth::Unavailable => {
-                    bail!("connection '{name}' needs sign-in before this run can start");
+                    bail!("connection '{name}' needs sign-in or a manual token saved for this endpoint before this run can start");
                 }
                 ConnectionAuth::Oauth { grant_id }
                     if grant_id.is_empty()
@@ -149,19 +149,22 @@ impl RunAuthentication {
             .servers
             .get(&config.name)
             .context("missing connection identity")?;
+        if endpoint(&config.url)? != pin.url {
+            bail!("connection endpoint does not match saved authentication");
+        }
         match &pin.auth {
             ConnectionAuth::Anonymous => Ok(config),
             ConnectionAuth::Bearer => {
-                let provider = provider.context("manual connection token unavailable")?;
+                let provider = provider.context("manual connection token unavailable for this endpoint; re-save it in Connections")?;
                 if provider.connection_auth(config.name.clone(), pin.url.clone())
                     != ConnectionAuth::Bearer
                 {
                     bail!("manual connection changed; start a new run with the selected authentication");
                 }
                 let token = provider
-                    .bearer_token(config.name.clone())
+                    .bearer_token(config.name.clone(), pin.url.clone())
                     .filter(|token| !token.trim().is_empty())
-                    .context("manual connection token unavailable")?;
+                    .context("manual connection token unavailable for this endpoint; re-save it in Connections")?;
                 Ok(config.with_token_getter(Arc::new(move || Some(token.clone()))))
             }
             ConnectionAuth::Oauth { grant_id } => {
@@ -214,8 +217,10 @@ mod tests {
     }
     struct Provider(Arc<State>);
     impl TokenProvider for Provider {
-        fn bearer_token(&self, _name: String) -> Option<String> {
-            (*self.0.selected.lock().unwrap() == ConnectionAuth::Bearer)
+        fn bearer_token(&self, name: String, url: String) -> Option<String> {
+            (name == "browser"
+                && url == "https://example.test/mcp"
+                && *self.0.selected.lock().unwrap() == ConnectionAuth::Bearer)
                 .then(|| self.0.token.lock().unwrap().clone())
         }
         fn connection_auth(&self, _name: String, _url: String) -> ConnectionAuth {
@@ -363,5 +368,91 @@ mod tests {
         let resumed =
             RunAuthentication::resolve(&manual.0, &[server()], Some(&provider), true).unwrap();
         assert!(resumed.bind(server(), Some(&provider)).is_err());
+    }
+
+    #[test]
+    fn manual_token_delivery_rechecks_endpoint_after_concurrent_selection_change() {
+        // Simulate an edit immediately after selection but before secret delivery.
+        // No token getter may be installed for the old endpoint with the new secret.
+        struct EditingProvider {
+            endpoint: Mutex<String>,
+            selections: AtomicUsize,
+            deliveries: AtomicUsize,
+        }
+        impl TokenProvider for EditingProvider {
+            fn bearer_token(&self, name: String, url: String) -> Option<String> {
+                let endpoint = self.endpoint.lock().unwrap();
+                if name == "browser" && url == *endpoint {
+                    self.deliveries.fetch_add(1, Ordering::Relaxed);
+                    Some("dummy-for-replacement-endpoint".into())
+                } else {
+                    None
+                }
+            }
+            fn connection_auth(&self, _name: String, _url: String) -> ConnectionAuth {
+                if self.selections.fetch_add(1, Ordering::Relaxed) == 1 {
+                    *self.endpoint.lock().unwrap() = "https://elsewhere.test/mcp".into();
+                }
+                ConnectionAuth::Bearer
+            }
+        }
+        let dir = TestDir::new();
+        let provider = Arc::new(EditingProvider {
+            endpoint: Mutex::new("https://example.test/mcp".into()),
+            selections: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+        struct SharedProvider(Arc<EditingProvider>);
+        impl TokenProvider for SharedProvider {
+            fn bearer_token(&self, name: String, url: String) -> Option<String> {
+                self.0.bearer_token(name, url)
+            }
+            fn connection_auth(&self, name: String, url: String) -> ConnectionAuth {
+                self.0.connection_auth(name, url)
+            }
+        }
+        let shared: SharedTokenProvider = Arc::new(Box::new(SharedProvider(provider.clone())));
+        let auth = RunAuthentication::resolve(&dir.0, &[server()], Some(&shared), false).unwrap();
+        assert!(auth.bind(server(), Some(&shared)).is_err());
+        assert_eq!(provider.deliveries.load(Ordering::Relaxed), 0);
+        let resumed = RunAuthentication::resolve(&dir.0, &[server()], Some(&shared), true).unwrap();
+        assert!(resumed.bind(server(), Some(&shared)).is_err());
+        assert_eq!(provider.deliveries.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn manual_binding_rejects_changed_config_and_endpoint_override_before_delivery() {
+        let dir = TestDir::new();
+        let (_, provider) = provider(ConnectionAuth::Bearer);
+        let auth = RunAuthentication::resolve(&dir.0, &[server()], Some(&provider), false).unwrap();
+        let changed = ServerConfig::new("browser", "https://elsewhere.test/mcp");
+        assert!(auth
+            .bind(
+                ServerConfig::new("browser", "https://elsewhere.test/mcp"),
+                Some(&provider),
+            )
+            .is_err());
+        assert!(RunAuthentication::resolve(&dir.0, &[changed], Some(&provider), true).is_err());
+        let fresh_dir = TestDir::new();
+        let overridden = ServerConfig::new("browser", "https://elsewhere.test/mcp");
+        // Even a stale/misleading selection result cannot deliver an endpoint-bound secret.
+        let fresh = RunAuthentication::resolve(
+            &fresh_dir.0,
+            std::slice::from_ref(&overridden),
+            Some(&provider),
+            false,
+        )
+        .unwrap();
+        assert!(fresh.bind(overridden, Some(&provider)).is_err());
+        let resumed =
+            RunAuthentication::resolve(&dir.0, &[server()], Some(&provider), true).unwrap();
+        assert_eq!(
+            resumed
+                .bind(server(), Some(&provider))
+                .unwrap()
+                .token_getter
+                .unwrap()(),
+            Some("fixture-private-access-token".into())
+        );
     }
 }

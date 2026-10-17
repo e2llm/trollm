@@ -115,6 +115,9 @@ pub struct RunState {
     pub pending_return: Option<PendingReturn>,
     pub run_id: String,
     pub status: StateStatus,
+    /// Terminal failure/cancellation reason. Older snapshots omit this field.
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
     #[serde(default)]
     pub stack: Vec<Frame>,
     #[serde(default)]
@@ -131,6 +134,7 @@ impl RunState {
             pending_return: None,
             run_id: run_id.to_string(),
             status: StateStatus::Running,
+            terminal_reason: None,
             stack: vec![Frame {
                 plan: entry_plan_pin.to_string(),
                 node: entry_node.to_string(),

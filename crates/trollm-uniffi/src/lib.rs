@@ -6,7 +6,7 @@
 //! constructor is the wiring entrypoint):
 //!
 //! `list_flows`, `install_flow_bundle`, `start_run`, `poll_status`,
-//! `pause`, `resume`, `cancel`, `tail_events`.
+//! `pause`, `resume`, `cancel`, `tail_events`, `run_summary`.
 //!
 //! UniFFI mechanics (may-decide, §13): **proc-macro mode** (`uniffi = "0.28"`,
 //! `#[uniffi::export]`, no UDL file, no build.rs). Kotlin bindings are
@@ -16,6 +16,7 @@
 mod authentication;
 pub mod bundle;
 pub mod configuration;
+mod history;
 pub mod run;
 pub mod setup;
 pub mod tar;
@@ -27,6 +28,7 @@ use run::{RunPhase, RunRegistry};
 use trollm_core::ExecutionPlan;
 
 pub use authentication::ConnectionAuth;
+pub use history::RunSummaryInfo;
 
 uniffi::setup_scaffolding!();
 
@@ -51,20 +53,74 @@ pub enum TrollmError {
     ModelUnavailable(String),
 }
 
-impl From<anyhow::Error> for TrollmError {
-    fn from(e: anyhow::Error) -> Self {
-        let msg = format!("{e:#}");
-        let lower = msg.to_lowercase();
-        if lower.contains("no model runtime") || lower.contains("weights") {
-            Self::ModelUnavailable(msg)
-        } else if lower.contains("no installed flow") || lower.contains("no resumable") {
-            Self::NotFound(msg)
-        } else if lower.contains("bundle") || lower.contains("manifest") || lower.contains("sha256")
-        {
-            Self::Bundle(msg)
-        } else {
-            Self::Run(msg)
+impl TrollmError {
+    fn typed_cause(error: &anyhow::Error) -> Option<Self> {
+        let cause = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Self>())?;
+        // A typed cause already contributes its public prefix to anyhow's
+        // display. Strip that prefix before applying the variant again.
+        let rendered = format!("{error:#}");
+        let inner = match cause {
+            Self::Io(value)
+            | Self::Bundle(value)
+            | Self::NotFound(value)
+            | Self::Run(value)
+            | Self::ModelUnavailable(value) => value,
+        };
+        let message = rendered
+            .strip_suffix(&cause.to_string())
+            .map(|context| format!("{context}{inner}"))
+            .unwrap_or(rendered);
+        Some(match cause {
+            Self::Io(_) => Self::Io(message),
+            Self::Bundle(_) => Self::Bundle(message),
+            Self::NotFound(_) => Self::NotFound(message),
+            Self::Run(_) => Self::Run(message),
+            Self::ModelUnavailable(_) => Self::ModelUnavailable(message),
+        })
+    }
+
+    /// Preserve the full anyhow context while choosing a category at the API
+    /// boundary. Error text may contain user-controlled paths and is not a type.
+    fn run(error: anyhow::Error) -> Self {
+        if let Some(classified) = Self::typed_cause(&error) {
+            return classified;
         }
+        let message = format!("{error:#}");
+        if error.root_cause().is::<std::io::Error>() {
+            Self::Io(message)
+        } else {
+            Self::Run(message)
+        }
+    }
+
+    fn bundle(error: anyhow::Error) -> Self {
+        Self::typed_cause(&error).unwrap_or_else(|| Self::Bundle(format!("{error:#}")))
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use super::TrollmError;
+
+    #[test]
+    fn ordinary_run_message_cannot_change_its_category() {
+        let error =
+            anyhow::anyhow!("ordinary execution failure at /bundle/weights.txt/manifest-sha256");
+        assert!(matches!(TrollmError::run(error), TrollmError::Run(_)));
+    }
+
+    #[test]
+    fn typed_unavailable_runtime_keeps_context_without_duplicate_prefix() {
+        let error = anyhow::Error::new(TrollmError::ModelUnavailable("runtime absent".into()))
+            .context("loading /bundle/manifest/weights.txt");
+        let classified = TrollmError::run(error);
+        assert!(matches!(&classified, TrollmError::ModelUnavailable(_)));
+        assert_eq!(
+            classified.to_string(),
+            "model runtime unavailable: loading /bundle/manifest/weights.txt: runtime absent"
+        );
     }
 }
 
@@ -73,15 +129,15 @@ impl From<anyhow::Error> for TrollmError {
 /// Keystore/EncryptedSharedPreferences.
 #[uniffi::export(callback_interface)]
 pub trait TokenProvider: Send + Sync {
-    /// Bearer token for the named MCP server, or null for none.
-    fn bearer_token(&self, server_name: String) -> Option<String>;
+    /// Atomically return the selected manual token only when its stored endpoint
+    /// matches server_url. Legacy name-only tokens must require explicit re-save.
+    fn bearer_token(&self, server_name: String, server_url: String) -> Option<String>;
 
     /// Select a non-secret credential identity once for a new run. The endpoint
-    /// has been validated before this callback. Existing Rust manual providers
-    /// retain their original behavior through this default implementation.
+    /// has been validated before this callback. Secret retrieval must independently
+    /// recheck the endpoint, since connection settings can change after selection.
     fn connection_auth(&self, server_name: String, server_url: String) -> ConnectionAuth {
-        let _ = server_url;
-        if self.bearer_token(server_name).is_some() {
+        if self.bearer_token(server_name, server_url).is_some() {
             ConnectionAuth::Bearer
         } else {
             ConnectionAuth::Anonymous
@@ -149,10 +205,21 @@ impl From<&RunPhase> for RunPhaseApi {
     }
 }
 
+/// Ephemeral progress of the worker in this process; never a durable event.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum RunActivityApi {
+    Starting,
+    VerifyingModel { slot: String },
+    LoadingModel { slot: String },
+    Generating { slot: String },
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RunStatusInfo {
     pub run_id: String,
     pub phase: RunPhaseApi,
+    pub worker_active: bool,
+    pub activity: Option<RunActivityApi>,
     /// Highest seq observed in events.jsonl (cursor helper for the UI).
     pub last_seq: u64,
     /// On Succeeded: the final report, recovered from the run's own records
@@ -178,6 +245,9 @@ pub struct TrollmRuntime {
     base: PathBuf,
     token_provider: Mutex<Option<SharedTokenProvider>>,
     runs: RunRegistry,
+    /// Serializes explicit resume reconstruction and registry insertion only;
+    /// workers execute independently after their handles have been registered.
+    resume_lock: Mutex<()>,
 }
 
 #[uniffi::export]
@@ -199,6 +269,7 @@ impl TrollmRuntime {
             base,
             token_provider: Mutex::new(token_provider.map(Arc::new)),
             runs: RunRegistry::default(),
+            resume_lock: Mutex::new(()),
         }))
     }
 
@@ -237,7 +308,7 @@ impl TrollmRuntime {
     /// manifest and the plan must pass core validation, or nothing is
     /// installed.
     pub fn install_flow_bundle(&self, bytes: Vec<u8>) -> Result<InstallResult, TrollmError> {
-        let outcome = bundle::install_bundle(&self.base, &bytes).map_err(TrollmError::from)?;
+        let outcome = bundle::install_bundle(&self.base, &bytes).map_err(TrollmError::bundle)?;
         Ok(InstallResult {
             flow_sha256: outcome.flow_sha256,
             flow_id: outcome.flow_id,
@@ -252,7 +323,7 @@ impl TrollmRuntime {
     /// without a descriptor return None. No credentials are part of this JSON.
     pub fn flow_setup(&self, flow_sha256: String) -> Result<Option<String>, TrollmError> {
         let setup =
-            bundle::installed_flow_setup(&self.base, &flow_sha256).map_err(TrollmError::from)?;
+            bundle::installed_flow_setup(&self.base, &flow_sha256).map_err(TrollmError::bundle)?;
         setup
             .map(|value| serde_json::to_string(&value))
             .transpose()
@@ -263,6 +334,18 @@ impl TrollmRuntime {
     /// Core callers may still explicitly use concurrent runs.
     pub fn has_active_run(&self) -> bool {
         self.runs.has_active()
+    }
+
+    /// Lightweight history metadata, without event-log or result-artifact reads.
+    /// Missing legacy metadata leaves an openable row with unknown fields.
+    pub fn run_summary(&self, run_id: String) -> Result<RunSummaryInfo, TrollmError> {
+        let live = self.runs.get(&run_id).map(|handle| {
+            let phase = handle.status.lock().unwrap();
+            let active = handle.control.worker_active()
+                && matches!(*phase, RunPhase::Running | RunPhase::Paused { .. });
+            (phase.clone(), active)
+        });
+        history::read_run_summary(&self.base, &run_id, live)
     }
 
     /// §9: start a run of the flow pinned by `flow_sha256`. The run executes
@@ -280,7 +363,7 @@ impl TrollmRuntime {
             None,
             None,
         )
-        .map_err(TrollmError::from)?;
+        .map_err(TrollmError::run)?;
         let run_id = spawned.run_id.clone();
         self.runs.insert(run_id.clone(), spawned.handle);
         Ok(run_id)
@@ -304,7 +387,7 @@ impl TrollmRuntime {
             None,
             Some(configuration),
         )
-        .map_err(TrollmError::from)?;
+        .map_err(TrollmError::run)?;
         let run_id = spawned.run_id.clone();
         self.runs.insert(run_id.clone(), spawned.handle);
         Ok(run_id)
@@ -313,13 +396,44 @@ impl TrollmRuntime {
     /// §9: current status. Falls back to the persisted snapshot for runs not
     /// in this process (app restart), so the UI survives process death.
     pub fn poll_status(&self, run_id: String) -> Result<RunStatusInfo, TrollmError> {
-        let phase = match self.runs.get(&run_id) {
-            Some(handle) => handle.status.lock().unwrap().clone(),
-            None => run::status_from_disk(&self.base, &run_id)
-                .map_err(TrollmError::from)?
-                .ok_or_else(|| TrollmError::NotFound(format!("no run '{run_id}'")))?,
+        let (phase, worker_active, activity) = match self.runs.get(&run_id) {
+            Some(handle) => {
+                let snapshot = {
+                    // Keep terminal publication excluded until the worker flag and
+                    // activity belong to this same phase observation.
+                    let phase = handle.status.lock().unwrap();
+                    let active = handle.control.worker_active()
+                        && matches!(*phase, RunPhase::Running | RunPhase::Paused { .. });
+                    let activity = if active && matches!(*phase, RunPhase::Running) {
+                        handle.control.activity()
+                    } else {
+                        None
+                    };
+                    (phase.clone(), active, activity)
+                };
+                if !snapshot.1 && matches!(snapshot.0, RunPhase::Running | RunPhase::Paused { .. })
+                {
+                    // An unwound worker has the same recovery view as a cold
+                    // process. File reads happen after releasing the status lock.
+                    let phase = run::status_from_disk(&self.base, &run_id)
+                        .map_err(TrollmError::run)?
+                        .unwrap_or_else(|| RunPhase::Failed {
+                            reason: "interrupted before saved progress; start a new run".into(),
+                        });
+                    (phase, false, None)
+                } else {
+                    snapshot
+                }
+            }
+            None => (
+                run::status_from_disk(&self.base, &run_id)
+                    .map_err(TrollmError::run)?
+                    .ok_or_else(|| TrollmError::NotFound(format!("no run '{run_id}'")))?,
+                false,
+                None,
+            ),
         };
-        let (_, last_seq) = run::tail_events(&self.base, &run_id, 0).map_err(TrollmError::from)?;
+        let (_, last_seq) = run::tail_events(&self.base, &run_id, 0).map_err(TrollmError::run)?;
         let final_report = if matches!(phase, RunPhase::Succeeded) {
             run::final_report(&self.base, &run_id)
         } else {
@@ -328,6 +442,8 @@ impl TrollmRuntime {
         Ok(RunStatusInfo {
             run_id,
             phase: RunPhaseApi::from(&phase),
+            worker_active,
+            activity,
             last_seq,
             final_report,
         })
@@ -348,32 +464,29 @@ impl TrollmRuntime {
     /// and for cold resume after process death (rebuilds the executor over
     /// the persisted snapshot — core's crash-recovery path, §4.4).
     pub fn resume(&self, run_id: String) -> Result<(), TrollmError> {
-        if let Some(handle) = self.runs.get(&run_id) {
-            handle.resume();
-            return Ok(());
-        }
-        // Cold resume: reconstruct from the persisted state.
-        let flow_sha = run::plan_sha_of_run(&self.base, &run_id).map_err(TrollmError::from)?;
-        let user_input =
-            std::fs::read_to_string(self.base.join("runs").join(&run_id).join("user_input.txt"))
-                .unwrap_or_default();
-        let spawned = run::spawn_run(
-            self.base.clone(),
-            flow_sha,
-            user_input,
-            self.token_provider.lock().unwrap().clone(),
-            Some(run_id.clone()),
-            None,
-        )
-        .map_err(TrollmError::from)?;
-        self.runs.insert(run_id, spawned.handle);
-        Ok(())
+        self.resume_or_reconstruct(run_id.clone(), || {
+            // Cold resume: reconstruct from the persisted state.
+            let flow_sha = run::plan_sha_of_run(&self.base, &run_id).map_err(TrollmError::run)?;
+            let user_input = std::fs::read_to_string(
+                self.base.join("runs").join(&run_id).join("user_input.txt"),
+            )
+            .unwrap_or_default();
+            let spawned = run::spawn_run(
+                self.base.clone(),
+                flow_sha,
+                user_input,
+                self.token_provider.lock().unwrap().clone(),
+                Some(run_id),
+                None,
+            )
+            .map_err(TrollmError::run)?;
+            Ok(spawned.handle)
+        })
     }
 
-    /// §9: cancel. Paused runs are cancelled through `Executor::cancel`
-    /// (logged as `run_ended{outcome:"cancelled"}`); running runs terminate
-    /// at the next model/tool boundary via the marker-error path documented
-    /// in `run.rs`.
+    /// §9: cancel. Cooperative boundaries, including retry backoff, record a
+    /// durable cancelled outcome. The public terminal phase remains
+    /// `Failed { reason: "cancelled" }`.
     pub fn cancel(&self, run_id: String) -> Result<(), TrollmError> {
         let handle = self
             .runs
@@ -391,7 +504,7 @@ impl TrollmRuntime {
         from_seq: u64,
     ) -> Result<Vec<EventLine>, TrollmError> {
         let (events, _) =
-            run::tail_events(&self.base, &run_id, from_seq).map_err(TrollmError::from)?;
+            run::tail_events(&self.base, &run_id, from_seq).map_err(TrollmError::run)?;
         if events.is_empty()
             && !self
                 .base
@@ -416,5 +529,38 @@ impl TrollmRuntime {
                 json,
             })
             .collect())
+    }
+}
+
+impl TrollmRuntime {
+    /// Keep the registry check, reconstruction and insertion atomic with respect
+    /// to other explicit resume requests on this runtime. The injected factory
+    /// allows host tests to count reconstruction without starting model workers.
+    fn resume_or_reconstruct(
+        &self,
+        run_id: String,
+        reconstruct: impl FnOnce() -> Result<Arc<run::RunHandle>, TrollmError>,
+    ) -> Result<(), TrollmError> {
+        let _resume = self.resume_lock.lock().unwrap();
+        if let Some(handle) = self.runs.get(&run_id) {
+            if handle.control.worker_active() {
+                handle.resume();
+                return Ok(());
+            }
+            // Do not replace the only diagnostic when failure persistence was
+            // impossible. Ordinary durable failures follow the disk state below.
+            if handle.control.has_volatile_failure() {
+                return Ok(());
+            }
+        }
+        // Cache eviction must not turn a completed run into new initialization.
+        // Unfinished saved progress can still recover from a worker failure,
+        // consistently for cached, evicted and process-restarted runs.
+        if run::terminal_snapshot(&self.base, &run_id).map_err(TrollmError::run)? {
+            return Ok(());
+        }
+        let handle = reconstruct()?;
+        self.runs.insert(run_id, handle);
+        Ok(())
     }
 }

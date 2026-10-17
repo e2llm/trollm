@@ -6,8 +6,12 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from zipfile import ZipFile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+from release_version import read_version
 
 ABIS = ('arm64-v8a', 'armeabi-v7a', 'x86_64')
 ELF_ARCHITECTURES = {'arm64-v8a': (2, 183), 'armeabi-v7a': (1, 40), 'x86_64': (2, 62)}
@@ -15,6 +19,7 @@ LIBRARIES = ('libtrollm_uniffi.so', 'libjnidispatch.so')
 
 
 def validate_release(apk, aapt, apksigner, expected_signer):
+    identity = read_version()
     if not expected_signer or not re.fullmatch('[a-f0-9]{64}', expected_signer):
         raise ValueError('Release requires an expected SHA256 signing certificate')
     if not aapt or not apksigner:
@@ -31,9 +36,9 @@ def validate_release(apk, aapt, apksigner, expected_signer):
     package = next((line for line in badging.splitlines() if line.startswith('package: ')), '')
     attributes = dict(re.findall(r"([A-Za-z]+)='([^']*)'", package))
     if (attributes.get('name') != 'com.trollm.app'
-            or attributes.get('versionCode') != '2'
-            or attributes.get('versionName') != '0.1.0'):
-        raise ValueError('Release package/version does not match com.trollm.app 0.1.0 (2)')
+            or attributes.get('versionCode') != str(identity['versionCode'])
+            or attributes.get('versionName') != identity['versionName']):
+        raise ValueError(f'Release package/version does not match com.trollm.app {identity}')
     if any(line.strip() == 'application-debuggable' for line in badging.splitlines()):
         raise ValueError('Release APK must not be debuggable')
     certificates = tool([str(apksigner), 'verify', '--verbose', '--print-certs', str(apk)],
@@ -42,7 +47,8 @@ def validate_release(apk, aapt, apksigner, expected_signer):
                          certificates, re.MULTILINE)
     if len(signers) != 1 or signers[0].lower() != expected_signer:
         raise ValueError('Release APK signing certificate does not match the project identity')
-    return {'applicationId': attributes['name'], 'versionCode': 2, 'versionName': '0.1.0',
+    return {'applicationId': attributes['name'], 'versionCode': int(attributes['versionCode']),
+            'versionName': attributes['versionName'],
             'debuggable': False, 'certificateSha256': signers[0].lower()}
 
 

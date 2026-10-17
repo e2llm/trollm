@@ -21,15 +21,14 @@ object RuntimeHolder {
                 val appContext = context.applicationContext
                 val secrets = SecretsStore(appContext)
                 val provider = object : TokenProvider {
-                    override fun bearerToken(serverName: String): String? = try {
-                        if (secrets.selectedAuthMode(serverName) == SelectedAuthMode.BEARER)
-                            secrets.token(serverName)?.takeIf(ConnectionInput::validToken) else null
+                    override fun bearerToken(serverName: String, serverUrl: String): String? = try {
+                        secrets.token(serverName, serverUrl)
                     } catch (_: Exception) { null }
 
                     override fun connectionAuth(serverName: String, serverUrl: String): ConnectionAuth = try {
                         when (secrets.selectedAuthMode(serverName)) {
                             SelectedAuthMode.ANONYMOUS -> ConnectionAuth.Anonymous
-                            SelectedAuthMode.BEARER -> if (secrets.token(serverName)?.let(ConnectionInput::validToken) == true)
+                            SelectedAuthMode.BEARER -> if (secrets.token(serverName, serverUrl) != null)
                                 ConnectionAuth.Bearer else ConnectionAuth.Unavailable
                             SelectedAuthMode.OAUTH -> OAuthConnections.get(appContext).pin(serverName, serverUrl)
                                 ?.let { ConnectionAuth.Oauth(it.grantId) } ?: ConnectionAuth.Unavailable

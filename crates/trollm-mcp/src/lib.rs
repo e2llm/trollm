@@ -48,6 +48,10 @@ pub struct ToolResult {
 
 pub trait ToolGateway: Send {
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>>;
+    /// Effective policy classification for this gateway. Must be stable for
+    /// the run and must not dispatch tools. Adapters must forward it so core
+    /// can enforce mutation journaling even when plan and gateway differ.
+    fn tool_class(&self, server: &str, tool: &str) -> policy::ToolClass;
     /// Validate a granted call before recording mutation intent. This must not
     /// dispatch tools. Concrete gateways also protect their direct call path.
     fn validate_call(&self, call: &ToolCall) -> Result<()>;

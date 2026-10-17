@@ -2,7 +2,7 @@
 //! Applies the §6 per-tool policies (cache / paginate / serveFrom / shape /
 //! mutation passthrough) on top of the streamable-HTTP transport.
 
-use crate::cache::{write_file_atomic, CacheStore};
+use crate::cache::{safe_path_component, write_file_atomic, CacheStore};
 use crate::events::ProxyEvent;
 use crate::policy::{split_policy_key, OnMiss, PolicySet, ShapePolicy, ToolClass, ToolPolicy};
 use crate::schema::ToolSchema;
@@ -16,10 +16,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub type EventSink = Box<dyn FnMut(ProxyEvent) + Send>;
+pub type EventSink = Box<dyn FnMut(ProxyEvent) -> Result<()> + Send>;
 
 /// Static gateway config for one MCP server; the bearer token is resolved by
 /// the app (not the plan) via the getter.
@@ -229,6 +230,7 @@ pub struct McpGateway {
     cache: CacheStore,
     artifact_dir: PathBuf,
     sink: Option<Arc<Mutex<EventSink>>>,
+    audit_failed: AtomicBool,
 }
 
 impl McpGateway {
@@ -299,6 +301,7 @@ impl McpGateway {
             cache: CacheStore::new(cache_root),
             artifact_dir,
             sink: sink.map(|s| Arc::new(Mutex::new(s))),
+            audit_failed: AtomicBool::new(false),
         })
     }
 
@@ -334,12 +337,26 @@ impl McpGateway {
         &self.cache
     }
 
-    fn emit(&self, event: ProxyEvent) {
-        if let Some(sink) = &self.sink {
-            if let Ok(mut sink) = sink.lock() {
-                sink(event);
-            }
+    fn require_audit(&self) -> Result<()> {
+        if self.audit_failed.load(Ordering::SeqCst) {
+            bail!("proxy audit unavailable; further MCP dispatch prohibited");
         }
+        Ok(())
+    }
+
+    fn emit(&self, event: ProxyEvent) -> Result<()> {
+        self.require_audit()?;
+        if let Some(sink) = &self.sink {
+            let result = sink
+                .lock()
+                .map_err(|_| anyhow!("proxy audit sink lock poisoned"))
+                .and_then(|mut sink| sink(event));
+            if result.is_err() {
+                self.audit_failed.store(true, Ordering::SeqCst);
+            }
+            result.context("proxy audit write failed; further MCP dispatch prohibited")?;
+        }
+        Ok(())
     }
 
     fn server(&self, name: &str) -> Result<&ServerEntry> {
@@ -355,6 +372,7 @@ impl McpGateway {
         args: &Value,
         timeout_s: Option<u64>,
     ) -> Result<Value> {
+        self.require_audit()?;
         self.validate_arguments(server, tool, args)?;
         let timeout = timeout_s.map(Duration::from_secs);
         let result = self
@@ -384,7 +402,14 @@ impl McpGateway {
 }
 
 impl ToolGateway for McpGateway {
+    fn tool_class(&self, server: &str, tool: &str) -> ToolClass {
+        self.policies
+            .get(server, tool)
+            .map_or(ToolClass::Read, |policy| policy.class)
+    }
+
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
+        self.require_audit()?;
         let mut out = Vec::new();
         for entry in self.servers.values() {
             out.extend(
@@ -399,6 +424,7 @@ impl ToolGateway for McpGateway {
     }
 
     fn validate_call(&self, call: &ToolCall) -> Result<()> {
+        self.require_audit()?;
         self.validate_argument_constraints(&call.server, &call.tool, &call.args)?;
         // Pagination exposes a positive page selector to the caller; actual
         // server cursors are supplied by responses and checked before every I/O.
@@ -445,7 +471,7 @@ impl ToolGateway for McpGateway {
                     server: call.server.clone(),
                     tool: call.tool.clone(),
                     args_hash,
-                });
+                })?;
                 self.finish_result(call, policy.as_ref(), payload, Provenance::Live)
             }
         }
@@ -462,14 +488,14 @@ impl McpGateway {
             server: call.server.clone(),
             tool: call.tool.clone(),
             args_hash: args_hash.clone(),
-        });
+        })?;
         // A lost response may follow an applied business effect. Never retry mutations.
         let payload = self.call_live(&call.server, &call.tool, &call.args, policy.timeout_s)?;
         self.emit(ProxyEvent::LiveCall {
             server: call.server.clone(),
             tool: call.tool.clone(),
             args_hash,
-        });
+        })?;
         // Validation, shaping or publication may fail after the remote effect.
         // Return that failure without replaying the already-dispatched mutation.
         self.finish_result(call, Some(policy), payload, Provenance::Live)
@@ -500,7 +526,7 @@ impl McpGateway {
                         tool: call.tool.clone(),
                         fetched_by: serve.fetched_by.clone(),
                         match_value: match_value.to_string(),
-                    });
+                    })?;
                     let result =
                         self.finish_result(call, Some(policy), item, Provenance::ServedFromFile)?;
                     self.server(src_server)?.require_credentials()?;
@@ -518,7 +544,7 @@ impl McpGateway {
                     server: call.server.clone(),
                     tool: call.tool.clone(),
                     args_hash,
-                });
+                })?;
                 self.finish_result(call, Some(policy), payload, Provenance::Live)
             }
             Some(OnMiss::Fail) | None => bail!(
@@ -554,7 +580,7 @@ impl McpGateway {
                 server: call.server.clone(),
                 tool: call.tool.clone(),
                 args_hash: hash.clone(),
-            });
+            })?;
             let mut args = call.args.clone();
             args.as_object_mut()
                 .context("paginated arguments must be an object")?
@@ -583,12 +609,12 @@ impl McpGateway {
                         server: call.server.clone(),
                         tool: call.tool.clone(),
                         args_hash: hash.clone(),
-                    });
+                    })?;
                     self.emit(ProxyEvent::FetchStarted {
                         server: call.server.clone(),
                         tool: call.tool.clone(),
                         args_hash: hash.clone(),
-                    });
+                    })?;
                 }
                 let (page_field, items) =
                     find_items_field(&payload).context("paginated response has no items array")?;
@@ -611,7 +637,7 @@ impl McpGateway {
                     args_hash: hash.clone(),
                     pages: pages.len() as u32,
                     items: count as u64,
-                });
+                })?;
                 match payload.get(param).filter(|v| !v.is_null()) {
                     None => break,
                     Some(cursor) => {
@@ -653,13 +679,13 @@ impl McpGateway {
                 args_hash: hash.clone(),
                 pages: meta.pages,
                 total_items: meta.total_items.unwrap_or(0),
-            });
+            })?;
         } else {
             self.emit(ProxyEvent::CacheHit {
                 server: call.server.clone(),
                 tool: call.tool.clone(),
                 args_hash: hash.clone(),
-            });
+            })?;
         }
         let (items, index, has_next) = self
             .cache
@@ -696,9 +722,11 @@ impl McpGateway {
             .complete_entry(&call.server, &call.tool, hash)?
             .context("worklist cache incomplete")?;
         let items = self.cache.read_items(&call.server, &call.tool, hash)?;
-        let path = self
-            .artifact_dir
-            .join(format!("{}.{}.latest.jsonl", call.server, call.tool));
+        let path = self.artifact_dir.join(format!(
+            "{}.{}.latest.jsonl",
+            safe_path_component(&call.server),
+            safe_path_component(&call.tool)
+        ));
         let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
         // Invalidate the prior sidecar before replacing the data.
         write_file_atomic(
@@ -731,7 +759,7 @@ impl McpGateway {
                     server: call.server.clone(),
                     tool: call.tool.clone(),
                     args_hash: hash,
-                });
+                })?;
                 return self.finish_result(call, Some(policy), payload, Provenance::Cache);
             }
         }
@@ -740,13 +768,13 @@ impl McpGateway {
             server: call.server.clone(),
             tool: call.tool.clone(),
             args_hash: hash.clone(),
-        });
+        })?;
         let payload = self.call_live(&call.server, &call.tool, &call.args, policy.timeout_s)?;
         self.emit(ProxyEvent::LiveCall {
             server: call.server.clone(),
             tool: call.tool.clone(),
             args_hash: hash.clone(),
-        });
+        })?;
         if policy.result_validation.is_some() {
             // Reject before filling the cache, and invalidate a prior named
             // artifact even when this replacement cannot be admitted.
@@ -895,9 +923,9 @@ impl McpGateway {
         let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         let path = self
             .artifact_dir
-            .join(server)
-            .join(tool)
-            .join(format!("{field}-{short}.json"));
+            .join(safe_path_component(server))
+            .join(safe_path_component(tool))
+            .join(format!("{}-{short}.json", safe_path_component(field)));
         write_file_atomic(&path, &bytes)?;
         artifacts.push(path.clone());
         self.emit(ProxyEvent::ShapedToFile {
@@ -906,7 +934,7 @@ impl McpGateway {
             field: field.to_string(),
             path: path.clone(),
             bytes: byte_len,
-        });
+        })?;
         Ok(json!({ "path": path, "bytes": byte_len, "preview": preview }))
     }
 }

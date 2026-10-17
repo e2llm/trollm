@@ -32,6 +32,13 @@ struct BrowserGateway {
 }
 
 impl ToolGateway for BrowserGateway {
+    fn tool_class(&self, _: &str, tool: &str) -> trollm_mcp::policy::ToolClass {
+        if tool == "act" {
+            trollm_mcp::policy::ToolClass::Mutation
+        } else {
+            trollm_mcp::policy::ToolClass::Read
+        }
+    }
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         Ok(vec![])
     }

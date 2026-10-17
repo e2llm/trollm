@@ -47,6 +47,11 @@ impl ScriptGateway {
 }
 
 impl ToolGateway for ScriptGateway {
+    fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+        // Classification comes from the fixture plan; generic fake effects
+        // alone do not assign an effective gateway mutation policy.
+        trollm_mcp::policy::ToolClass::Read
+    }
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         Ok(vec![])
     }

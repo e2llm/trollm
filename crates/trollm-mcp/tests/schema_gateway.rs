@@ -47,8 +47,10 @@ fn invalid_mutation_is_rejected_before_dispatch_or_intent_and_valid_mutation_cal
     let dirs = TempDir::new("schema-mutation");
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
-    let sink: EventSink =
-        Box::new(move |event| captured.lock().unwrap().push(event.kind().to_owned()));
+    let sink: EventSink = Box::new(move |event| {
+        captured.lock().unwrap().push(event.kind().to_owned());
+        Ok(())
+    });
     let mut gw = gateway(
         &server,
         &dirs,

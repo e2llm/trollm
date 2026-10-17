@@ -44,6 +44,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
     var endpoint by remember { mutableStateOf("https://mcp.e2llm.com/mcp") }
     var token by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf<Boolean?>(null) }
+    var savedForEndpoint by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var store by remember { mutableStateOf<SecretsStore?>(null) }
@@ -79,7 +80,11 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         val secrets = store
         if (!busy && secrets != null && ConnectionInput.validServer(server)) {
             try {
-                saved = withContext(Dispatchers.IO) { secrets.hasToken(server) }
+                val status = withContext(Dispatchers.IO) {
+                    secrets.hasToken(server) to (secrets.token(server, endpoint) != null)
+                }
+                saved = status.first
+                savedForEndpoint = status.second
                 oauthStatus = withContext(Dispatchers.IO) {
                     oauth?.status(server, endpoint) ?: "Opening connection storage…"
                 }
@@ -103,6 +108,12 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             message = "Enter a token without whitespace or the Bearer prefix."
             return
         }
+        val url = if (remove) null else try {
+            ConnectionInput.canonicalEndpoint(endpoint)
+        } catch (_: IllegalArgumentException) {
+            message = "Enter a valid HTTPS MCP endpoint before saving a token."
+            return
+        }
         val name = server
         val value = if (remove) null else token
         token = ""
@@ -110,8 +121,9 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         message = null
         scope.launch {
             try {
-                withContext(Dispatchers.IO) { secrets.setToken(name, value) }
+                withContext(Dispatchers.IO) { secrets.setToken(name, url, value) }
                 saved = !remove
+                savedForEndpoint = !remove
                 message = if (remove) "Token removed." else "Token saved."
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
@@ -138,7 +150,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         OutlinedTextField(
             value = endpoint,
             onValueChange = { endpoint = it; message = null },
-            label = { Text("MCP HTTPS endpoint for OAuth") },
+            label = { Text("MCP HTTPS endpoint") },
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
@@ -180,7 +192,8 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         }, enabled = !busy && oauth != null && ConnectionInput.validServer(server)) { Text("Sign out of OAuth") }
         Text("Manual Bearer token (saving switches this connection away from OAuth).")
         Text(when (saved) {
-            true -> "Saved token available."
+            true -> if (savedForEndpoint) "Saved token available for this endpoint."
+                else "Token stored but inactive for this endpoint. Re-save it with its intended endpoint to use manual authentication."
             false -> "No saved token."
             null -> "Enter a connection name to check saved-token status."
         })

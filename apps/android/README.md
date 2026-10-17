@@ -27,19 +27,30 @@ Python helper tests verify that both committed assets match their sources.
 Setup pins Hugging Face revision URLs, sizes and SHA-256 hashes for the GGUF
 weights; no vision/audio projectors are downloaded.
 
-On an 8 GiB API 36 x86_64 emulator, the native text-summary starter and
-Qwen/Gemma tool-free handoff passed. Browser v4 also passed with manual Bearer
-authentication: one example.org open call, reading bound to its returned tab ID,
-a complete nontruncated page and an accurate visible summary from tool-free
-Gemma. Qwen took 31.711 seconds to open and 22.295 seconds to read; Gemma took
-103.351 seconds to answer. Executor time was 159.364 seconds; total time was
-about 3 minutes 12 seconds including model loading. Native Pause/Resume, Cancel
-and background/return also passed. Upgrade checks preserved all prior history.
+Earlier APKs passed native text-summary, paired Qwen/Gemma inference and browser
+v4 with manual Bearer authentication on an 8 GiB API 36 x86_64 emulator. The
+browser opened example.org once, read the exact returned tab and gave a complete
+page artifact to tool-free Gemma for an accurate visible summary. Native controls,
+background/return and debug process-loss recovery also passed within their scope.
 
-OAuth provider login/refresh, setup interruption and active-process recovery, ordinary unattended
-download admission, physical arm64 acceptance and signed-release updates remain
-open. Deployment of the upstream truncation-reporting fix is unverified. This
-is not consumer release validation.
+An older signed APK (`0.1.0 / code 2`) passed an ordinary emulator update,
+preserved prior history and completed a new native pair, leaving 46 runs.
+Queued-download persistence, Cancel/Retry and free-space preflight passed with
+small fixtures. This does not establish byte-transfer recovery. That APK remains
+in a private `v0.1.0-rc.1` draft; its evidence does not cover newer source.
+
+Current source loads native slots on first use, with streaming SHA-256 verification
+before construction and reuse within the run. UI/notifications show verification,
+loading and generation. Persistent interrupted progress needs explicit Resume
+after worker loss; startup never preloads models or replays a run. Safety/review
+fixes, interruptible retry delays, durable cancellation, readable sorted history
+and typed bridge errors are also present. These changes need matching combined
+native APK/device acceptance.
+
+The current candidate is **0.1.0-rc.2 / code 3**. Ordinary download
+transfer/recovery, real OAuth provider login/refresh, an updated combined native
+APK and S21-class arm64 acceptance remain open. This is not a published or
+accepted consumer release. See [versioning](../../docs/VERSIONING.md).
 
 ## Local prerequisites
 
@@ -47,6 +58,7 @@ Use JDK 17, Rust 1.90.0, Android SDK Platform 35 and NDK **27.2.12479018**.
 The project pins Gradle 8.11.1, AGP 8.8.2 and Kotlin 2.1.20. Set `ANDROID_HOME`
 to your SDK and `ANDROID_NDK_HOME` to that NDK directory; accept SDK licenses.
 Native llama builds also need CMake, a C++ toolchain and libclang.
+The version and APK-validation helpers require Python 3.11+.
 
 From the repository root:
 
@@ -93,9 +105,10 @@ From `apps/android/`, with that environment variable set:
 ```
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0` (code `2`). A private build signed by your own key cannot update an
-installation signed by another publisher. This is a build recipe; release
-device acceptance and downloadable product delivery remain unfinished.
+`0.1.0-rc.2` (code `3`), read from the root Cargo manifest through
+`cargo metadata --no-deps --offline --locked`. A private build signed by your
+own key cannot update an installation signed by another publisher. This is a
+build recipe; physical-phone acceptance and public APK delivery remain unfinished.
 
 ## Manual runtime setup
 
@@ -109,16 +122,18 @@ The runtime stores bundles, runs and legacy model slots under app-private
 `filesDir/trollm/`. A pinned setup descriptor enables model preparation.
 Models transfer sequentially through DownloadManager; the app verifies their
 size/SHA-256 and publishes immutable hash-named files in app-specific external
-storage. Rust rehashes weights before native loading. Advanced per-flow settings can override
-model identities/settings and MCP endpoints or restore the pinned defaults;
+storage. Rust rehashes weights before native loading. Advanced per-flow settings
+can override model identities/settings and MCP endpoints or restore the pinned defaults;
 effective model paths/settings are saved per run for cold resume.
 
 Legacy `models/<slot>.gguf` plus matching `models/<slot>.gguf.sha256` remain
 supported. Manual Bearer tokens are captured per gateway. OAuth runs retain the
 same grant and endpoint through refresh and cold resume; logout or a replacement
-login cannot silently switch their account. Live sign-in/refresh, setup interruption
-and active-process recovery, unattended downloads, physical arm64 acceptance and signed-release
-updates remain open. The browser starter passed on the emulator with manual
+login cannot silently switch their account. Live sign-in/refresh, byte-transfer recovery,
+unattended downloads and physical arm64 acceptance remain open. Earlier APKs
+passed debug process-loss recovery and ordinary signed update/paired-inference
+checks within the historical scope above.
+The browser starter passed on the emulator with manual
 Bearer setup. The tool-free Qwen/Gemma pair and advanced model overrides also
 passed on an 8 GiB emulator.
 Never put credentials in a flow bundle.

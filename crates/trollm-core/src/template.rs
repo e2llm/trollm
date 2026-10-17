@@ -11,7 +11,8 @@ use serde_json::Value;
 pub struct TemplateError(pub String);
 
 /// Render `template` against frame `vars`; `user_input` is bound verbatim and
-/// never stored in frame vars (§3: promptTemplate "may reference {{ user_input }}").
+/// never stored in frame vars. Generation renders registry task templates; the
+/// plan-level `input.promptTemplate` is reserved and inactive.
 pub fn render(template: &str, vars: &Value, user_input: &str) -> Result<String, TemplateError> {
     let mut merged = match vars {
         Value::Object(m) => m.clone(),

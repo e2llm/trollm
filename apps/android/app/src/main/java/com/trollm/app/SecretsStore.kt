@@ -10,8 +10,8 @@ import org.json.JSONObject
  * EncryptedSharedPreferences (§10, SECURITY-ENTERPRISE.md "TLS-only;
  * tokens in Android Keystore-backed storage").
  *
- * Keys are per MCP server name (`token.<server>`), matching the plan's
- * `mcp.servers[].name`. Values never touch logs or the event log.
+ * Tokens and their canonical endpoint bindings are stored together per MCP server
+ * name. Values never touch logs or the event log.
  */
 class SecretsStore(context: Context) {
     private val masterKey = MasterKey.Builder(context)
@@ -26,11 +26,11 @@ class SecretsStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    fun setToken(server: String, token: String?) {
-        oauthGrants.selectManual(server, token)
+    fun setToken(server: String, endpoint: String?, token: String?) {
+        oauthGrants.selectManual(server, endpoint, token)
     }
 
-    fun token(server: String): String? = prefs.getString(key(server), null)
+    fun token(server: String, endpoint: String): String? = oauthGrants.manualToken(server, endpoint)
 
     fun hasToken(server: String): Boolean = prefs.contains(key(server))
 
@@ -42,7 +42,8 @@ class SecretsStore(context: Context) {
         val mode = prefs.getString("auth-mode.$server", null)?.let {
             SelectedAuthMode.entries.find { mode -> mode.name == it } ?: SelectedAuthMode.UNAVAILABLE
         }
-        return StoredConnection(mode, token(server), readOAuth(server))
+        return StoredConnection(mode, prefs.getString(key(server), null), readOAuth(server),
+            prefs.getString("token-endpoint.$server", null))
     }
 
     private fun readOAuth(server: String): OAuthGrant? {
@@ -57,6 +58,7 @@ class SecretsStore(context: Context) {
         editor.putString("auth-mode.$server", checkNotNull(stored.mode).name)
         if (stored.manualToken == null) editor.remove(key(server))
         else editor.putString(key(server), stored.manualToken)
+        editor.putString("token-endpoint.$server", stored.manualEndpoint)
         val grant = stored.grant
         if (grant == null) {
             editor.remove("oauth.$server")

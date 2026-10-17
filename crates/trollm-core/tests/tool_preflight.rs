@@ -42,6 +42,9 @@ struct CheckedMutationGateway {
 }
 
 impl ToolGateway for CheckedMutationGateway {
+    fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+        trollm_mcp::policy::ToolClass::Mutation
+    }
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         Ok(vec![])
     }

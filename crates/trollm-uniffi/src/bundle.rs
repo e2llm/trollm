@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use trollm_core::plan::hex_sha256;
 use trollm_core::{ExecutionPlan, TaskRegistry};
 
-use crate::tar;
+use crate::{tar, TrollmError};
 
 pub const BUNDLE_FORMAT: &str = "trollm.flow-bundle.v1";
 pub const MANIFEST_NAME: &str = "manifest.json";
@@ -158,6 +158,10 @@ pub fn install_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
     // from the staged siblings) + registry (prompts resolve in the staged dir).
     let validation = (|| -> Result<(ExecutionPlan, TaskRegistry)> {
         let (plan, registry) = validate_materialized_bundle(&staging, &manifest)?;
+        // New imports follow the authored provenance shape. Existing installed
+        // bundles (including identical reinstalls above) keep the v1 read path.
+        trollm_core::validate::validate_authoring_provenance(&plan, &registry)
+            .map_err(|e| anyhow!(e.to_string()))?;
         trollm_core::validate::validate_plan(&plan).map_err(|e| anyhow!(e.to_string()))?;
         trollm_core::validate::validate_with_registry(&plan, &registry)
             .map_err(|e| anyhow!(e.to_string()))?;
@@ -319,10 +323,16 @@ pub(crate) fn installed_flow_setup(
         bail!("flow sha256 must be 64 lowercase hexadecimal characters");
     }
     let dir = base.join("bundles").join(flow_sha256);
-    let manifest: BundleManifest = serde_json::from_slice(
-        &fs::read(dir.join(MANIFEST_NAME)).context("reading installed manifest")?,
-    )?;
-    let (plan, _) = validate_materialized_bundle(&dir, &manifest)?;
+    let manifest_bytes = fs::read(dir.join(MANIFEST_NAME)).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            TrollmError::NotFound(format!("reading installed manifest: {error}"))
+        } else {
+            TrollmError::Io(format!("reading installed manifest: {error}"))
+        }
+    })?;
+    let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
+    let (plan, _) = validate_materialized_bundle(&dir, &manifest)
+        .map_err(|error| TrollmError::Bundle(format!("{error:#}")))?;
     if plan.sha256 != flow_sha256 {
         bail!("installed root flow does not match its content address");
     }

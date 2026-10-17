@@ -88,7 +88,7 @@ pub fn extract_tool_calls(text: &str) -> Vec<Result<ParsedFence, FenceParseError
     while let Some(rel) = text[cursor..].find(FENCE_OPEN) {
         let open = cursor + rel;
         let content_start = open + FENCE_OPEN.len();
-        match text[content_start..].find(FENCE_CLOSE) {
+        match find_fence_close(&text[content_start..]) {
             Some(rel_close) => {
                 let content_end = content_start + rel_close;
                 out.push(parse_fence(open, &text[content_start..content_end]));
@@ -101,6 +101,29 @@ pub fn extract_tool_calls(text: &str) -> Vec<Result<ParsedFence, FenceParseError
         }
     }
     out
+}
+
+// Framing only: serde_json still validates the complete payload. A delimiter
+// inside a JSON string is data, including after escaped quotes/backslashes.
+fn find_fence_close(text: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in text.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        } else if byte == b'<' && text[index..].starts_with(FENCE_CLOSE) {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn parse_fence(offset: usize, raw: &str) -> Result<ParsedFence, FenceParseError> {
@@ -361,6 +384,48 @@ mod tests {
     }
 
     #[test]
+    fn quoted_delimiters_and_escapes_are_payload_data() {
+        for value in [
+            "<tool_call>",
+            "</tool_call>",
+            "before \\\" </tool_call> after",
+            "backslash \\",
+            "<tool_call></tool_call>",
+        ] {
+            let payload = serde_json::json!({
+                "server": "we\"ird\\server", "tool": "t\t工具", "args": {"text": value}
+            });
+            let text = format!("<tool_call>{payload}</tool_call>");
+            let calls = extract_tool_calls(&text);
+            assert_eq!(calls.len(), 1, "{text}");
+            let parsed = calls[0].as_ref().unwrap();
+            assert_eq!(parsed.server, "we\"ird\\server");
+            assert_eq!(parsed.tool, "t\t工具");
+            assert_eq!(parsed.args["text"], value);
+        }
+    }
+
+    #[test]
+    fn framing_does_not_accept_invalid_or_trailing_json() {
+        for payload in [
+            r#"{"server":"s","tool":"t","args":{"text":"</tool_call>"},}"#,
+            r#"{"server":"s","tool":"t","args":{}} trailing"#,
+            r#"{"server":"s","tool":"t","args":{"text":"bad\q"}}"#,
+        ] {
+            let text = format!("<tool_call>{payload}</tool_call><tool_call>{{\"server\":\"s\",\"tool\":\"t\",\"args\":{{}}}}</tool_call>");
+            let calls = extract_tool_calls(&text);
+            assert_eq!(calls.len(), 2, "{text}");
+            assert!(matches!(calls[0], Err(FenceParseError::InvalidJson { .. })));
+            assert!(calls[1].is_ok());
+        }
+        let calls = extract_tool_calls(r#"<tool_call>{"args":{"text":"</tool_call>"}}"#);
+        assert!(matches!(
+            calls.as_slice(),
+            [Err(FenceParseError::UnclosedFence { .. })]
+        ));
+    }
+
+    #[test]
     fn grammar_has_root_and_enumerates_pairs() {
         // NOTE: we cannot execute GBNF without llama.cpp (the `llama` feature is
         // off in tests), so these are structural assertions on the grammar text
@@ -422,7 +487,7 @@ mod tests {
     #[test]
     fn grammar_root_is_fences_or_prose() {
         // §14 item 5: root = ws (fence+ | prose). NOTE: as above, we cannot
-        // execute GBNF without llama.cpp + weights, so these are structural
+        // execute GBNF in default tests, so these are structural
         // assertions on the grammar text only.
         let grammar = tool_call_grammar(&[("tracker".to_string(), "get_issue".to_string())]);
         assert!(

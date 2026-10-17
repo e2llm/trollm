@@ -183,7 +183,12 @@ impl McpClient {
             remaining_timeout(timeout, started)?,
         )?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
-            bail!("MCP tool {tool} reported isError: {result}");
+            let tool_context: String = tool
+                .chars()
+                .take(128)
+                .flat_map(char::escape_default)
+                .collect();
+            bail!("MCP tool {tool_context} reported isError (remote diagnostic omitted)");
         }
         Ok(result)
     }

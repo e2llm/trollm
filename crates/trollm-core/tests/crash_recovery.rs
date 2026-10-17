@@ -54,10 +54,15 @@ fn write_prompt(base: &std::path::Path) {
 
 /// First executor crashes mid-call: the panic simulates process death after
 /// the intent hit the log but before the result was written.
-fn run_crashing_executor(run_dir: &RunDir, base: &std::path::Path, on_uncertain: &str) {
-    let gateway = ScriptGateway {
-        crash_on: Some("t.write".to_string()),
-        ..Default::default()
+fn run_crashing_executor(
+    run_dir: &RunDir,
+    base: &std::path::Path,
+    on_uncertain: &str,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let effects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gateway = CountingGateway {
+        effects: effects.clone(),
+        crash_after_effect: true,
     };
     let mut exec = Executor::new(
         ExecutionPlan::from_yaml_str(&plan_yaml()).unwrap(),
@@ -73,10 +78,11 @@ fn run_crashing_executor(run_dir: &RunDir, base: &std::path::Path, on_uncertain:
     }));
     assert!(hit.is_err(), "the simulated crash must propagate");
     // exec drops here, mid-task, exactly like a process crash.
+    effects
 }
 
 #[test]
-fn crash_between_intent_and_result_triggers_refetch_state() {
+fn crash_between_intent_and_result_refetch_state_fails_closed() {
     // the simulated panic is expected; keep test output readable, but let real
     // assertion failures print
     let default_hook = std::panic::take_hook();
@@ -90,7 +96,7 @@ fn crash_between_intent_and_result_triggers_refetch_state() {
     write_prompt(&base);
     let run_dir = RunDir::under(&base);
 
-    run_crashing_executor(&run_dir, &base, "refetch-state");
+    let effects = run_crashing_executor(&run_dir, &base, "refetch-state");
 
     // On disk: an intent with no result — the exact crash signature of §6.
     let events = read_events(run_dir.path());
@@ -101,42 +107,39 @@ fn crash_between_intent_and_result_triggers_refetch_state() {
     assert_eq!(intents.len(), 1);
     assert!(!events.iter().any(|e| e["type"] == "tool_call_result"));
 
-    // Resume from disk with a healthy gateway; the task re-executes from its
-    // node boundary (at most one node re-executed, §4.4).
-    let mut exec = Executor::new(
-        ExecutionPlan::from_yaml_str(&plan_yaml()).unwrap(),
-        TaskRegistry::from_yaml_str(&registry_yaml("refetch-state"), &base).unwrap(),
-        String::new(),
-        SlotMap::new().with("coder", MockModel::scripted([FENCE, "write completed"])),
-        ScriptGateway::default(),
-        run_dir.clone(),
-    )
-    .unwrap();
-    let status = exec.resume().unwrap();
-    assert_eq!(status, RunStatus::Succeeded);
-
+    // The fake service applies its effect before losing the result. Neither
+    // resume nor repeated recovery may dispatch it again or close the intent.
+    for attempt in 0..2 {
+        let mut exec = Executor::new(
+            ExecutionPlan::from_yaml_str(&plan_yaml()).unwrap(),
+            TaskRegistry::from_yaml_str(&registry_yaml("refetch-state"), &base).unwrap(),
+            String::new(),
+            SlotMap::new().with("coder", MockModel::scripted([FENCE, "write completed"])),
+            CountingGateway {
+                effects: effects.clone(),
+                crash_after_effect: false,
+            },
+            run_dir.clone(),
+        )
+        .unwrap();
+        let status = exec.resume().unwrap();
+        assert!(matches!(status, RunStatus::Failed { .. }));
+        if attempt == 0 {
+            assert!(matches!(status, RunStatus::Failed { reason }
+                if reason.contains("uncertain mutation") && reason.contains("reconciliation is not implemented")));
+        }
+    }
+    assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 1);
     let events = read_events(run_dir.path());
-    // onUncertain=refetch-state fired: the dangling intent is closed by a
-    // skipped-result note (the state refetch itself is the gateway's concern).
-    let skips: Vec<_> = events
-        .iter()
-        .filter(|e| e["type"] == "tool_call_result" && e["skipped"] == true)
-        .collect();
-    assert_eq!(skips.len(), 1, "dangling intent marked skipped");
-    assert_eq!(skips[0]["intentSeq"], intents[0]["seq"]);
-    assert!(skips[0]["note"].as_str().unwrap().contains("refetch-state"));
-    // the re-executed task journaled a fresh intent + real result
-    let intents_after: Vec<_> = events
-        .iter()
-        .filter(|e| e["type"] == "tool_call_intent")
-        .collect();
-    assert_eq!(intents_after.len(), 2);
-    let real_results: Vec<_> = events
-        .iter()
-        .filter(|e| e["type"] == "tool_call_result" && e["skipped"] != true)
-        .collect();
-    assert_eq!(real_results.len(), 1);
-    assert_eq!(events.last().unwrap()["outcome"], "succeeded");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool_call_intent")
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|e| e["type"] == "tool_call_result"));
+    assert_eq!(events.last().unwrap()["outcome"], "failed");
 }
 
 #[test]
@@ -197,8 +200,14 @@ impl trollm_models::ModelSlot for CrashAfterWrites {
     }
 }
 
-struct CountingGateway(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+struct CountingGateway {
+    effects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    crash_after_effect: bool,
+}
 impl trollm_mcp::ToolGateway for CountingGateway {
+    fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+        trollm_mcp::policy::ToolClass::Mutation
+    }
     fn list_tools(&self) -> anyhow::Result<Vec<trollm_mcp::ToolDescriptor>> {
         Ok(vec![])
     }
@@ -210,7 +219,12 @@ impl trollm_mcp::ToolGateway for CountingGateway {
         Ok(())
     }
     fn call(&mut self, _: &trollm_mcp::ToolCall) -> anyhow::Result<trollm_mcp::ToolResult> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.effects
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !self.crash_after_effect,
+            "simulated crash after applied write"
+        );
         Ok(trollm_mcp::ToolResult {
             content_for_model: serde_json::json!({"ok": true}),
             artifacts: vec![],
@@ -231,7 +245,10 @@ fn completed_mutations_after_snapshot_fail_closed_before_replay() {
             TaskRegistry::from_yaml_str(&registry_yaml("fail-run"), &base).unwrap(),
             String::new(),
             SlotMap::new().with("coder", CrashAfterWrites { remaining: writes }),
-            CountingGateway(effects.clone()),
+            CountingGateway {
+                effects: effects.clone(),
+                crash_after_effect: false,
+            },
             run_dir.clone(),
         )
         .unwrap();
@@ -245,7 +262,10 @@ fn completed_mutations_after_snapshot_fail_closed_before_replay() {
             TaskRegistry::from_yaml_str(&registry_yaml("fail-run"), &base).unwrap(),
             String::new(),
             SlotMap::new().with("coder", MockModel::scripted([FENCE, "done"])),
-            CountingGateway(effects.clone()),
+            CountingGateway {
+                effects: effects.clone(),
+                crash_after_effect: false,
+            },
             run_dir.clone(),
         )
         .unwrap();
