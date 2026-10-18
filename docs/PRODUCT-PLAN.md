@@ -34,8 +34,12 @@ Browser starter v5 uses explicit task bindings for the selected browser, exact
 URL, open action and returned tab ID. The model requests the allowed operation
 without copying those values. Runtime supplies omitted arguments and rejects
 conflicts before the existing validation and mutation journal. This addresses
-a native v4 failure to reproduce a long URL; v5 still needs its matching APK
-check, including long URLs and truncated/oversized-page refusal.
+a native v4 failure to reproduce a long URL. On the signed rc.3 APK, a native
+attempt opened the exact 527-character supplied URL, then failed in tool-call
+transport before an accepted response or page reading. This does not accept the
+complete browser flow or truncated/oversized-page refusal. The cause remains
+under investigation; newer safe transport diagnostics are source-only and are
+not in that APK.
 
 Source now loads models lazily on first slot use after checksum verification;
 status and notifications show verification, loading and generation. Models and
@@ -65,9 +69,21 @@ without restarting work; Resume verified the model again. Service and wake lock
 were released after completion, leaving 47 runs. This is an emulator result,
 not physical-phone, real provider sign-in or download-transfer acceptance.
 The candidate has not been published as a release. Source-only checkpoints use
-their source commit and do not renew APK acceptance. The next combined candidate
-is configured as **0.1.0-rc.3 / code 4**, with build, signing and device checks
-pending; see
+their source commit and do not renew APK acceptance. The last signed, installed
+candidate is **0.1.0-rc.3 / code 4**. Its build and signing
+checks passed, and an ordinary emulator update preserved all 49 prior visible
+runs. After the failed browser attempt, cold reopen restored the same run without
+active work; full history contained exactly the prior 49 UUIDs plus that run.
+The owned fixture tab was closed and the prior browser tabs preserved. A separate
+tool-free rc.3 run completed one Qwen task and one Gemma task with a coherent
+summary. Active background/return, terminal service/wake cleanup and completed-run
+cold reopen passed; full history preserved the prior 50 UUIDs plus this run.
+This does not test Doze-specific suspension or active process loss. The next
+configured candidate is **0.1.0-rc.4 / code 5**, including transport diagnostics;
+its build, signing and device checks remain pending. Real
+provider login/refresh, ordinary download transfer/recovery, native page guards
+and physical-phone acceptance remain open. Curated source is verified privately;
+an unpublished rc.3 draft holds the matching verified APK and checksum. See
 [versioning](VERSIONING.md). Stub/scripted checks do not establish real-model or
 live-service behavior.
 

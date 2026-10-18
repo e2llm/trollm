@@ -873,8 +873,15 @@ canonical HTTPS endpoint; the callback receives both name and endpoint and
 checks mode, endpoint and token atomically under the connection-edit lock.
 Name-only legacy tokens remain stored but inactive until explicitly re-saved
 with their intended endpoint. A changed flow endpoint cannot adopt that secret.
-Unsupported URL spelling differences fail closed; broader Kotlin/Rust URL
-normalization compatibility remains a separate follow-up.
+Android and Rust share endpoint-identity fixtures. Authentication normalizes
+scheme and host case, numeric ports, the default HTTPS port and an empty root
+path. It preserves the original path, query and IPv6 spelling, including dot
+segments, percent-escape case and an empty query. Transport URL parsing remains
+separate; it must not silently choose a different saved credential identity.
+An older run whose saved endpoint was rewritten by Rust can no longer resume
+when that pin differs from the configured identity. Its files stay intact;
+start a new run after checking the connection. There is no alias fallback or
+automatic account rebinding. Ordinary unchanged endpoint pins still resume.
 Logout, failed sign-in and pending sign-in do not reactivate a retained manual
 token; explicitly saving a manual token selects that mode and invalidates the
 old grant. Automatic transport/task retries cannot replay declared mutations.

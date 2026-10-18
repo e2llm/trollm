@@ -27,9 +27,12 @@ runs. Queue persistence, Cancel/Retry and free-space preflight also passed;
 ordinary download transfer/recovery and real OAuth provider login/refresh remain
 unaccepted. That APK is held in an older private `v0.1.0-rc.1` draft.
 
-The next configured build candidate is **0.1.0-rc.3 / code 4**; its combined
-native APK and device checks are pending. The earlier signed rc.2/code 3 APK
-passed bounded update and local recovery checks, recorded in the product plan.
+The next configured build candidate is **0.1.0-rc.4 / code 5**; its build,
+signing and device checks are pending. The installed rc.3/code 4 APK remains in
+an unpublished private draft. It preserved all 49 prior visible runs and opened
+the exact supplied browser URL, but its tool-call response failed before page
+reading. The new transport diagnostics are not in that APK. Earlier rc.2/code 3
+update/recovery evidence remains attached to its own build.
 Remaining acceptance includes ordinary download transfer/recovery, real
 provider login/refresh, an updated combined native APK and an S21-class arm64
 phone. Stub/scripted checks establish their own behavior, not real inference or

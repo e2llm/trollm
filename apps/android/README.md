@@ -55,11 +55,14 @@ fixes, interruptible retry delays, durable cancellation, readable sorted history
 and typed bridge errors are also present. These changes need matching combined
 native APK/device acceptance.
 
-The next configured candidate is **0.1.0-rc.3 / code 4**. The earlier signed
-rc.2/code 3 APK retains its bounded update/recovery results in the product plan.
-Ordinary download
-transfer/recovery, real OAuth provider login/refresh, an updated combined native
-APK and S21-class arm64 acceptance remain open. This is not a published or
+The next configured candidate is **0.1.0-rc.4 / code 5**, with build, signing
+and device checks pending. The signed, installed rc.3/code 4 APK from `dc7a331`
+remains in an unpublished private draft. It preserved all 49 prior visible runs;
+browser v5 opened the exact supplied URL, but its tool-call response failed
+before page reading. The new transport diagnostics are not in that APK.
+The earlier rc.2/code 3 APK retains its bounded update/recovery results.
+Ordinary download transfer/recovery, real OAuth provider login/refresh, the
+updated combined native APK and S21-class arm64 acceptance remain open. This is not a published or
 accepted consumer release. See [versioning](../../docs/VERSIONING.md).
 
 ## Local prerequisites
@@ -138,7 +141,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.3` (code `4`), read from the root Cargo manifest through
+`0.1.0-rc.4` (code `5`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. A private build signed by your
 own key cannot update an installation signed by another publisher. This is a
 build recipe; physical-phone acceptance and public APK delivery remain unfinished.
