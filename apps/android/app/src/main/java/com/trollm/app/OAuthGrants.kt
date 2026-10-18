@@ -119,7 +119,9 @@ class OAuthGrants(
             null, read(server).manualEndpoint))
     }
 
-    fun invalidate(server: String, id: String) = synchronized(lock) {
-        if (current(server)?.id == id) logout(server)
+    /** Cleanup cannot revoke a completed grant or a replacement login. */
+    fun invalidatePending(server: String, id: String) = synchronized(lock) {
+        val grant = current(server)
+        if (grant?.id == id && grant.pendingRequest != null) logout(server)
     }
 }

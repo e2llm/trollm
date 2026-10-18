@@ -235,7 +235,13 @@ impl trollm_mcp::ToolGateway for CountingGateway {
 
 #[test]
 fn completed_mutations_after_snapshot_fail_closed_before_replay() {
-    for (writes, use_resume) in [(1, true), (2, true), (1, false)] {
+    for (writes, use_resume, legacy_skipped) in [
+        (1, true, false),
+        (2, true, false),
+        (1, false, false),
+        (1, true, true),
+        (1, false, true),
+    ] {
         let base = common::tmp_dir("completed-replay");
         write_prompt(&base);
         let run_dir = RunDir::under(&base);
@@ -257,6 +263,21 @@ fn completed_mutations_after_snapshot_fail_closed_before_replay() {
         )
         .is_err());
         drop(exec);
+        if legacy_skipped {
+            // Synthetic/legacy payload fields cannot exempt a completed write
+            // beyond the snapshot watermark from the unsafe replay guard.
+            let mut events = read_events(run_dir.path());
+            for event in &mut events {
+                if event["type"] == "tool_call_result" {
+                    event["skipped"] = serde_json::json!(true);
+                }
+            }
+            let journal = events
+                .iter()
+                .map(|event| format!("{event}\n"))
+                .collect::<String>();
+            std::fs::write(run_dir.events_path(), journal).unwrap();
+        }
         let mut restored = Executor::new(
             ExecutionPlan::from_yaml_str(&plan_yaml()).unwrap(),
             TaskRegistry::from_yaml_str(&registry_yaml("fail-run"), &base).unwrap(),

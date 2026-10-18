@@ -1,10 +1,14 @@
 //! Serde model of `ledger.task-registry.v1` (docs/ARCHITECTURE-ANDROID.md §5).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const TASK_REGISTRY_SCHEMA: &str = "ledger.task-registry.v1";
+
+/// Reserved v1 slot name whose calls consume the reasoner budget and grant no tools.
+pub const CANONICAL_REASONER_SLOT: &str = "reasoner";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -41,7 +45,7 @@ pub struct TaskDef {
     /// What completes this task: model prose, or one successful tool result.
     #[serde(default)]
     pub completion: TaskCompletion,
-    /// Owned arguments resolved from prior node outputs or other frame variables.
+    /// Owned arguments resolved from frame variables, typed input keys or fixed JSON values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_arguments: Option<BTreeMap<String, TaskToolArguments>>,
     /// Coder-loop bound; omit for single-shot (§5).
@@ -65,7 +69,13 @@ pub enum TaskCompletion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskToolArguments {
+    #[serde(default)]
     pub from_vars: BTreeMap<String, String>,
+    /// Typed values from exact top-level keys in structured user input.
+    #[serde(default)]
+    pub from_input: BTreeMap<String, String>,
+    #[serde(default)]
+    pub fixed: BTreeMap<String, Value>,
 }
 
 fn identifier(value: &str) -> bool {
@@ -77,7 +87,7 @@ fn identifier(value: &str) -> bool {
 impl TaskDef {
     fn validate_completion(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.model != "reasoner" || self.tools.is_empty(),
+            self.model != CANONICAL_REASONER_SLOT || self.tools.is_empty(),
             "canonical reasoner model slot must not grant tools"
         );
         if let Some(bindings) = &self.tool_arguments {
@@ -93,7 +103,32 @@ impl TaskDef {
                         && self.tools.contains(tool),
                     "toolArguments must name a granted server.tool"
                 );
-                anyhow::ensure!(!rule.from_vars.is_empty(), "fromVars must not be empty");
+                anyhow::ensure!(
+                    !(rule.from_vars.is_empty()
+                        && rule.from_input.is_empty()
+                        && rule.fixed.is_empty()),
+                    "toolArguments requires at least one fromVars, fromInput or fixed argument"
+                );
+                let mut arguments = std::collections::BTreeSet::new();
+                for argument in rule
+                    .from_vars
+                    .keys()
+                    .chain(rule.from_input.keys())
+                    .chain(rule.fixed.keys())
+                {
+                    anyhow::ensure!(
+                        identifier(argument),
+                        "toolArguments requires argument identifiers"
+                    );
+                    anyhow::ensure!(
+                        arguments.insert(argument),
+                        "toolArguments has duplicate argument sources"
+                    );
+                }
+                anyhow::ensure!(
+                    rule.from_input.values().all(|key| identifier(key)),
+                    "fromInput requires top-level input identifiers"
+                );
                 for (argument, path) in &rule.from_vars {
                     anyhow::ensure!(
                         identifier(argument) && path.split('.').all(identifier),

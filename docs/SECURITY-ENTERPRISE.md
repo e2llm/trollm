@@ -4,14 +4,24 @@
 Security and auditability are hard requirements; parts are deferred by design and tracked
 here. Nothing in v1 may foreclose anything on this list.
 
+For vulnerability reporting and supported versions, see the
+[security policy](../SECURITY.md). Run only flows from trusted authors: unsigned
+bundles can declare remote endpoints and tool actions that read, transmit or
+change data using granted service access. Bundle hashes do not authenticate
+publishers. Local logs and run history may contain tool arguments and results;
+sanitize them before sharing.
+Direct core host APIs read authored prompt paths with the host user's filesystem
+authority; Android bundle imports additionally require verified, contained
+manifest paths. These are different trust boundaries.
+
 ## Designed-in now (non-negotiable invariants that security builds on)
 
 - **Content integrity**: bundle members and model weights are SHA256-verified;
   raw flow bytes determine flow identity. Optional `sourceBaseline` is descriptive
   provenance, not a publisher signature or an independently enforced trust anchor.
 - **Append-only event log**: core records transitions, tool results, declared
-  mutation intents and artifact writes. Proxy decisions currently use a separate
-  sidecar; its error reporting and reopen sequencing remain work to complete.
+  mutation intents and artifact writes. Proxy decisions use a separate
+  sidecar; write/reopen errors fail closed.
 - **Deterministic control flow**: transitions never depend on model prose → audit can
   reconstruct *why* a run took a path from the log alone.
 - **Mutation journaling**: intent-before-execute is required for policy-classed

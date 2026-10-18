@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+import xml.etree.ElementTree as ET
 
 import smoke
 
@@ -108,6 +109,42 @@ class SmokeGuards(unittest.TestCase):
         with self.assertRaises(smoke.SmokeError) as raised:
             smoke.check_ui('<?xml version="1.0"?><hierarchy><node package="com.trollm.app" text="Error: SECRET" /></hierarchy>')
         self.assertNotIn("SECRET", str(raised.exception))
+
+    def test_friendly_flow_list_errors_fail_startup_without_disclosing_details(self):
+        summaries = ["Could not load installed flows.", "Could not prepare the supplied flows.",
+                     "Could not load this flow's setup.", "Could not read some run history."]
+        for text in summaries + ["\n".join(summaries)]:
+            with self.subTest(text=text):
+                root = ET.Element("hierarchy")
+                app = ET.SubElement(root, "node", package=smoke.PACKAGE)
+                ET.SubElement(app, "node", package=smoke.PACKAGE, text=text)
+                ET.SubElement(app, "node", package=smoke.PACKAGE, text="SECRET technical details")
+                fake, _ = self.fake()
+
+                def command(argv, timeout=20, env=None):
+                    if argv[3:4] == ["exec-out"]:
+                        return '<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode")
+                    return fake(argv, timeout, env)
+
+                with patch.object(smoke, "command", command), patch.object(smoke.time, "sleep"):
+                    with self.assertRaises(smoke.SmokeError) as raised:
+                        smoke.smoke(self.args)
+                self.assertNotIn("SECRET", str(raised.exception))
+
+    def test_authored_card_titles_and_foreign_errors_are_not_operation_errors(self):
+        root = ET.Element("hierarchy")
+        app = ET.SubElement(root, "node", package=smoke.PACKAGE)
+        for title in ("Could not load installed flows.", "Could not prepare the supplied flows.",
+                      "Could not load this flow's setup.", "Could not read some run history."):
+            card = ET.SubElement(app, "node", package=smoke.PACKAGE, clickable="true")
+            nested = ET.SubElement(card, "node", package=smoke.PACKAGE)
+            ET.SubElement(nested, "node", package=smoke.PACKAGE, text=title)
+        ET.SubElement(root, "node", package="unrelated.app", text="Could not load installed flows.")
+        smoke.check_ui('<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode"))
+        # A real sibling error must still fail even when a card has the same title.
+        ET.SubElement(app, "node", package=smoke.PACKAGE, text="Could not read some run history.")
+        with self.assertRaises(smoke.SmokeError):
+            smoke.check_ui('<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode"))
 
     def test_hung_adb_is_bounded_and_output_hidden(self):
         with patch.object(smoke.subprocess, "run", side_effect=subprocess.TimeoutExpired("adb", 5, output="SECRET")):

@@ -100,7 +100,8 @@ control flow or must obey a newly invented JSON protocol.
 
 ## Browser flows and recorded work
 
-Moray can produce browser flows under the same contract. Its recording-to-flow
+Moray, an optional browser-flow authoring project, can produce browser flows
+under the same contract. Its recording-to-flow
 process is an authoring option; direct authors can supply the procedure too.
 
 A recording shows what happened in that execution. Repeated actions on two
@@ -109,11 +110,10 @@ items do not establish whether the intention was “all items”, “these two�
 success evidence and recovery for a reusable procedure. Preserve the source
 evidence and assumptions when generalizing recorded work.
 
-The requester/implementer method above adapts the internal
-`web-automation/docs/user/collaboration.md` guide: business outcome, meaningful
-questions, explicit defaults, capability discovery and understandable alternatives.
-Its browser-only capability restrictions are specific to that framework; this
-authoring contract serves the tools declared by each flow.
+The requester/implementer method above starts from the business outcome, asks
+meaningful questions, states defaults, discovers capabilities and presents
+understandable alternatives. This authoring contract serves the tools declared
+by each flow.
 
 ## Acceptance for the authoring experience
 

@@ -7,9 +7,13 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
-The current candidate is **0.1.0-rc.2**, with Android **versionCode 3** from
-`[workspace.metadata.android].version-code` in the root manifest. Its release
-tag will be `v0.1.0-rc.2`. A configured candidate is not a published or accepted APK.
+The next configured candidate is **0.1.0-rc.3**, with Android **versionCode 4**
+from `[workspace.metadata.android].version-code` in the root manifest. Its planned
+release tag is `v0.1.0-rc.3`. Building, signing and device acceptance remain pending.
+
+The previously tested **0.1.0-rc.2 / code 3** APK retains its own source identity,
+bytes and acceptance evidence. Its checks do not establish acceptance of the
+new combined candidate.
 
 Use a `v`-prefixed product version for release tags. Increase the product version
 when preparing a new product release candidate or release, and strictly increase

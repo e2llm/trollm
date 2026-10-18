@@ -76,6 +76,14 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
     }
 
     for (name, node) in &plan.nodes {
+        if let Some(policy) = &node.on_error {
+            if policy.backoff_s > MAX_ON_ERROR_BACKOFF_S {
+                problems.push(format!(
+                    "{}: onError.backoffS must be at most {MAX_ON_ERROR_BACKOFF_S} seconds",
+                    at(name)
+                ));
+            }
+        }
         match node.kind {
             NodeKind::Task => {
                 if node.task_ref.is_none() {

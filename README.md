@@ -27,8 +27,10 @@ runs. Queue persistence, Cancel/Retry and free-space preflight also passed;
 ordinary download transfer/recovery and real OAuth provider login/refresh remain
 unaccepted. That APK is held in an older private `v0.1.0-rc.1` draft.
 
-The current build candidate is **0.1.0-rc.2 / code 3**, not a published or accepted
-release. Remaining acceptance includes ordinary download transfer/recovery, real
+The next configured build candidate is **0.1.0-rc.3 / code 4**; its combined
+native APK and device checks are pending. The earlier signed rc.2/code 3 APK
+passed bounded update and local recovery checks, recorded in the product plan.
+Remaining acceptance includes ordinary download transfer/recovery, real
 provider login/refresh, an updated combined native APK and an S21-class arm64
 phone. Stub/scripted checks establish their own behavior, not real inference or
 live-service acceptance. See [versioning](docs/VERSIONING.md).
@@ -44,6 +46,7 @@ network access; on-device inference does not make every flow offline.
 - [Premise](docs/PREMISE.md) and [current v1 architecture](docs/ARCHITECTURE-ANDROID.md)
 - [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md) and
   [authoring guide](docs/FLOW-AUTHORING.md) — proposed authoring work
+- [Security policy and private reporting](SECURITY.md)
 - [Security design](docs/SECURITY-ENTERPRISE.md)
 
 `crates/` contains the executor, model interface, MCP gateway and UniFFI bridge.

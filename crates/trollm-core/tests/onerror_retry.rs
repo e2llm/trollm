@@ -47,6 +47,47 @@ tasks:
 
 const FENCE: &str = r#"<tool_call>{"server":"t","tool":"flaky","args":{"x":1}}</tool_call>"#;
 
+#[test]
+fn retry_backoff_bounds_apply_to_root_and_nested_plans() {
+    use trollm_core::plan::MAX_ON_ERROR_BACKOFF_S;
+    use trollm_core::validate::validate_plan;
+
+    for delay in [
+        0,
+        MAX_ON_ERROR_BACKOFF_S,
+        MAX_ON_ERROR_BACKOFF_S + 1,
+        u64::MAX,
+    ] {
+        let policy = format!("onError: {{ retry: 1, backoffS: {delay}, then: fail }}");
+        let child = ExecutionPlan::from_yaml_str(&plan_yaml(&policy)).unwrap();
+        let expected_valid = delay <= MAX_ON_ERROR_BACKOFF_S;
+        assert_eq!(
+            validate_plan(&child).is_ok(),
+            expected_valid,
+            "root: {delay}"
+        );
+
+        // Reach the invalid delay only through two levels of loaded subflows.
+        let mut parent = ExecutionPlan::from_yaml_str(&plan_yaml("")).unwrap();
+        parent.id = "parent".into();
+        parent.subflows.insert(child.id.clone(), child);
+        let mut root = ExecutionPlan::from_yaml_str(&plan_yaml("")).unwrap();
+        root.id = "root".into();
+        root.subflows.insert(parent.id.clone(), parent);
+        let result = validate_plan(&root);
+        assert_eq!(result.is_ok(), expected_valid, "nested: {delay}");
+        if let Err(error) = result {
+            let detail = error.to_string();
+            assert!(detail.contains("retry-test"), "{detail}");
+            assert!(detail.contains("onError.backoffS"), "{detail}");
+        }
+    }
+    assert!(ExecutionPlan::from_yaml_str(&plan_yaml(
+        "onError: { retry: 1, backoffS: -1, then: fail }"
+    ))
+    .is_err());
+}
+
 fn setup(
     on_error: &str,
     script: MockModel,

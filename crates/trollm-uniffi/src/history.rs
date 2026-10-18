@@ -63,6 +63,14 @@ fn canonical_uuid(id: &str) -> bool {
         })
 }
 
+/// Reject path components and alternate UUID spellings before accessing a run.
+pub(crate) fn validate_run_id(id: &str) -> Result<(), TrollmError> {
+    if !canonical_uuid(id) {
+        return Err(TrollmError::Run("invalid run ID".into()));
+    }
+    Ok(())
+}
+
 fn pinned_flow(plan: &str) -> (Option<String>, Option<String>) {
     match plan.split_once("@sha256:") {
         Some((id, sha))
@@ -82,9 +90,7 @@ pub fn read_run_summary(
     run_id: &str,
     live: Option<(RunPhase, bool)>,
 ) -> Result<RunSummaryInfo, TrollmError> {
-    if !canonical_uuid(run_id) {
-        return Err(TrollmError::Run("invalid run ID".into()));
-    }
+    validate_run_id(run_id)?;
     let dir = base.join("runs").join(run_id);
     let snapshot_path = dir.join("state.snapshot.json");
     let snapshot = File::open(&snapshot_path).ok().and_then(|file| {

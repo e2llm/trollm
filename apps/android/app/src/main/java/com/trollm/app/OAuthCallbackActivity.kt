@@ -17,13 +17,12 @@ class OAuthCallbackActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(TextView(this).apply { text = "Completing sign-in…" })
         lifecycleScope.launch {
-            val succeeded = try {
+            val message = try {
                 val oauth = withContext(Dispatchers.IO) { OAuthConnections.get(applicationContext) }
-                oauth.complete(intent)
+                if (oauth.complete(intent)) "Signed in." else OAuthProblem.FAILED.message
             } catch (error: CancellationException) { throw error }
-            catch (_: Exception) { false }
-            Toast.makeText(this@OAuthCallbackActivity,
-                if (succeeded) "Signed in." else "Sign-in did not complete. Try again from Connections.",
+            catch (error: Exception) { classifyOAuthProblem(error).message }
+            Toast.makeText(this@OAuthCallbackActivity, message,
                 Toast.LENGTH_LONG).show()
             startActivity(Intent(this@OAuthCallbackActivity, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))

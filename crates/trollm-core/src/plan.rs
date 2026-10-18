@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 pub const EXECUTION_PLAN_SCHEMA: &str = "ledger.execution-plan.v1";
 
+/// Maximum authored delay for each onError retry in the interactive app.
+pub const MAX_ON_ERROR_BACKOFF_S: u64 = 300;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionPlan {

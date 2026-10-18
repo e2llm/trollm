@@ -11,6 +11,14 @@ object ConnectionInput {
     fun validToken(token: String): Boolean =
         token.isNotEmpty() && token.none { it.isWhitespace() || it.isISOControl() }
 
+    /** Partial edits are input feedback, not connection-storage failures. */
+    fun endpointError(value: String): String? = try {
+        canonicalEndpoint(value)
+        null
+    } catch (_: IllegalArgumentException) {
+        "Enter a valid HTTPS MCP endpoint without credentials or a fragment."
+    }
+
     /** HTTPS identity: preserve escaped path/query; never collapse distinct resources. */
     fun canonicalEndpoint(value: String): String {
         val uri = try { URI(value) } catch (_: java.net.URISyntaxException) {

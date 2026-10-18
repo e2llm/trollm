@@ -205,6 +205,8 @@ step is the canonical case.
 
 Every `task` may declare `onError: { retry: N, backoffS: S, then: <nodeId|{status...}> }`.
 Default if absent: `retry: 0`, then `{ status: failed, reason: <error-class> }`.
+Each `backoffS` must be an integer from 0 through 300 seconds inclusive, including
+in loaded subflows. This bounds each retry delay, not the total run duration.
 Automatic retry is rejected for tasks granted mutation tools and for any task
 declaring `mutations.idempotency: intent-log`, including a journaled read-only task.
 Read-only tasks without intent logging retain automatic retries. This prevents
@@ -277,24 +279,42 @@ gateway return is necessary but does not bypass artifact verification. Authored
 `onError` handling, including retries, remains unchanged: this is one call per
 attempt, not an at-most-once guarantee across retries or recovery.
 
-Single-call tasks may bind arguments to typed values already in their frame:
+Single-call tasks may supply arguments from frame values, structured input or
+literal constants:
 
 ```yaml
 toolArguments:
+  e2llm.act:
+    fromInput:
+      browser: browser
+      target: url
+    fixed:
+      action: open
   e2llm.read_page:
+    fromInput:
+      browser: browser
     fromVars:
       tabId: open_page.outputs.opened.tabId
 ```
 
 This optional task field requires `completion: tool-result` and names only
-granted tools. `fromVars` uses dotted variable paths, without expressions or
-filters. All sources resolve before generation; missing values fail the task.
+granted tools. `fromVars` uses dotted frame-variable paths, without expressions
+or filters. `fromInput` reads exact top-level keys from a JSON-object user input;
+it does not interpret dotted paths. `fixed` contains literal typed JSON values,
+without interpolation. A rule must contain at least one binding, and an argument
+cannot appear in more than one source map. All sources resolve before generation;
+missing values or non-object input for `fromInput` fail the task. Tasks without
+`fromInput` retain support for ordinary text input.
 After parsing and checking the tool grant, the executor supplies an omitted bound
 argument, accepts an identical model-supplied value, and rejects a conflicting
 value before schema validation, mutation journaling or dispatch. JSON types are
-preserved. The model can therefore request an operation without choosing an ID
-already established by an earlier tool result. Setup's separate `fromInput`
-constraints still apply to the effective arguments.
+preserved, and the journal records the final effective arguments and their hash.
+The model can request an operation with `args:{}` without copying user-provided
+URLs or choosing IDs established by earlier tool results. Setup's separate
+`fromInput` constraints still apply to the effective arguments; their validation
+semantics are unchanged. Browser starter v5 opts into the new task-level input
+and constant bindings. Earlier runtimes reject those new fields rather than
+silently ignoring them; existing registries using only `fromVars` remain valid.
 
 ## 5.1 Tool-call fence (the ONLY structured model output)
 
@@ -386,7 +406,8 @@ Rules:
   alphanumeric/underscore/hyphen names stay readable; other names use a reserved
   prefix plus SHA256. Cache keys must be lowercase SHA256 hex. Remote names stay
   unchanged on the wire, and unsafe old paths are never used as a fallback.
-- Every proxy decision (cache hit/miss, reshape, page fetch, rewrite) is an event-log line.
+- Proxy decisions are written to the separate `proxy.events.jsonl` audit log;
+  they are not currently merged into the main log or its UI event stream.
 
 ## 7. Event log (normative format)
 
@@ -402,6 +423,8 @@ Event types (closed set): `run_started`, `plan_loaded`, `node_entered`, `node_ex
 `transition` (from, to, key), `budget_exhausted`, `paused`, `resumed`, `error` (class,
 detail), `run_ended` (outcome). `seq` is monotonic per run. Tech debt: hash-chaining
 (see SECURITY doc).
+The core `cache_hit`, `served_from_file` and `fetch_progress` variants are reserved;
+the current gateway emits its own sidecar records instead.
 
 Open/recovery and reads reject malformed nonblank records, invalid envelopes,
 mixed run identities and duplicate/decreasing sequence numbers. Positive
@@ -411,6 +434,34 @@ valid last record lacking a newline gets a delimiter before the next append;
 torn JSON never gets silently skipped or repaired. Payload fields cannot replace
 the envelope. Flush-before-dispatch remains a process-crash ordering measure,
 not an fsync or power-loss durability guarantee.
+Older logs that violate these checks can no longer resume even if an earlier
+reader accepted them. Their bytes are preserved for deliberate recovery; no
+automatic repair or mutation replay is attempted.
+
+The main log admits at most **1 MiB of serialized UTF-8 JSON per record**
+(excluding its terminating LF) and **32 MiB of physical bytes per run**
+(including LF and blank lines). Serialization and line reading are bounded while
+they happen. Admission checks include any delimiter needed for a previously
+unterminated record and happen before writing bytes. An append failure disables
+further appends on that writer and preserves the original cause. A rejected
+mutation intent therefore prevents dispatch; a failed result append leaves the
+existing intent unresolved, so recovery cannot replay the mutation as safe.
+There is no reserved space for terminal records: exhaustion can prevent a final
+event, and the bridge reports the worker failure separately.
+
+Recovery, event tailing and status/report reads validate the whole journal by
+streaming records. Status retains only the sequence; report lookup retains only
+the latest relevant transition; tailing retains the requested records. Recovery
+keeps the intent/result state needed for its existing safety checks. Reads still
+scan the file, and the UI can retain the requested event text; this is bounded
+storage and streaming validation, not an incremental file-index cache. A read
+during an incomplete append can fail transiently; observation retries without
+advancing its cursor. Malformed complete records are never skipped.
+
+The same limits apply to older journals. Oversized logs remain byte-for-byte
+intact and cannot resume or supply event/status details through the bounded
+reader; history summaries read saved metadata separately. No rotation, automatic
+deletion, truncation or loss of recovery records is used to make a run fit.
 
 ## 8. Storage layout (Android app filesDir)
 
@@ -827,5 +878,28 @@ normalization compatibility remains a separate follow-up.
 Logout, failed sign-in and pending sign-in do not reactivate a retained manual
 token; explicitly saving a manual token selects that mode and invalidates the
 old grant. Automatic transport/task retries cannot replay declared mutations.
-Real sign-in, refresh and
-device lifecycle acceptance remain to be exercised on the compiled APK.
+
+Sign-in captures ownership immediately after the pending grant is stored,
+before a cancellable dispatcher return. Callback cleanup also covers its first
+credential read. Cleanup runs despite coroutine cancellation and atomically
+removes only the same still-pending grant; a completed grant or replacement
+login survives delayed cleanup. A cleanup failure does not replace the primary
+cancellation, and cancellation during cleanup remains cancellation.
+
+Refresh requests are coalesced by connection, canonical endpoint and grant ID.
+The persistence executor reads the latest state, saves SDK state (including
+failed-refresh state) before completing the token result and checks the exact
+grant again before returning it. An individual timeout does not release an
+unfinished SDK request into a second refresh using the old rotated token.
+Storage failure, logout or a replaced grant withholds the token. The native
+callback still returns a token or no token, without substituting credentials
+or retrying a remote action.
+
+Connections and sign-in feedback use fixed network, timeout, cancellation,
+reconnect, storage, configuration and generic failure messages. Provider text,
+response bodies and raw exception causes are not copied into those messages.
+Refresh diagnostics are process-local, limited to 32 exact-grant entries and
+fenced by refresh identity so older waiters cannot overwrite newer status.
+They retain no token or serialized SDK state; encrypted credentials remain the
+source of truth after process loss. Real provider sign-in, refresh and matching
+device acceptance remain to be exercised on the compiled APK.

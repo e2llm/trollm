@@ -78,7 +78,7 @@ class ModelDownloadCoordinator private constructor(context: Context) {
     private fun forgetTransfer(hash: String) {
         val id = preferences.getLong("download.$hash", -1)
         if (id >= 0) downloads.remove(id)
-        preferences.edit().remove("download.$hash").remove("size.$hash").commit()
+        preferences.edit().remove("download.$hash").remove("size.$hash").remove("metered.$hash").commit()
     }
 
     private fun receiptMatches(model: ModelRequirement): File? {
@@ -127,7 +127,7 @@ class ModelDownloadCoordinator private constructor(context: Context) {
                 error(hash, "Previous model download failed verification or transfer. Retry from its setup screen.")
             }
             downloads.remove(id)
-            preferences.edit().remove(key).remove("size.$hash").commit()
+            preferences.edit().remove(key).remove("size.$hash").remove("metered.$hash").commit()
         }
     }
 
@@ -208,16 +208,19 @@ class ModelDownloadCoordinator private constructor(context: Context) {
                             states[slot] = State(total = model.sizeBytes, message = preferences.getString("error.${model.sha256}", null))
                         }
                     } else if (transfer != null && transfer.status != DownloadManager.STATUS_FAILED) {
+                        val policy = if (preferences.contains("metered.${model.sha256}"))
+                            ModelDownloadPolicy(preferences.getBoolean("metered.${model.sha256}", false)) else null
                         states[slot] = State(downloaded = transfer.bytes, total = model.sizeBytes, downloading = true,
                             message = when {
                                 root.usableSpace < SPACE_HEADROOM || (model.sizeBytes - transfer.bytes).coerceAtLeast(0) > root.usableSpace - SPACE_HEADROOM -> "Low free space for the remaining download."
-                                transfer.status == DownloadManager.STATUS_PENDING -> "Queued by Android; waiting for network or scheduling."
+                                policy == null -> "Existing download has no recorded network policy. Cancel and retry to apply this screen's network choice."
+                                transfer.status == DownloadManager.STATUS_PENDING -> "Queued by Android. ${policy.waitingMessage()}"
                                 transfer.status == DownloadManager.STATUS_PAUSED -> when (transfer.reason) {
-                                    DownloadManager.PAUSED_WAITING_FOR_NETWORK -> "Waiting for a network connection."
-                                    DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "Waiting for Wi-Fi."
+                                    DownloadManager.PAUSED_WAITING_FOR_NETWORK -> policy.waitingMessage()
+                                    DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "Waiting for Wi-Fi or another unmetered network."
                                     else -> "Download paused; Android will retry."
                                 }
-                                else -> "Downloading"
+                                else -> "Downloading. ${policy.description}"
                             })
                     } else {
                         if (id >= 0) {
@@ -238,7 +241,7 @@ class ModelDownloadCoordinator private constructor(context: Context) {
     }
 
     /** Admit one transfer globally, including one started for a different flow. */
-    suspend fun download(model: ModelRequirement) = withContext(Dispatchers.IO) {
+    suspend fun download(model: ModelRequirement, policy: ModelDownloadPolicy = ModelDownloadPolicy()) = withContext(Dispatchers.IO) {
         try {
             lock.withLock {
                 model.validate()
@@ -263,11 +266,14 @@ class ModelDownloadCoordinator private constructor(context: Context) {
                 val available = directory.usableSpace
                 ready(available >= SPACE_HEADROOM && model.sizeBytes <= available - SPACE_HEADROOM, "Not enough space: the model size plus 256 MiB free is required.")
                 val request = DownloadManager.Request(Uri.parse(model.url))
+                    .setAllowedOverMetered(policy.allowMetered)
+                    .setAllowedOverRoaming(policy.allowRoaming)
                     .setTitle("trollm model: ${model.label}")
                     .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                     .setDestinationInExternalFilesDir(app, "models", partial.name)
                 val id = downloads.enqueue(request)
-                if (!preferences.edit().putLong("download.${model.sha256}", id).putLong("size.${model.sha256}", model.sizeBytes).remove("error.${model.sha256}").commit()) {
+                if (!preferences.edit().putLong("download.${model.sha256}", id).putLong("size.${model.sha256}", model.sizeBytes)
+                        .putBoolean("metered.${model.sha256}", policy.allowMetered).remove("error.${model.sha256}").commit()) {
                     downloads.remove(id)
                     throw ModelPreparationException("Could not persist the model download.")
                 }
@@ -288,7 +294,8 @@ class ModelDownloadCoordinator private constructor(context: Context) {
             val id = preferences.getLong("download.${model.sha256}", -1)
             if (id >= 0) downloads.remove(id)
             File(root, "${model.sha256}.download").delete()
-            preferences.edit().remove("download.${model.sha256}").putString("error.${model.sha256}", "Download cancelled. You can retry.").commit()
+            preferences.edit().remove("download.${model.sha256}").remove("size.${model.sha256}")
+                .remove("metered.${model.sha256}").putString("error.${model.sha256}", "Download cancelled. You can retry.").commit()
         }
     }
 

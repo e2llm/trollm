@@ -150,7 +150,7 @@
       "additionalProperties": false,
       "properties": {
         "retry": { "type": "integer", "minimum": 0 },
-        "backoffS": { "type": "integer", "minimum": 0 },
+        "backoffS": { "type": "integer", "minimum": 0, "maximum": 300 },
         "then": { "$ref": "#/$defs/transition" }
       }
     },

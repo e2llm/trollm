@@ -14,6 +14,14 @@ appear above retained history, using their setup titles when available.
 Ordinary unattended download admission and live browser OAuth/refresh still need
 device acceptance; this is not a ready consumer journey.
 
+New and retried model downloads wait for an unmetered network by default;
+metered use requires a choice on the preparation screen, and roaming is blocked.
+**Download model** selects one model. **Download remaining models** explicitly
+queues the remaining distinct assets and shows their combined size. The active
+Android transfer survives leaving the screen; admitting the rest of a batch
+requires that screen to remain open. Old active transfers retain their original
+policy and display Cancel/Retry guidance. Verified models are preserved.
+
 The browser starter asks for a browser name/ID, a page URL and an optional
 question. Runtime argument checks keep calls on that browser and bind the open
 action to the supplied URL. The runtime supplies the exact newly opened tab ID
@@ -47,7 +55,9 @@ fixes, interruptible retry delays, durable cancellation, readable sorted history
 and typed bridge errors are also present. These changes need matching combined
 native APK/device acceptance.
 
-The current candidate is **0.1.0-rc.2 / code 3**. Ordinary download
+The next configured candidate is **0.1.0-rc.3 / code 4**. The earlier signed
+rc.2/code 3 APK retains its bounded update/recovery results in the product plan.
+Ordinary download
 transfer/recovery, real OAuth provider login/refresh, an updated combined native
 APK and S21-class arm64 acceptance remain open. This is not a published or
 accepted consumer release. See [versioning](../../docs/VERSIONING.md).
@@ -92,11 +102,26 @@ workspace's bindgen shim, and cross-compiles Rust for arm64-v8a, armeabi-v7a and
 x86_64. Generated bindings live in `app/build/generated/uniffi`; native outputs
 live in `app/src/main/jniLibs`. The debug APK is under
 `app/build/outputs/apk/debug/`. Keep generated files out of source control.
-Local debug builds use the developer's Android debug signing key. Release
-builds require `TROLLM_DEBUG_KEYSTORE_PATH` pointing to the intended signing
-keystore (alias `androiddebugkey`, store/key passwords `android`). Keep your
-private signing file outside source control and preserve it for future updates.
-From `apps/android/`, with that environment variable set:
+Local debug builds use the developer’s Android debug signing key.
+Release builds require all four explicit signing inputs below. The legacy
+`TROLLM_DEBUG_KEYSTORE_PATH` affects debug builds only. Create your own private
+keystore once, outside the checkout; `keytool` prompts for its password:
+
+```bash
+keytool -genkeypair -keystore /secure/path/trollm-release.jks \
+  -alias trollm-release -storetype JKS -keyalg RSA -keysize 3072 -validity 10000
+export TROLLM_RELEASE_KEYSTORE_PATH=/secure/path/trollm-release.jks
+export TROLLM_RELEASE_KEY_ALIAS=trollm-release
+read -r -s -p 'Keystore password: ' TROLLM_RELEASE_STORE_PASSWORD; echo
+export TROLLM_RELEASE_STORE_PASSWORD
+export TROLLM_RELEASE_KEY_PASSWORD="$TROLLM_RELEASE_STORE_PASSWORD"
+```
+
+The example uses the same key/store password; set `TROLLM_RELEASE_KEY_PASSWORD`
+separately if your keystore uses a different key password. Back up the key
+securely and keep its identity for future updates. A build signed by your own
+key cannot update an installation signed by another publisher. From
+`apps/android/`, with these variables set:
 
 ```sh
 ./gradlew --no-daemon --max-workers=2 -Ptrollm.rustFeatures=llama \
@@ -104,11 +129,24 @@ From `apps/android/`, with that environment variable set:
   :app:testReleaseUnitTest :app:assembleRelease :app:lintRelease
 ```
 
+After building, clear the passwords from your shell:
+
+```sh
+unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
+```
+
+Keep signing files and credentials out of source control, logs and reports.
+
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.2` (code `3`), read from the root Cargo manifest through
+`0.1.0-rc.3` (code `4`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. A private build signed by your
 own key cannot update an installation signed by another publisher. This is a
 build recipe; physical-phone acceptance and public APK delivery remain unfinished.
+
+Run only flows from authors you trust. Bundles are not publisher signed and
+can request remote tool calls that read, send or change data using granted
+service access. See the [security policy](../../SECURITY.md) before importing
+third-party flows or sharing local logs.
 
 ## Manual runtime setup
 

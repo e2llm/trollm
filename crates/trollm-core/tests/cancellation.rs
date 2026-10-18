@@ -227,7 +227,7 @@ fn long_backoff_cancel_wakes_before_retry() {
     let (tx, entered) = channel();
     let control = Arc::new(Control::new(Some(tx)));
     let (mut exec, path, model_calls, tool_calls) =
-        executor(u64::MAX, control.clone(), false, false, false, false);
+        executor(300, control.clone(), false, false, false, false);
     let (done_tx, done_rx) = channel();
     let worker = std::thread::spawn(move || done_tx.send(exec.run_until_blocked()).unwrap());
     entered

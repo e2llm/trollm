@@ -133,10 +133,11 @@ def exercise_flow(adb):
         node = wait_for(lambda root: matching_node(root, text, package, description), "expected control")
         adb("shell", "input", "tap", *center(node))
 
-    def wait_text(expected):
+    def wait_text(expected, *, exact=False):
         def find(root):
             return next((node for node in root.iter("node")
-                         if node.get("package") == PACKAGE and expected in node.get("text", "")), None)
+                         if node.get("package") == PACKAGE
+                         and (node.get("text") == expected if exact else expected in node.get("text", ""))), None)
         return wait_for(find, "expected result")
 
     def install(local_name, expected):
@@ -180,7 +181,7 @@ def exercise_flow(adb):
         open_fixture()
         before_runs = private_entries("runs")
         tap("Start run")
-        wait_text("succeeded")
+        wait_text("Succeeded", exact=True)
         wait_text(fixture.EXPECTED_REPORT)
         checks.append("stub-run-final-report")
         new_runs = private_entries("runs") - before_runs
@@ -201,7 +202,7 @@ def exercise_flow(adb):
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
         wait_text(run_id)
         wait_text(fixture.EXPECTED_REPORT)
-        wait_text("succeeded")
+        wait_text("Succeeded", exact=True)
         checks.append("completed-run-cold-recovery")
         print("PASS: run history and completed-run recovery after process death")
 
@@ -210,7 +211,7 @@ def exercise_flow(adb):
         open_fixture(paused=True)
         before_runs = private_entries("runs")
         tap("Start run")
-        wait_text("paused: needs-attention")
+        wait_text("Paused: needs-attention", exact=True)
         new_runs = private_entries("runs") - before_runs
         if len(new_runs) != 1:
             raise FlowSmokeError("Expected exactly one new paused smoke run")
@@ -229,27 +230,39 @@ def exercise_flow(adb):
             except json.JSONDecodeError:
                 return []  # A worker may be appending; the next bounded probe retries.
 
+        initial = events()
+        initial_types = [event.get("type") for event in initial]
+        if (initial_types[-1:] != ["paused"] or "resumed" in initial_types
+                or initial_types.count("model_call") != 1):
+            raise FlowSmokeError("Initial paused fixture has missing or unexpected execution events")
+
         adb("shell", "input", "keyevent", "KEYCODE_HOME")
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
-        wait_text("paused: needs-attention")
+        wait_text("Paused: needs-attention", exact=True)
         adb("shell", "am", "force-stop", PACKAGE)
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
         wait_text(paused_id)
-        wait_text("paused: needs-attention")
+        wait_text("Interrupted — tap Resume to restore saved progress. Models load when needed.", exact=True)
+        wait_for(lambda root: matching_node(root, "Resume"), "enabled explicit Resume")
+        cold = events()
+        if cold != initial:
+            raise FlowSmokeError("Cold reopen changed the journal before explicit Resume")
+        cold_types = [event.get("type") for event in cold]
         checks.append("paused-run-cold-recovery")
-        before_resume = sum(event.get("type") == "resumed" for event in events())
+        before_resume = cold_types.count("resumed")
+        before_models = cold_types.count("model_call")
         tap("Resume")
 
         def resumed(_root):
             types = [event.get("type") for event in events()]
             return (types.count("resumed") == before_resume + 1
-                    and types.count("model_call") >= 2 and types[-1:] == ["paused"])
+                    and types.count("model_call") == before_models + 1 and types[-1:] == ["paused"])
 
         wait_for(resumed, "resumed execution and repeated pause")
-        wait_text("paused: needs-attention")
+        wait_text("Paused: needs-attention", exact=True)
         checks.append("resume-reruns-task")
         tap("Cancel")
-        wait_text("failed: cancelled")
+        wait_text("Cancelled", exact=True)
         terminal = events()
         if not terminal or terminal[-1].get("type") != "run_ended" or terminal[-1].get("outcome") != "cancelled":
             raise FlowSmokeError("Cancelled fixture did not persist its terminal outcome")
