@@ -1069,32 +1069,30 @@ pub type TailResult = (Vec<(u64, String, String)>, u64);
 pub fn tail_events(base: &Path, run_id: &str, from_seq: u64) -> Result<TailResult> {
     let path = base.join("runs").join(run_id).join("events.jsonl");
     let mut out = Vec::new();
-    let mut last = from_seq;
-    if !path.exists() {
-        return Ok((out, last));
-    }
-    for line in std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(&path)?)) {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(seq) = v.get("seq").and_then(Value::as_u64) else {
-            continue;
-        };
-        last = last.max(seq);
+    let last = trollm_core::EventLog::visit(&path, Some(run_id), |event, line| {
+        // The visitor validates every record, including the unreturned prefix.
+        let seq = event["seq"].as_u64().expect("validated event sequence");
         if seq > from_seq {
-            let ty = v
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            out.push((seq, ty, line));
+            out.push((
+                seq,
+                event["type"]
+                    .as_str()
+                    .expect("validated event type")
+                    .to_owned(),
+                line.to_owned(),
+            ));
         }
-    }
-    Ok((out, last))
+    })?;
+    Ok((out, last.max(from_seq)))
+}
+
+/// Read the complete validated journal without retaining event payloads.
+pub fn last_event_seq(base: &Path, run_id: &str) -> Result<u64> {
+    Ok(trollm_core::EventLog::visit(
+        &base.join("runs").join(run_id).join("events.jsonl"),
+        Some(run_id),
+        |_, _| {},
+    )?)
 }
 
 /// Final report heuristic (see OPEN QUESTIONS in the implementation report):
@@ -1103,29 +1101,40 @@ pub fn tail_events(base: &Path, run_id: &str, from_seq: u64) -> Result<TailResul
 /// `onVerified` into an `end` node (from the event log), whose bound prose
 /// outputs are read back out of `state.snapshot.json`. The wrapper passes
 /// prose through verbatim; it never parses it.
-pub fn final_report(base: &Path, run_id: &str) -> Option<String> {
+pub fn final_report(base: &Path, run_id: &str) -> Result<Option<String>> {
     let dir = base.join("runs").join(run_id);
-    let events = trollm_core::EventLog::read_all(&dir.join("events.jsonl")).ok()?;
-    let last_done_node = events.iter().rev().find_map(|e| {
-        if e.get("type")?.as_str()? == EventType::Transition.as_str()
-            && e.get("key")?.as_str()? == "onVerified"
-        {
-            e.get("from")?.as_str().map(str::to_string)
-        } else {
-            None
+    let mut last_done_node = None;
+    trollm_core::EventLog::visit(&dir.join("events.jsonl"), Some(run_id), |event, _| {
+        if event["type"] == EventType::Transition.as_str() && event["key"] == "onVerified" {
+            if let Some(node) = event["from"].as_str() {
+                last_done_node = Some(node.to_owned());
+            }
         }
     })?;
-    let state: trollm_core::RunState =
-        serde_json::from_slice(&fs::read(dir.join("state.snapshot.json")).ok()?).ok()?;
-    let frame = state.stack.first()?;
-    let outputs = frame.node_outputs.get(&last_done_node)?;
+    let Some(last_done_node) = last_done_node else {
+        return Ok(None);
+    };
+    // Preserve the existing best-effort snapshot/report-absence behavior.
+    let Some(state) = fs::read(dir.join("state.snapshot.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<trollm_core::RunState>(&bytes).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(outputs) = state
+        .stack
+        .first()
+        .and_then(|frame| frame.node_outputs.get(&last_done_node))
+    else {
+        return Ok(None);
+    };
     let mut parts: Vec<&str> = outputs.values().filter_map(Value::as_str).collect();
     parts.sort_unstable();
-    if parts.is_empty() {
+    Ok(if parts.is_empty() {
         None
     } else {
         Some(parts.join("\n"))
-    }
+    })
 }
 
 /// Inactive handles are only a cache; persisted run data outlives eviction.
@@ -1236,6 +1245,157 @@ mod regression_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn journal_record(run_id: &str, seq: u64) -> String {
+        format!("{{\"ts\":1,\"runId\":\"{run_id}\",\"seq\":{seq},\"type\":\"run_started\"}}")
+    }
+
+    #[test]
+    fn tail_validates_prefix_and_preserves_raw_records_and_future_cursor() {
+        let base = TrustTestDir::new("bounded-tail");
+        let dir = base.0.join("runs/tail");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        assert_eq!(tail_events(&base.0, "tail", 5).unwrap(), (vec![], 5));
+        assert_eq!(last_event_seq(&base.0, "tail").unwrap(), 0);
+        let first = journal_record("tail", 1);
+        let second = journal_record("tail", 3);
+        let bytes = format!("{first}\r\n  {second}  ");
+        fs::write(&path, &bytes).unwrap();
+        let (events, last) = tail_events(&base.0, "tail", 1).unwrap();
+        assert_eq!(last, 3);
+        assert_eq!(
+            events,
+            vec![(3, "run_started".into(), format!("  {second}  "))]
+        );
+        assert_eq!(tail_events(&base.0, "tail", 100).unwrap(), (vec![], 100));
+        assert_eq!(last_event_seq(&base.0, "tail").unwrap(), 3);
+        assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+
+        for invalid in [
+            format!("malformed\n{second}\n"),
+            format!("{}\n{second}\n", journal_record("another-run", 1)),
+            format!("{first}\n{first}\n{second}\n"),
+        ] {
+            fs::write(&path, &invalid).unwrap();
+            assert!(tail_events(&base.0, "tail", 100).is_err());
+            assert!(last_event_seq(&base.0, "tail").is_err());
+            assert_eq!(fs::read(&path).unwrap(), invalid.as_bytes());
+        }
+    }
+
+    #[test]
+    fn tail_retries_partial_append_without_advancing_or_altering_the_journal() {
+        use std::io::Write;
+        let base = TrustTestDir::new("bounded-partial");
+        let dir = base.0.join("runs/partial");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let first = journal_record("partial", 1);
+        let second = journal_record("partial", 2);
+        let split = second.len() / 2;
+        let incomplete = format!("{first}\n{}", &second[..split]);
+        fs::write(&path, &incomplete).unwrap();
+        assert!(tail_events(&base.0, "partial", 1).is_err());
+        assert_eq!(fs::read(&path).unwrap(), incomplete.as_bytes());
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&second.as_bytes()[split..]).unwrap();
+        file.write_all(b"\n").unwrap();
+        let (events, last) = tail_events(&base.0, "partial", 1).unwrap();
+        assert_eq!(last, 2);
+        assert_eq!(events, vec![(2, "run_started".into(), second)]);
+    }
+
+    #[test]
+    fn streamed_report_keeps_last_matching_node_and_rejects_later_corruption() {
+        let base = TrustTestDir::new("bounded-report");
+        let dir = base.0.join("runs/report");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let mut state = trollm_core::RunState::fresh("report", "flow@sha256:absent", "work");
+        state.stack[0]
+            .node_outputs
+            .insert("first".into(), [("text".into(), json!("earlier"))].into());
+        state.stack[0].node_outputs.insert(
+            "last".into(),
+            [
+                ("z".into(), json!("zebra")),
+                ("a".into(), json!("apple")),
+                ("number".into(), json!(3)),
+            ]
+            .into(),
+        );
+        fs::write(
+            dir.join("state.snapshot.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let mut journal = String::new();
+        for (seq, node, key) in [
+            (1, "first", "onVerified"),
+            (2, "last", "onVerified"),
+            (3, "first", "onError"),
+        ] {
+            journal.push_str(&format!(
+                "{}\n",
+                json!({"ts": 1, "runId": "report", "seq": seq,
+                "type": "transition", "key": key, "from": node})
+            ));
+        }
+        fs::write(&path, &journal).unwrap();
+        assert_eq!(
+            final_report(&base.0, "report").unwrap().as_deref(),
+            Some("apple\nzebra")
+        );
+        // Selection is best effort when the snapshot is absent, as before.
+        fs::remove_file(dir.join("state.snapshot.json")).unwrap();
+        assert_eq!(final_report(&base.0, "report").unwrap(), None);
+        journal.push_str("malformed\n");
+        fs::write(&path, &journal).unwrap();
+        assert!(final_report(&base.0, "report").is_err());
+        assert_eq!(fs::read(&path).unwrap(), journal.as_bytes());
+    }
+
+    #[test]
+    fn public_observers_reject_oversized_or_corrupt_journals_without_rewriting() {
+        use crate::TrollmRuntime;
+        let base = TrustTestDir::new("bounded-public-observers");
+        let rt = TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
+        let id = "00000000-0000-0000-0000-000000000058";
+        let dir = base.0.join("trollm/runs").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let mut state = trollm_core::RunState::fresh(id, "flow@sha256:absent", "work");
+        state.status = trollm_core::state::StateStatus::Succeeded;
+        fs::write(
+            dir.join("state.snapshot.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let path = dir.join("events.jsonl");
+        let oversized = format!(
+            "{}\n",
+            json!({"ts": 1, "runId": id, "seq": 1,
+            "type": "run_started", "padding": "x".repeat(trollm_core::events::MAX_EVENT_RECORD_BYTES)})
+        );
+        for bytes in [oversized.into_bytes(), b"malformed\n".to_vec()] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(rt.tail_events(id.into(), u64::MAX).is_err());
+            assert!(rt.poll_status(id.into()).is_err());
+            // History remains a snapshot projection, not a journal reader.
+            assert!(rt.run_summary(id.into()).unwrap().phase.is_some());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        // Sparse file tests the physical log-size precheck without a large buffer.
+        let length = trollm_core::events::MAX_EVENT_LOG_BYTES + 1;
+        fs::File::create(&path).unwrap().set_len(length).unwrap();
+        assert!(rt
+            .tail_events(id.into(), 0)
+            .unwrap_err()
+            .to_string()
+            .contains("event log exceeds byte limit"));
+        assert!(rt.poll_status(id.into()).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().len(), length);
     }
 
     fn audit_event() -> ProxyEvent {
@@ -1810,7 +1970,7 @@ mod regression_tests {
         use crate::TrollmRuntime;
         let base = TrustTestDir::new("terminal-worker-failure-resume");
         let rt = TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
-        let id = "terminal-worker-failure";
+        let id = "00000000-0000-0000-0000-000000000001";
         let dir = base.0.join("trollm/runs").join(id);
         fs::create_dir_all(&dir).unwrap();
         let mut state = trollm_core::RunState::fresh(id, "flow@sha256:absent", "work");
@@ -1837,7 +1997,7 @@ mod regression_tests {
         use crate::{TrollmError, TrollmRuntime};
         let base = TrustTestDir::new("worker-failure-no-snapshot-resume");
         let rt = TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
-        let id = "startup-failure";
+        let id = "00000000-0000-0000-0000-000000000001";
         let dir = base.0.join("trollm/runs").join(id);
         fs::create_dir_all(&dir).unwrap();
         let failed = inactive_handle(RunPhase::Running);
@@ -1861,6 +2021,8 @@ mod regression_tests {
 
     #[test]
     fn live_controls_still_work_after_registry_churn() {
+        const RUNNING_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const PAUSED_ID: &str = "00000000-0000-0000-0000-000000000002";
         use crate::TrollmRuntime;
         let base = TrustTestDir::new("live-controls-after-churn");
         let rt = TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
@@ -1870,22 +2032,22 @@ mod regression_tests {
         *paused.status.lock().unwrap() = RunPhase::Paused {
             reason: "authored pause".into(),
         };
-        rt.runs.insert("running".into(), running.clone());
-        rt.runs.insert("paused".into(), paused.clone());
+        rt.runs.insert(RUNNING_ID.into(), running.clone());
+        rt.runs.insert(PAUSED_ID.into(), paused.clone());
         churn(&rt.runs, 100);
-        rt.pause("running".into()).unwrap();
+        rt.pause(RUNNING_ID.into()).unwrap();
         assert!(running.control.pause_requested.load(Ordering::SeqCst));
-        rt.resume("running".into()).unwrap();
+        rt.resume(RUNNING_ID.into()).unwrap();
         assert!(!running.control.pause_requested.load(Ordering::SeqCst));
         assert!(running_commands.try_recv().is_err());
-        rt.pause("paused".into()).unwrap();
-        rt.resume("paused".into()).unwrap();
+        rt.pause(PAUSED_ID.into()).unwrap();
+        rt.resume(PAUSED_ID.into()).unwrap();
         assert!(!paused.control.pause_requested.load(Ordering::SeqCst));
         assert!(matches!(*paused.status.lock().unwrap(), RunPhase::Running));
         assert!(matches!(paused_commands.try_recv(), Ok(RunCommand::Resume)));
         for (id, handle, commands) in [
-            ("running", running, running_commands),
-            ("paused", paused, paused_commands),
+            (RUNNING_ID, running, running_commands),
+            (PAUSED_ID, paused, paused_commands),
         ] {
             rt.cancel(id.into()).unwrap();
             assert!(handle.control.is_cancelled());
@@ -2134,28 +2296,30 @@ mod regression_tests {
 
     #[test]
     fn status_reopen_is_read_only_and_startup_interruption_is_explicit() {
+        const INTERRUPTED_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const SAVED_ID: &str = "00000000-0000-0000-0000-000000000002";
         use crate::{RunPhaseApi, TrollmRuntime};
         let base = TrustTestDir::new("status-reopen");
-        let dir = base.0.join("trollm/runs/interrupted");
+        let dir = base.0.join("trollm/runs").join(INTERRUPTED_ID);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("events.jsonl"), b"").unwrap();
         let rt = TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
-        let interrupted = rt.poll_status("interrupted".into()).unwrap();
+        let interrupted = rt.poll_status(INTERRUPTED_ID.into()).unwrap();
         assert!(
             matches!(interrupted.phase, RunPhaseApi::Failed { reason } if reason.contains("interrupted before saved progress; start a new run"))
         );
         assert!(!interrupted.worker_active);
         assert_eq!(interrupted.activity, None);
         assert!(!dir.join("state.snapshot.json").exists());
-        assert!(rt.resume("interrupted".into()).is_err());
+        assert!(rt.resume(INTERRUPTED_ID.into()).is_err());
         assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), b"");
         let (abandoned, _) = handle();
         abandoned
             .control
             .worker_active
             .store(false, Ordering::SeqCst);
-        rt.runs.insert("interrupted".into(), abandoned);
-        let interrupted = rt.poll_status("interrupted".into()).unwrap();
+        rt.runs.insert(INTERRUPTED_ID.into(), abandoned);
+        let interrupted = rt.poll_status(INTERRUPTED_ID.into()).unwrap();
         assert!(
             matches!(interrupted.phase, RunPhaseApi::Failed { reason } if reason.contains("interrupted before saved progress; start a new run"))
         );
@@ -2166,13 +2330,14 @@ mod regression_tests {
             trollm_core::state::StateStatus::Running,
             trollm_core::state::StateStatus::Paused,
         ] {
-            let mut state = trollm_core::RunState::fresh("saved", "missing@sha256:absent", "entry");
+            let mut state =
+                trollm_core::RunState::fresh(SAVED_ID, "missing@sha256:absent", "entry");
             state.status = state_status;
-            let saved = base.0.join("trollm/runs/saved");
+            let saved = base.0.join("trollm/runs").join(SAVED_ID);
             fs::create_dir_all(&saved).unwrap();
             let bytes = serde_json::to_vec(&state).unwrap();
             fs::write(saved.join("state.snapshot.json"), &bytes).unwrap();
-            let status = rt.poll_status("saved".into()).unwrap();
+            let status = rt.poll_status(SAVED_ID.into()).unwrap();
             assert!(!status.worker_active);
             assert_eq!(status.activity, None);
             assert!(!rt.has_active_run());
@@ -2183,6 +2348,7 @@ mod regression_tests {
 
     #[test]
     fn concurrent_resume_reconstructs_one_worker_for_the_same_run() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
         let base = TrustTestDir::new("concurrent-resume");
         let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
         let constructions = Arc::new(AtomicU64::new(0));
@@ -2193,7 +2359,7 @@ mod regression_tests {
         let first_runtime = rt.clone();
         let first_count = constructions.clone();
         let first = std::thread::spawn(move || {
-            first_runtime.resume_or_reconstruct("same-run".into(), || {
+            first_runtime.resume_or_reconstruct(ID.into(), || {
                 first_count.fetch_add(1, Ordering::SeqCst);
                 entered.send(()).unwrap();
                 released.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -2205,7 +2371,7 @@ mod regression_tests {
         let second_count = constructions.clone();
         let second = std::thread::spawn(move || {
             attempted.send(()).unwrap();
-            let result = second_runtime.resume_or_reconstruct("same-run".into(), || {
+            let result = second_runtime.resume_or_reconstruct(ID.into(), || {
                 second_count.fetch_add(1, Ordering::SeqCst);
                 Ok(handle().0)
             });
@@ -2229,21 +2395,22 @@ mod regression_tests {
             "concurrent resume bypassed reconstruction serialization"
         );
         assert_eq!(constructions.load(Ordering::SeqCst), 1);
-        assert!(rt.poll_status("same-run".into()).unwrap().worker_active);
+        assert!(rt.poll_status(ID.into()).unwrap().worker_active);
     }
 
     #[test]
     fn status_capture_excludes_terminal_publication_until_activity_is_read() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
         let base = TrustTestDir::new("status-consistency");
         let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
         let (handle, _) = handle();
-        rt.runs.insert("live".into(), handle.clone());
+        rt.runs.insert(ID.into(), handle.clone());
         // Hold the final status component so the reader must pause mid-capture.
         let activity = handle.control.activity.lock().unwrap();
         let (started, reader_started) = channel();
         let reader = std::thread::spawn(move || {
             started.send(()).unwrap();
-            rt.poll_status("live".into()).unwrap()
+            rt.poll_status(ID.into()).unwrap()
         });
         reader_started.recv_timeout(Duration::from_secs(2)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2270,23 +2437,24 @@ mod regression_tests {
 
     #[test]
     fn status_only_exposes_activity_for_active_running_worker() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
         let base = TrustTestDir::new("active-status");
         let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
         let (handle, _) = handle();
-        rt.runs.insert("live".into(), handle.clone());
-        let status = rt.poll_status("live".into()).unwrap();
+        rt.runs.insert(ID.into(), handle.clone());
+        let status = rt.poll_status(ID.into()).unwrap();
         assert!(status.worker_active);
         assert_eq!(status.activity, Some(RunActivityApi::Starting));
         *handle.status.lock().unwrap() = RunPhase::Paused {
             reason: "hold".into(),
         };
-        let status = rt.poll_status("live".into()).unwrap();
+        let status = rt.poll_status(ID.into()).unwrap();
         assert!(status.worker_active);
         assert_eq!(status.activity, None);
         handle.resume();
         assert!(matches!(*handle.status.lock().unwrap(), RunPhase::Running));
         *handle.status.lock().unwrap() = RunPhase::Succeeded;
-        let status = rt.poll_status("live".into()).unwrap();
+        let status = rt.poll_status(ID.into()).unwrap();
         assert!(!status.worker_active);
         assert_eq!(status.activity, None);
     }

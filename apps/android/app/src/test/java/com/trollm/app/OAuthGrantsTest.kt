@@ -61,7 +61,7 @@ class OAuthGrantsTest {
         val second = grants.begin("browser", first.endpoint, "pending-two", "request-two")
         assertNotEquals(first.id, second.id)
         assertFalse(grants.update("browser", first.id, first.endpoint, "late-refresh-one"))
-        grants.invalidate("browser", first.id)
+        grants.invalidatePending("browser", first.id)
         assertEquals(second.id, grants.current("browser")?.id)
         assertTrue(grants.update("browser", second.id, second.endpoint, "authorized-two"))
         assertEquals(second.id, grants.pin("browser", first.endpoint)?.grantId)
@@ -95,7 +95,7 @@ class OAuthGrantsTest {
         val attempt = grants.begin("browser", "https://example.test/mcp", "", "preparing")
         assertEquals(SelectedAuthMode.OAUTH, grants.mode("browser"))
         assertNull(grants.pin("browser", attempt.endpoint))
-        grants.invalidate("browser", attempt.id)
+        grants.invalidatePending("browser", attempt.id)
         assertEquals("legacy-token", memory.values["browser"]?.manualToken)
         assertEquals("https://example.test/mcp", memory.values["browser"]?.manualEndpoint)
         assertNull(grants.manualToken("browser", attempt.endpoint))
@@ -116,7 +116,7 @@ class OAuthGrantsTest {
         assertNull(grants.current("browser"))
         assertFalse(grants.prepare("browser", attempt.id, attempt.endpoint, "late-state", "request"))
         assertFalse(grants.update("browser", attempt.id, attempt.endpoint, "late-token-state"))
-        grants.invalidate("browser", attempt.id)
+        grants.invalidatePending("browser", attempt.id)
         assertEquals(SelectedAuthMode.BEARER, grants.mode("browser"))
         grants.selectManual("browser", null, null)
         assertEquals(SelectedAuthMode.ANONYMOUS, grants.mode("browser"))
@@ -205,6 +205,25 @@ class OAuthGrantsTest {
         assertNull(grants.manualToken("browser", "https://example.test/a/b?q=%2F"))
         assertNull(grants.manualToken("browser", "https://example.test/a%2Fb?q=/"))
         assertNull(grants.manualToken("browser", "https://example.test/a%2Fb?q=%2F&tenant=other"))
+    }
+
+    @Test fun delayedCleanupPreservesCompletedSameGrantAndOnlyRemovesMatchingPendingLogin() {
+        val memory = Memory()
+        val login = memory.open()
+        val callback = memory.open()
+        val first = login.begin("browser", "https://example.test/mcp", "", "preparing")
+        assertTrue(callback.update("browser", first.id, first.endpoint, "authorized"))
+        // Cancellation or a duplicate callback can arrive after completion.
+        login.invalidatePending("browser", first.id)
+        assertEquals(first.id, login.pin("browser", first.endpoint)?.grantId)
+        assertEquals("authorized", callback.current("browser")?.state)
+
+        val second = login.begin("browser", first.endpoint, "", "preparing")
+        callback.invalidatePending("browser", first.id)
+        assertEquals(second.id, login.current("browser")?.id)
+        callback.invalidatePending("browser", second.id)
+        assertNull(login.current("browser"))
+        assertEquals(SelectedAuthMode.UNAVAILABLE, login.mode("browser"))
     }
 
 }

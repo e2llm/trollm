@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.trollm.app.OAuthProblemException
 import com.trollm.app.ConnectionInput
 import com.trollm.app.SecretsStore
 import com.trollm.app.OAuthConnections
@@ -51,6 +52,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
     var oauth by remember { mutableStateOf<OAuthConnections?>(null) }
     var oauthStatus by remember { mutableStateOf("Opening connection storage…") }
     var refreshStatus by remember { mutableStateOf(0) }
+    val endpointError = ConnectionInput.endpointError(endpoint)
 
     LaunchedEffect(Unit) {
         try {
@@ -77,6 +79,16 @@ fun ConnectionsScreen(onBack: () -> Unit) {
 
     LaunchedEffect(server, endpoint, store, oauth, busy, refreshStatus) {
         saved = null
+        savedForEndpoint = false
+        if (!ConnectionInput.validServer(server)) {
+            oauthStatus = "Enter a connection name without whitespace."
+            return@LaunchedEffect
+        }
+        if (endpointError != null) {
+            oauthStatus = "Enter a valid HTTPS MCP endpoint to check this connection."
+            return@LaunchedEffect
+        }
+        oauthStatus = if (busy) "Updating connection…" else "Opening connection storage…"
         val secrets = store
         if (!busy && secrets != null && ConnectionInput.validServer(server)) {
             try {
@@ -90,6 +102,9 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                 }
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
+            } catch (failure: OAuthProblemException) {
+                message = failure.problem.message
+                oauthStatus = failure.problem.message
             } catch (_: Exception) {
                 message = "Could not read connection status."
                 oauthStatus = "Check the HTTPS MCP endpoint and connection storage."
@@ -132,6 +147,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                 message = "Could not update connection."
             } finally {
                 busy = false
+                refreshStatus++
             }
         }
     }
@@ -141,7 +157,10 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         Text("Use the connection name from your flow.")
         OutlinedTextField(
             value = server,
-            onValueChange = { server = it; token = ""; message = null },
+            onValueChange = {
+                server = it; token = ""; message = null
+                saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
+            },
             label = { Text("Connection name") },
             singleLine = true,
             enabled = !busy,
@@ -149,8 +168,13 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         )
         OutlinedTextField(
             value = endpoint,
-            onValueChange = { endpoint = it; message = null },
+            onValueChange = {
+                endpoint = it; message = null
+                saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
+            },
             label = { Text("MCP HTTPS endpoint") },
+            isError = endpointError != null,
+            supportingText = { endpointError?.let { Text(it) } },
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
@@ -171,11 +195,16 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                     client.signIn(name, url)
                 } catch (error: kotlinx.coroutines.CancellationException) {
                     throw error
+                } catch (failure: OAuthProblemException) {
+                    message = failure.problem.message
                 } catch (_: Exception) {
                     message = "Could not start sign-in. Check the endpoint, trust configuration and browser."
-                } finally { busy = false }
+                } finally {
+                    busy = false
+                    refreshStatus++
+                }
             }
-        }, enabled = !busy && oauth != null) { Text("Sign in with browser") }
+        }, enabled = !busy && oauth != null && endpointError == null && ConnectionInput.validServer(server)) { Text("Sign in with browser") }
         Button(onClick = {
             val client = oauth ?: return@Button
             val name = server
@@ -186,8 +215,12 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                     message = "OAuth account signed out. Manual tokens are managed separately."
                 } catch (error: kotlinx.coroutines.CancellationException) {
                     throw error
-                } catch (_: Exception) { message = "Could not sign out of this connection." }
-                finally { busy = false }
+                } catch (failure: OAuthProblemException) { message = failure.problem.message }
+                catch (_: Exception) { message = "Could not sign out of this connection." }
+                finally {
+                    busy = false
+                    refreshStatus++
+                }
             }
         }, enabled = !busy && oauth != null && ConnectionInput.validServer(server)) { Text("Sign out of OAuth") }
         Text("Manual Bearer token (saving switches this connection away from OAuth).")
@@ -195,7 +228,9 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             true -> if (savedForEndpoint) "Saved token available for this endpoint."
                 else "Token stored but inactive for this endpoint. Re-save it with its intended endpoint to use manual authentication."
             false -> "No saved token."
-            null -> "Enter a connection name to check saved-token status."
+            null -> if (endpointError != null) "Enter a valid endpoint to check saved-token status."
+                else if (busy) "Updating saved-token status…"
+                else "Saved-token status is unavailable."
         })
         OutlinedTextField(
             value = token,
@@ -208,7 +243,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
         )
-        Button(onClick = { update(false) }, enabled = !busy && store != null) { Text("Save token") }
+        Button(onClick = { update(false) }, enabled = !busy && store != null && endpointError == null) { Text("Save token") }
         Button(onClick = { update(true) }, enabled = !busy && store != null) { Text("Remove token") }
         message?.let { Text(it) }
         Button(onClick = { token = ""; onBack() }) { Text("Back") }

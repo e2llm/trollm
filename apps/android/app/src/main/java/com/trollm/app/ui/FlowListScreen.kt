@@ -31,6 +31,11 @@ import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import com.trollm.app.UiError
+import com.trollm.app.UiOperation
+import com.trollm.app.operationError
+import com.trollm.app.combineUiErrors
+import com.trollm.app.catchingOperation
 import com.trollm.app.FlowSetup
 import com.trollm.app.historyEntries
 import com.trollm.app.StarterFlows
@@ -53,42 +58,60 @@ fun FlowListScreen(
     var flows by remember { mutableStateOf<List<FlowInfo>>(emptyList()) }
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var summaries by remember { mutableStateOf<Map<String, RunSummaryInfo>>(emptyMap()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiError?>(null) }
+    var historyErrors by remember { mutableStateOf<Map<String, UiError>>(emptyMap()) }
     val history = remember(runIds, summaries, titles) { historyEntries(runIds, summaries, titles) }
     val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT) }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        val starterError = runCatching { StarterFlows.ensureInstalled(context, runtime) }.exceptionOrNull()
-        val listingError = runCatching {
+        val starterError = catchingOperation { StarterFlows.ensureInstalled(context, runtime) }.exceptionOrNull()
+        val setupErrors = mutableListOf<UiError>()
+        val listingError = catchingOperation {
             val listed = withContext(Dispatchers.IO) {
                 runtime.listFlows().map { flow ->
-                    val title = runCatching {
+                    val title = catchingOperation {
                         runtime.flowSetup(flow.sha256)?.let { FlowSetup.parse(it).title }
-                    }.getOrNull() ?: flow.id
+                    }.onFailure { setupErrors += operationError(UiOperation.LOAD_SETUP, it) }.getOrNull() ?: flow.id
                     flow to title
                 }
             }
             flows = listed.map { it.first }
             titles = listed.associate { it.first.sha256 to it.second }
         }.exceptionOrNull()
-        error = (listingError ?: starterError)?.message
+        error = combineUiErrors(
+            starterError?.let { operationError(UiOperation.INSTALL_STARTERS, it) },
+            listingError?.let { operationError(UiOperation.LOAD_FLOWS, it) },
+            *setupErrors.toTypedArray(),
+        )
+    }
+
+    suspend fun readSummaries(ids: Collection<String>): Map<String, RunSummaryInfo> {
+        val failures = mutableMapOf<String, UiError>()
+        val result = withContext(Dispatchers.IO) {
+            ids.mapNotNull { id ->
+                catchingOperation { runtime.runSummary(id) }
+                    .onFailure { failure ->
+                        val diagnostic = operationError(UiOperation.READ_HISTORY, failure)
+                        failures[id] = diagnostic.copy(details = "Run $id\n${diagnostic.details.orEmpty()}")
+                    }
+                    .getOrNull()?.let { id to it }
+            }.toMap()
+        }
+        historyErrors = ((historyErrors - ids.toSet()) + failures).filterKeys { it in runIds }
+        return result
     }
 
     LaunchedEffect(runtime, runIds, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             // A screen return or foreground transition refreshes every saved row.
-            summaries = withContext(Dispatchers.IO) {
-                runIds.mapNotNull { id -> runCatching { runtime.runSummary(id) }.getOrNull()?.let { id to it } }.toMap()
-            }
+            summaries = readSummaries(runIds)
             // While a worker remains live, refresh only its rows. The observer
             // stops with the screen and never tails an event log.
             while (true) {
                 val activeIds = summaries.filterValues { it.workerActive }.keys
                 if (activeIds.isEmpty()) break
                 delay(2_000)
-                val refreshed = withContext(Dispatchers.IO) {
-                    activeIds.mapNotNull { id -> runCatching { runtime.runSummary(id) }.getOrNull()?.let { id to it } }.toMap()
-                }
+                val refreshed = readSummaries(activeIds)
                 summaries = (summaries - activeIds) + refreshed
             }
         }
@@ -103,8 +126,11 @@ fun FlowListScreen(
             Button(onClick = onInstall) { Text("Install bundle") }
         }
         Button(onClick = onConnections) { Text("Connections") }
-        error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
         LazyColumn(Modifier.fillMaxSize().padding(top = 16.dp)) {
+            error?.let { diagnostic -> item { OperationError(diagnostic) } }
+            combineUiErrors(*historyErrors.values.toTypedArray())?.let { diagnostic ->
+                item { OperationError(diagnostic) }
+            }
             item { Text("Installed flows", style = MaterialTheme.typography.titleMedium) }
             items(flows) { flow ->
                 Card(

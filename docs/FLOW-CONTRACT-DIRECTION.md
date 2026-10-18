@@ -11,7 +11,8 @@ reference until a versioned change lands with its consumers.
 
 Specify enough for a flow producer to deliver a runnable procedure without
 knowing trollm's implementation. Jointly author the interface control document
-(ICD) with contributors who produce Moray web flows. Moray exports the contract;
+(ICD) with contributors to Moray, an optional browser-flow authoring project.
+Moray exports the contract;
 trollm consumes it. Direct human/LLM authoring is another first-class producer.
 
 The contract must be self-contained. Generic flows need no Moray installation,
@@ -159,7 +160,5 @@ the current importer keys installation by the root flow hash.
    conformance examples. Exercise empty input, failed tools, interrupted runs
    and malformed content alongside the successful examples.
 
-Internal design input: Moray's
-`moray-docs/docs/directions/baseline-graph-execution.md`. Its useful execution
-principles are summarized above so the published contract will not require
-access to that repository.
+The execution principles needed by this proposal are summarized above;
+the contract must remain usable without access to another project’s source.

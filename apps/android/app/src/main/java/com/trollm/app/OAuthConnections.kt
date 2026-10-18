@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import net.openid.appauth.AppAuthConfiguration
@@ -24,20 +23,19 @@ import net.openid.appauth.ResponseTypeValues
 import net.openid.appauth.TokenResponse
 import org.json.JSONObject
 import java.net.URI
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 /** App-owned OAuth only. Legacy manually provisioned bearer tokens remain separate. */
 class OAuthConnections private constructor(private val context: Context) {
-    private val grants = SecretsStore(context).oauthGrants
+    private val grants = storage { SecretsStore(context).oauthGrants }
     private val connections = OAuthConnectionBuilder(context.filesDir)
     private val main = Handler(Looper.getMainLooper())
     private val persistence = Executors.newSingleThreadExecutor()
     private val pinnedServers = ConcurrentHashMap<String, String>()
-    private val refreshes = ConcurrentHashMap<String, CompletableFuture<String?>>()
+    private val refresh = OAuthRefresh(grants, { work -> persistence.execute { work() } }, ::freshToken)
     // SDK interaction is marshalled onto main; token persistence stays off main.
     private val service by lazy {
         AuthorizationService(context, AppAuthConfiguration.Builder()
@@ -45,13 +43,13 @@ class OAuthConnections private constructor(private val context: Context) {
     }
 
     fun pin(serverName: String, serverUrl: String): PinnedOAuthGrant? {
-        val pin = grants.pin(serverName, serverUrl) ?: return null
+        val pin = storage { grants.pin(serverName, serverUrl) } ?: return null
         return if (bindGrant(serverName, serverUrl, pin.grantId)) pin else null
     }
 
     /** Register only the exact saved grant when a worker/cold resume supplies its ID. */
     fun bindGrant(serverName: String, serverUrl: String, grantId: String): Boolean {
-        val pin = grants.bind(serverName, serverUrl, grantId) ?: return false
+        val pin = storage { grants.bind(serverName, serverUrl, grantId) } ?: return false
         val previous = pinnedServers.putIfAbsent(pin.grantId, serverName)
         return previous == null || previous == serverName
     }
@@ -64,74 +62,47 @@ class OAuthConnections private constructor(private val context: Context) {
     /** Worker-thread callback only. No token/account substitution or request replay. */
     fun accessTokenBlocking(grantId: String, serverUrl: String): String? {
         check(Looper.myLooper() != Looper.getMainLooper()) { "Token access must run off the UI thread" }
-        return try {
-            val endpoint = ConnectionInput.canonicalEndpoint(serverUrl)
-            val server = pinnedServers[grantId] ?: return null
-            val future = refreshes.computeIfAbsent(grantId) {
-                CompletableFuture<String?>().also { pending ->
-                    persistence.execute {
-                        try {
-                            // Read after earlier refresh persistence, not before entering
-                            // single-flight; a rotated refresh token must not roll back.
-                            val grant = grants.matching(server, grantId, endpoint)
-                                ?.takeIf { it.pendingRequest == null }
-                            if (grant == null) {
-                                pending.complete(null)
-                                refreshes.remove(grantId, pending)
-                                return@execute
-                            }
-                            val state = AuthState.jsonDeserialize(grant.state)
-                            main.post {
-                                try {
-                                    state.performActionWithFreshTokens(service) { token, _, error ->
-                                        persistence.execute {
-                                            try {
-                                                val saved = grants.update(server, grantId, endpoint, state.jsonSerializeString())
-                                                pending.complete(if (saved && error == null && token != null &&
-                                                    ConnectionInput.validToken(token)) token else null)
-                                            } catch (_: Exception) {
-                                                pending.complete(null)
-                                            } finally {
-                                                refreshes.remove(grantId, pending)
-                                            }
-                                        }
-                                    }
-                                } catch (_: Exception) {
-                                    pending.complete(null)
-                                    refreshes.remove(grantId, pending)
-                                }
-                            }
-                        } catch (_: Exception) {
-                            pending.complete(null)
-                            refreshes.remove(grantId, pending)
-                        }
+        val endpoint = try { ConnectionInput.canonicalEndpoint(serverUrl) } catch (_: Exception) { return null }
+        val server = pinnedServers[grantId] ?: return null
+        return refresh.accessTokenBlocking(server, endpoint, grantId)
+    }
+
+    /** AppAuth owns token refresh; the pure coordinator owns save/identity checks. */
+    private fun freshToken(grant: OAuthGrant, complete: (OAuthRefreshResult) -> Unit) {
+        val state = configuration { AuthState.jsonDeserialize(grant.state) }
+        if (!main.post {
+            try {
+                state.performActionWithFreshTokens(service) { token, _, error ->
+                    try {
+                        // Preserve SDK state even on a failed refresh (e.g. invalid_grant).
+                        complete(OAuthRefreshResult(token, state.jsonSerializeString(),
+                            error?.let(::appAuthProblem)))
+                    } catch (failure: Exception) {
+                        complete(OAuthRefreshResult(null, null, if (failure is CancellationException) OAuthProblem.CANCELLED else classifyOAuthProblem(failure)))
                     }
                 }
+            } catch (failure: Exception) {
+                complete(OAuthRefreshResult(null, null, if (failure is CancellationException) OAuthProblem.CANCELLED else classifyOAuthProblem(failure)))
             }
-            val token = future.get(20, TimeUnit.SECONDS)
-            // Logout/replacement while waiting invalidates even a completed refresh.
-            if (grants.matching(server, grantId, endpoint) != null) token else null
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            null
-        } catch (_: Exception) {
-            null
+        }) {
+            complete(OAuthRefreshResult(null, null, OAuthProblem.FAILED))
         }
     }
 
     fun status(server: String, endpoint: String): String {
-        when (grants.mode(server)) {
+        when (storage { grants.mode(server) }) {
             SelectedAuthMode.BEARER -> return "Manual bearer authentication selected."
             SelectedAuthMode.ANONYMOUS -> return "No authentication selected."
             SelectedAuthMode.UNAVAILABLE -> return "Sign in again or save a manual token to reconnect."
             SelectedAuthMode.OAUTH -> Unit
         }
-        val grant = grants.current(server) ?: return "Not signed in with OAuth."
-        if (grant.endpoint != ConnectionInput.canonicalEndpoint(endpoint)) {
+        val grant = storage { grants.current(server) } ?: return "Not signed in with OAuth."
+        if (grant.endpoint != configuration { ConnectionInput.canonicalEndpoint(endpoint) }) {
             return "OAuth is configured for a different MCP endpoint."
         }
         if (grant.pendingRequest != null) return "Sign-in pending."
-        val state = AuthState.jsonDeserialize(grant.state)
+        refresh.problem(server, grant.endpoint, grant.id)?.let { return it.message }
+        val state = configuration { AuthState.jsonDeserialize(grant.state) }
         val expiredWithoutRefresh = state.refreshToken == null &&
             state.accessTokenExpirationTime?.let { it <= System.currentTimeMillis() + 60_000 } == true
         return if (state.isAuthorized && !expiredWithoutRefresh) "OAuth account connected."
@@ -139,91 +110,136 @@ class OAuthConnections private constructor(private val context: Context) {
     }
 
     fun logout(server: String) {
-        grants.logout(server)
+        storage { grants.logout(server) }
+        refresh.clearServer(server)
+    }
+
+    private inline fun <T> storage(action: () -> T): T = try {
+        action()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (safe: OAuthProblemException) {
+        throw safe
+    } catch (_: Exception) {
+        throw OAuthProblemException(OAuthProblem.STORAGE)
+    }
+
+    private inline fun <T> configuration(action: () -> T): T = try {
+        action()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (safe: OAuthProblemException) {
+        throw safe
+    } catch (_: Exception) {
+        throw OAuthProblemException(OAuthProblem.CONFIGURATION)
     }
 
     /** Browser PKCE: RFC8414 metadata is mapped explicitly, never parsed as OIDC discovery. */
     suspend fun signIn(server: String, endpointInput: String) {
-        require(ConnectionInput.validServer(server))
-        val endpoint = ConnectionInput.canonicalEndpoint(endpointInput)
-        // Select OAuth before discovery/registration. A failed attempt cannot
-        // quietly reactivate a previously saved manual credential.
-        val grant = withContext(Dispatchers.IO) { grants.begin(server, endpoint, "", "preparing") }
-        try {
-            val metadata = withContext(Dispatchers.IO) { metadata(endpoint) }
-            val configuration = AuthorizationServiceConfiguration(
-                metadata.authorization, metadata.token, metadata.registration)
+        if (!ConnectionInput.validServer(server)) throw OAuthProblemException(OAuthProblem.CONFIGURATION)
+        val endpoint = configuration { ConnectionInput.canonicalEndpoint(endpointInput) }
+        withPendingOAuthGrant(
+            begin = { storage { grants.begin(server, endpoint, "", "preparing") } },
+            invalidate = { grant -> storage { grants.invalidatePending(server, grant.id) } },
+        ) { grant ->
+            refresh.clearServer(server)
+            val metadata = withContext(Dispatchers.IO) {
+                try { metadata(endpoint) } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) { throw OAuthProblemException(classifyOAuthProblem(failure)) }
+            }
+            val sdkConfiguration = configuration {
+                AuthorizationServiceConfiguration(metadata.authorization, metadata.token, metadata.registration)
+            }
             val registration = withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<RegistrationResponse> { continuation ->
-                    service.performRegistrationRequest(
-                        RegistrationRequest.Builder(configuration, listOf(REDIRECT))
-                            .setTokenEndpointAuthenticationMethod("none")
-                            .setGrantTypeValues("authorization_code", "refresh_token")
-                            .setResponseTypeValues("code")
-                            .setAdditionalParameters(mapOf("client_name" to "Trollm Android"))
-                            .build(),
-                    ) { response, _ ->
-                        if (continuation.isActive) {
-                            if (response != null) continuation.resume(response)
-                            else continuation.resumeWith(Result.failure(IllegalStateException("Sign-in setup failed")))
+                    try {
+                        service.performRegistrationRequest(
+                            RegistrationRequest.Builder(sdkConfiguration, listOf(REDIRECT))
+                                .setTokenEndpointAuthenticationMethod("none")
+                                .setGrantTypeValues("authorization_code", "refresh_token")
+                                .setResponseTypeValues("code")
+                                .setAdditionalParameters(mapOf("client_name" to "Trollm Android"))
+                                .build(),
+                        ) { response, error ->
+                            if (continuation.isActive) {
+                                if (response != null && error == null) continuation.resume(response)
+                                else continuation.resumeWith(Result.failure(OAuthProblemException(appAuthProblem(error))))
+                            }
                         }
+                    } catch (failure: Exception) {
+                        if (continuation.isActive) continuation.resumeWith(
+                            Result.failure(OAuthProblemException(classifyOAuthProblem(failure))))
                     }
                 }
             }
-            val request = AuthorizationRequest.Builder(configuration, registration.clientId,
-                ResponseTypeValues.CODE, REDIRECT)
-                .setScope(metadata.scope)
-                .setCodeVerifier(CodeVerifierUtil.generateRandomCodeVerifier())
-                .build()
+            val request = configuration {
+                AuthorizationRequest.Builder(sdkConfiguration, registration.clientId, ResponseTypeValues.CODE, REDIRECT)
+                    .setScope(metadata.scope)
+                    .setCodeVerifier(CodeVerifierUtil.generateRandomCodeVerifier())
+                    .build()
+            }
             withContext(Dispatchers.IO) {
-                check(grants.prepare(server, grant.id, endpoint, AuthState(registration).jsonSerializeString(),
-                    request.jsonSerializeString())) { "Sign-in selection changed" }
+                val saved = storage { grants.prepare(server, grant.id, endpoint,
+                    configuration { AuthState(registration).jsonSerializeString() }, request.jsonSerializeString()) }
+                if (!saved) throw OAuthProblemException(OAuthProblem.RECONNECT)
             }
             withContext(Dispatchers.Main) {
-                service.performAuthorizationRequest(request, resultIntent(grant, false), resultIntent(grant, true))
+                try { service.performAuthorizationRequest(request, resultIntent(grant, false), resultIntent(grant, true)) }
+                catch (failure: Exception) { throw OAuthProblemException(classifyOAuthProblem(failure)) }
             }
-        } catch (error: Exception) {
-            withContext(NonCancellable + Dispatchers.IO) { grants.invalidate(server, grant.id) }
-            throw error
         }
     }
 
     /** Invoked only by our non-exported activity, through SDK completion intents. */
     suspend fun complete(intent: Intent): Boolean {
-        val server = intent.getStringExtra(EXTRA_SERVER) ?: return false
-        val id = intent.getStringExtra(EXTRA_GRANT) ?: return false
-        val grant = withContext(Dispatchers.IO) { grants.current(server)?.takeIf { it.id == id } }
-            ?: return false
-        try {
-            if (intent.getBooleanExtra(EXTRA_CANCEL, false)) return false
-            val response = AuthorizationResponse.fromIntent(intent) ?: return false
-            if (AuthorizationException.fromIntent(intent) != null || grant.pendingRequest == null) return false
-            val expected = AuthorizationRequest.jsonDeserialize(grant.pendingRequest)
-            require(response.request.state == expected.state &&
-                response.request.codeVerifier == expected.codeVerifier &&
-                response.request.clientId == expected.clientId && response.request.redirectUri == REDIRECT &&
-                response.request.configuration.tokenEndpoint == expected.configuration.tokenEndpoint &&
-                response.request.configuration.authorizationEndpoint == expected.configuration.authorizationEndpoint)
-            val state = AuthState.jsonDeserialize(grant.state)
+        val server = intent.getStringExtra(EXTRA_SERVER) ?: throw OAuthProblemException(OAuthProblem.CONFIGURATION)
+        val id = intent.getStringExtra(EXTRA_GRANT) ?: throw OAuthProblemException(OAuthProblem.CONFIGURATION)
+        return withOAuthCleanup(cleanup = {
+            storage {
+                // One store transaction preserves completed and replacement grants.
+                grants.invalidatePending(server, id)
+            }
+        }) {
+            val grant = withContext(Dispatchers.IO) {
+                storage { grants.current(server)?.takeIf { it.id == id } }
+            } ?: throw OAuthProblemException(OAuthProblem.RECONNECT)
+            if (intent.getBooleanExtra(EXTRA_CANCEL, false)) throw OAuthProblemException(OAuthProblem.CANCELLED)
+            configuration { AuthorizationException.fromIntent(intent) }?.let {
+                throw OAuthProblemException(appAuthProblem(it))
+            }
+            val response = configuration { AuthorizationResponse.fromIntent(intent) }
+                ?: throw OAuthProblemException(OAuthProblem.FAILED)
+            val pending = grant.pendingRequest ?: throw OAuthProblemException(OAuthProblem.RECONNECT)
+            val expected = configuration { AuthorizationRequest.jsonDeserialize(pending) }
+            configuration {
+                require(response.request.state == expected.state &&
+                    response.request.codeVerifier == expected.codeVerifier &&
+                    response.request.clientId == expected.clientId && response.request.redirectUri == REDIRECT &&
+                    response.request.configuration.tokenEndpoint == expected.configuration.tokenEndpoint &&
+                    response.request.configuration.authorizationEndpoint == expected.configuration.authorizationEndpoint)
+            }
+            val state = configuration { AuthState.jsonDeserialize(grant.state) }
             state.update(response, null)
             val token = withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<Pair<TokenResponse?, AuthorizationException?>> { continuation ->
-                    service.performTokenRequest(response.createTokenExchangeRequest()) { result, error ->
-                        if (continuation.isActive) continuation.resume(result to error)
+                    try {
+                        service.performTokenRequest(response.createTokenExchangeRequest()) { result, error ->
+                            if (continuation.isActive) continuation.resume(result to error)
+                        }
+                    } catch (failure: Exception) {
+                        if (continuation.isActive) continuation.resumeWith(
+                            Result.failure(OAuthProblemException(classifyOAuthProblem(failure))))
                     }
                 }
             }
-            state.update(token.first, token.second)
-            require(token.second == null && state.accessToken?.let(ConnectionInput::validToken) == true)
-            return withContext(Dispatchers.IO) {
-                grants.update(server, id, grant.endpoint, state.jsonSerializeString())
+            configuration { state.update(token.first, token.second) }
+            token.second?.let { throw OAuthProblemException(appAuthProblem(it)) }
+            if (state.accessToken?.let(ConnectionInput::validToken) != true) throw OAuthProblemException(OAuthProblem.FAILED)
+            val saved = withContext(Dispatchers.IO) {
+                storage { grants.update(server, id, grant.endpoint, configuration { state.jsonSerializeString() }) }
             }
-        } finally {
-            // Do not invalidate a successful completion or a newer replacement login.
-            withContext(NonCancellable + Dispatchers.IO) {
-                val current = grants.matching(server, id, grant.endpoint)
-                if (current?.pendingRequest != null) grants.invalidate(server, id)
-            }
+            if (!saved) throw OAuthProblemException(OAuthProblem.RECONNECT)
+            true
         }
     }
 
@@ -240,7 +256,17 @@ class OAuthConnections private constructor(private val context: Context) {
 
     private data class Metadata(val authorization: Uri, val token: Uri, val registration: Uri, val scope: String)
 
-    private fun metadata(endpoint: String): Metadata {
+    private fun metadata(endpoint: String): Metadata = try {
+        readMetadata(endpoint)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: java.io.IOException) {
+        throw OAuthProblemException(classifyOAuthProblem(failure))
+    } catch (_: Exception) {
+        throw OAuthProblemException(OAuthProblem.CONFIGURATION)
+    }
+
+    private fun readMetadata(endpoint: String): Metadata {
         val origin = URI(endpoint).let { "https://${it.rawAuthority}" }
         val connection = connections.openConnection(Uri.parse("$origin/.well-known/oauth-authorization-server"))
         val value = try {

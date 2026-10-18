@@ -91,6 +91,25 @@ def check_ui(xml):
     if any(node.get("text", "").startswith("Error:") for node in nodes):
         raise SmokeError("Trollm displays a runtime error (details omitted)")
 
+    # FlowList renders operation errors outside its clickable flow/history cards.
+    # A user-authored title may legitimately equal one of these summaries.
+    summaries = {
+        "Could not load installed flows.",
+        "Could not prepare the supplied flows.",
+        "Could not load this flow's setup.",
+        "Could not read some run history.",
+    }
+
+    def has_operation_error(node, in_card=False):
+        in_card = in_card or (node.get("package") == PACKAGE and node.get("clickable") == "true")
+        if (not in_card and node.get("package") == PACKAGE
+                and any(line in summaries for line in node.get("text", "").splitlines())):
+            return True
+        return any(has_operation_error(child, in_card) for child in node)
+
+    if has_operation_error(root):
+        raise SmokeError("Trollm displays an operation error (details omitted)")
+
 
 def smoke(args):
     abis = apk_info(args.apk, args.aapt)  # Validate before any ADB action.

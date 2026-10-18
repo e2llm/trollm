@@ -6,6 +6,43 @@ import uniffi.trollm_uniffi.RunActivityApi
 import uniffi.trollm_uniffi.RunPhaseApi
 
 class RunPresentationTest {
+    @Test fun cancelledTerminalRunIsNeverPresentedAsFailure() {
+        val view = presentRun(RunPhaseApi.Failed("cancelled"), false, null)
+        assertEquals("Cancelled", view.text)
+        assertNull(view.details)
+        assertFalse(view.canResume)
+        assertFalse(view.keepPolling)
+    }
+
+    @Test fun knownFailureClassesHaveFriendlySummariesWithoutSuggestingBlindRetries() {
+        for (reason in listOf("model-error", "mcp-unreachable", "mcp-error", "tool-call-parse",
+            "verification-failed", "artifact-io", "budget-exhausted")) {
+            val view = presentRun(RunPhaseApi.Failed(reason), false, RunActivityApi.Generating("coder"))
+            assertTrue(view.text.startsWith("Failed:"))
+            assertFalse(view.text.contains(reason))
+            assertFalse(view.text.contains("retry", ignoreCase = true))
+            assertEquals(reason, view.details)
+            assertFalse(view.canPause)
+            assertFalse(view.canResume)
+            assertFalse(view.canCancel)
+            assertFalse(view.keepPolling)
+            assertFalse(view.observeInBackground)
+        }
+    }
+
+    @Test fun authoredAndWorkerFailureReasonsArePreservedWithoutSubstringClassification() {
+        for (reason in listOf("needs operator approval", "model-error: authored detail", "Cancelled",
+            "run worker error: model-error: missing /private/weights", "", "cancelled but journal failed")) {
+            val view = presentRun(RunPhaseApi.Failed(reason), false, null)
+            assertEquals("Failed. Review details and technical events before taking further action.", view.text)
+            assertEquals(reason, view.details)
+            assertFalse(view.canResume)
+        }
+        val paused = presentRun(RunPhaseApi.Paused("Check the document before resuming"), true, null)
+        assertEquals("Paused: Check the document before resuming", paused.text)
+        assertNull(paused.details)
+    }
+
     @Test fun liveOperationsDescribeTheActualWork() {
         val operations = listOf(
             RunActivityApi.Starting to "Starting…",

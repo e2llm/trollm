@@ -1,6 +1,6 @@
-//! Proxy events emitted by the gateway (§6: "every proxy decision is an
-//! event-log line"). Dependency-free: core translates these into its own
-//! event-log types.
+//! Proxy observations emitted through the gateway's event sink (§6).
+//! The Android bridge persists them in `proxy.events.jsonl` with a separate
+//! sequence; core does not currently translate them into main-log events.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -50,8 +50,8 @@ pub enum ProxyEvent {
         path: PathBuf,
         bytes: u64,
     },
-    /// Emitted BEFORE a mutation executes (core journals this as the
-    /// crash-safety intent record).
+    /// Emitted BEFORE a mutation executes. Core writes its separate
+    /// crash-safety intent record before dispatching to the gateway.
     MutationPassthrough {
         server: String,
         tool: String,

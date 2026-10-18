@@ -5,6 +5,9 @@ the behavior, the relevant source revision and a small reproducible example.
 Coordinate design and implementation changes with the maintainer. The curated
 GitHub tree has its own history.
 
+For vulnerabilities, follow the [security policy](SECURITY.md); do not post
+sensitive details in public Issues.
+
 Read the [product direction](docs/PRODUCT-PLAN.md) and
 [current architecture](docs/ARCHITECTURE-ANDROID.md). The
 [flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md) is proposed work, not
@@ -25,6 +28,16 @@ cargo test --locked -p trollm-uniffi --features stub
 
 Default and stub checks need no model weights. Native `llama` compilation is a
 separate, heavier path; passing stub tests does not establish inference.
+
+```sh
+cargo test --locked -p trollm-models --features llama --lib
+```
+
+This native check exercises grammar semantics with a tiny self-authored vocabulary
+generated at runtime; no model weights are downloaded. Two real-generation tests
+remain explicitly ignored. To run those separately, set `TROLLM_TEST_MODEL` to an
+existing instruction GGUF and add `-- --ignored --test-threads=1` to the command.
+The selected tests fail if the fixture is missing; they do not silently skip.
 
 For the included version, schema, wrapper and Android helper checks, use Python
 3.11+:

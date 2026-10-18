@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-core"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-mcp"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "anyhow",
  "jsonschema",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-models"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "anyhow",
  "llama-cpp-2",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-uniffi"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "anyhow",
  "serde",

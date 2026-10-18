@@ -406,6 +406,86 @@ mod tests {
     }
 
     #[test]
+    fn thousands_of_generated_fences_preserve_order_and_escaped_payloads() {
+        // Bounded deterministic stress coverage; this is not exhaustive fuzzing.
+        let mut text = String::new();
+        let mut expected = Vec::new();
+        for index in 0..4096 {
+            let value = format!(
+                "{}{}{}{}",
+                "\\".repeat(index % 9),
+                if index % 2 == 0 { "\"" } else { "\n\t" },
+                "עברית 工具 🦀",
+                if index % 3 == 0 {
+                    FENCE_OPEN
+                } else {
+                    FENCE_CLOSE
+                },
+            );
+            let args = serde_json::json!({"index": index, "nested": [{"text": value}]});
+            let payload = serde_json::json!({"server": "שרת", "tool": "工具", "args": args});
+            text.push_str(&format!("prose 🦀 {FENCE_OPEN}{payload}{FENCE_CLOSE}\n"));
+            expected.push(args);
+        }
+        let calls = extract_tool_calls(&text);
+        assert_eq!(calls.len(), expected.len());
+        for (call, args) in calls.into_iter().zip(expected) {
+            let parsed = call.unwrap();
+            assert_eq!(parsed.server, "שרת");
+            assert_eq!(parsed.tool, "工具");
+            assert_eq!(parsed.args, args);
+        }
+    }
+
+    #[test]
+    fn two_mib_quoted_payload_keeps_delimiters_as_data() {
+        let value = "\\\" 🦀 </tool_call> <tool_call>\n".repeat(65_536);
+        let payload = serde_json::json!({"server": "s", "tool": "t", "args": {"text": value}});
+        let text = format!("{FENCE_OPEN}{payload}{FENCE_CLOSE}");
+        assert!(text.len() >= 2 * 1024 * 1024);
+        assert!(text.len() < 3 * 1024 * 1024);
+        let calls = extract_tool_calls(&text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].as_ref().unwrap().args["text"], value);
+    }
+
+    #[test]
+    fn generated_malformed_records_keep_errors_and_following_fences_ordered() {
+        let good = r#"{"server":"s","tool":"t","args":{}}"#;
+        let malformed = [
+            r#"{"server":"s","tool":"t","args":{"text":"工具\q"}}"#,
+            r#"{"server":"s","tool":"t","args":{"text":"\uD800"}}"#,
+            r#"{"server":"s","tool":"t","args":{"text":"</tool_call>"},}"#,
+            r#"{"server":"s","tool":"t","args":{}} 🦀"#,
+            r#"{"server":"s","tool":"t","args":[]}"#,
+            r#"{"server":null,"tool":"t","args":{}}"#,
+        ];
+        let mut text = String::new();
+        for index in 0..1024 {
+            text.push_str(&format!(
+                "🦀{FENCE_OPEN}{}{FENCE_CLOSE}{FENCE_OPEN}{good}{FENCE_CLOSE}",
+                malformed[index % malformed.len()]
+            ));
+        }
+        let calls = extract_tool_calls(&text);
+        assert_eq!(calls.len(), 2048);
+        for pair in calls.chunks_exact(2) {
+            assert!(pair[0].is_err());
+            assert!(pair[1].is_ok());
+        }
+        // Unterminated strings hide closing tags as data, yielding one precise
+        // byte-offset error rather than treating the quoted delimiter as framing.
+        for suffix in [
+            r#"{"args":{"text":"🦀</tool_call>"#,
+            r#"{"args":{"text":"\\"#,
+        ] {
+            let text = format!("🦀{FENCE_OPEN}{suffix}");
+            assert!(matches!(extract_tool_calls(&text).as_slice(),
+                [Err(FenceParseError::UnclosedFence { offset })] if *offset == "🦀".len()));
+        }
+    }
+
+    #[test]
     fn framing_does_not_accept_invalid_or_trailing_json() {
         for payload in [
             r#"{"server":"s","tool":"t","args":{"text":"</tool_call>"},}"#,

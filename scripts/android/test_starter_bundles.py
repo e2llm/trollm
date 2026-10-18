@@ -109,7 +109,7 @@ class StarterBundles(unittest.TestCase):
                                 "require": ["tabId"], "forbid": ["sessionId", "selector"]},
         })
         tasks = registry["tasks"]
-        self.assertEqual((plan["version"], registry["version"]), (4, 4))
+        self.assertEqual((plan["version"], registry["version"]), (5, 5))
         self.assertEqual(plan["limits"]["maxSteps"], 3)
         self.assertEqual(plan["limits"]["maxReasonerCalls"], 1)
         expected_chain = (("open_page", "open-page", "read_page"),
@@ -126,7 +126,8 @@ class StarterBundles(unittest.TestCase):
             self.assertEqual(tasks[name]["tools"], [grant])
             self.assertEqual(tasks[name]["completion"], "tool-result")
             prompt = files[tasks[name]["prompt"]].decode()
-            self.assertTrue(prompt.startswith("User input JSON:\n{{ user_input }}"))
+            self.assertNotIn("{{ user_input }}", prompt)
+            self.assertIn(f'"server":"e2llm","tool":"{grant.split(".")[1]}","args":{{}}', prompt)
             for obsolete in ('"BROWSER"', '"URL"', '"tabId":123', "<tool_result>", "acknowledg"):
                 self.assertNotIn(obsolete, prompt)
         self.assertEqual(tasks["open-page"]["outputContract"], {
@@ -142,8 +143,12 @@ class StarterBundles(unittest.TestCase):
         self.assertNotIn("list_tabs.outputs.tabs", files["prompts/summarize-page.md"].decode())
         self.assertNotIn("list_tabs", files["prompts/read-page.md"].decode())
         self.assertIn("Omit tabId", files["prompts/read-page.md"].decode())
+        self.assertEqual(tasks["open-page"]["toolArguments"], {
+            "e2llm.act": {"fromInput": {"browser": "browser", "target": "url"}, "fixed": {"action": "open"}},
+        })
         self.assertEqual(tasks["read-page"]["toolArguments"], {
-            "e2llm.read_page": {"fromVars": {"tabId": "open_page.outputs.opened.tabId"}},
+            "e2llm.read_page": {"fromInput": {"browser": "browser"},
+                                "fromVars": {"tabId": "open_page.outputs.opened.tabId"}},
         })
         self.assertEqual(tasks["read-page"]["outputContract"], {
             "outputs": {"page": {"fromArtifact": "page", "format": "json", "type": "object"}},

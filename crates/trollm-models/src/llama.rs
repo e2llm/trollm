@@ -265,6 +265,9 @@ impl ModelSlot for LlamaCppSlot {
 }
 
 #[cfg(test)]
+mod llama_vocab_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -367,19 +370,18 @@ mod tests {
         }));
     }
 
-    /// Deterministic native grammar semantics using the fixture vocabulary only:
+    /// Deterministic native grammar semantics using a generated vocabulary only:
     /// no model tensors, inference context, or generated response is involved.
     #[test]
-    #[ignore = "requires existing GGUF vocabulary fixture via TROLLM_TEST_MODEL"]
     fn grammar_semantics_with_fixture_vocabulary() {
         use llama_cpp_2::token::data::LlamaTokenData;
         use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
-        let path = required_fixture();
+        let fixture = llama_vocab_fixture::VocabularyFixture::new().unwrap();
         let backend = shared_backend().unwrap();
         let model = LlamaModel::load_from_file(
             &backend,
-            &path,
+            fixture.path(),
             &LlamaModelParams::default().with_vocab_only(true),
         )
         .expect("failed to load GGUF fixture vocabulary");

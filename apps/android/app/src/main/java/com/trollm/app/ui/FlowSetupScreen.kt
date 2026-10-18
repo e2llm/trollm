@@ -6,12 +6,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -35,6 +37,8 @@ import com.trollm.app.flowSetupOverrideStore
 import com.trollm.app.modelDisplayLabel
 import com.trollm.app.ModelPreparationException
 import com.trollm.app.ModelDownloadCoordinator
+import com.trollm.app.ModelDownloadPolicy
+import com.trollm.app.remainingModelDownloads
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -66,6 +70,9 @@ fun FlowSetupScreen(
     var error by remember(flowSha) { mutableStateOf<String?>(null) }
     var checking by remember(flowSha) { mutableStateOf<String?>(null) }
     var preparing by remember(flowSha) { mutableStateOf(false) }
+    var pendingSlots by remember(flowSha) { mutableStateOf<List<String>>(emptyList()) }
+    var batchSlot by remember(flowSha) { mutableStateOf<String?>(null) }
+    var allowMetered by remember(flowSha) { mutableStateOf(false) }
     var busy by remember(flowSha) { mutableStateOf(false) }
     var refresh by remember(flowSha) { mutableStateOf(0) }
 
@@ -131,39 +138,69 @@ fun FlowSetupScreen(
         }
     }
 
-    LaunchedEffect(preparing, states, setup) {
+    LaunchedEffect(preparing, pendingSlots, states, setup, busy) {
         val descriptor = setup ?: return@LaunchedEffect
         if (!preparing || busy || !settingsValid || states.size != descriptor.models.size) return@LaunchedEffect
         if (states.values.any { it.downloading }) return@LaunchedEffect
-        val next = descriptor.models.entries.firstOrNull { states[it.key]?.path == null }
+        // A failed transfer stops the explicit batch rather than silently retrying.
+        if (batchSlot?.let { states[it]?.path == null } == true) {
+            preparing = false
+            return@LaunchedEffect
+        }
+        val next = pendingSlots.firstOrNull { states[it]?.path == null }
         if (next == null) {
             preparing = false
             return@LaunchedEffect
         }
-        if (states[next.key]?.message != null) {
-            preparing = false
-            return@LaunchedEffect
-        }
+        val model = descriptor.models.getValue(next)
+        // Claim before suspension. Observation can restart this effect after
+        // Android enqueues the transfer, but must never admit the slot twice.
         busy = true
-        try {
-            coordinator.download(next.value.copy(label = defaults?.let { descriptor.modelDisplayLabel(next.key, it) } ?: next.value.label))
-            states = states + (next.key to ModelDownloadCoordinator.State(downloading = true, total = next.value.sizeBytes))
-            refresh += 1
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: ModelPreparationException) {
-            error = failure.message ?: "Could not start the model download."
-            preparing = false
-        } catch (_: Exception) {
-            error = "Could not start the model download."
-            preparing = false
-        } finally { busy = false }
+        batchSlot = next
+        pendingSlots = pendingSlots.dropWhile { it != next }.drop(1)
+        val policy = ModelDownloadPolicy(allowMetered)
+        val selectedModel = model.copy(label = defaults?.let { descriptor.modelDisplayLabel(next, it) } ?: model.label)
+        // Screen ownership survives effect restarts; leaving the screen may
+        // cancel admission, while Android retains any already-enqueued request.
+        scope.launch {
+            try {
+                coordinator.download(selectedModel, policy)
+                states = states + (next to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
+                refresh += 1
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: ModelPreparationException) {
+                error = failure.message ?: "Could not start the model download."
+                preparing = false
+            } catch (_: Exception) {
+                error = "Could not start the model download."
+                preparing = false
+            } finally { busy = false }
+        }
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(setup?.title ?: "Prepare flow", style = MaterialTheme.typography.headlineSmall)
         setup?.description?.let { Text(it) }
         Text("Downloads continue in the background. Additional free space is needed to finish setup.")
+        val downloadsIdle = !busy && !preparing && !inspecting && checking == null && states.values.none { it.downloading }
+        Row {
+            Checkbox(checked = allowMetered, onCheckedChange = { allowMetered = it }, enabled = downloadsIdle)
+            Text("Allow metered data for downloads from this screen")
+        }
+        Text(ModelDownloadPolicy(allowMetered).description)
+        val remaining = setup?.let { descriptor ->
+            remainingModelDownloads(descriptor.models, states.filterValues { it.path != null }.keys)
+        }.orEmpty()
+        if (remaining.isNotEmpty()) {
+            Text("${remaining.size} remaining models · ${remaining.values.sumOf { it.sizeBytes } / (1024 * 1024)} MiB")
+            Button(enabled = settingsValid && downloadsIdle && states.keys == setup?.models?.keys, onClick = {
+                pendingSlots = remaining.keys.toList()
+                batchSlot = null
+                preparing = true
+                error = null
+            }) { Text("Download remaining models") }
+        }
         checking?.let { Text("Verifying $it…") }
         setup?.models?.forEach { (slot, model) ->
             val state = states[slot]
@@ -177,6 +214,7 @@ fun FlowSetupScreen(
                     LinearProgressIndicator(progress = { (state.downloaded.toFloat() / state.total.coerceAtLeast(1)).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                     Button(enabled = !busy && checking == null, onClick = {
                         preparing = false
+                        pendingSlots = emptyList()
                         scope.launch {
                             busy = true
                             try { coordinator.cancel(model); refresh += 1 }
@@ -188,13 +226,12 @@ fun FlowSetupScreen(
                 }
                 else -> {
                     Text(state?.message ?: "Not downloaded")
-                    Button(enabled = settingsValid && !busy && !inspecting && checking == null && states.values.none { it.downloading }, onClick = {
+                    Button(enabled = settingsValid && downloadsIdle, onClick = {
                         scope.launch {
                             busy = true
                             try {
-                                coordinator.download(model.copy(label = label))
+                                coordinator.download(model.copy(label = label), ModelDownloadPolicy(allowMetered))
                                 states = states + (slot to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
-                                preparing = true
                                 refresh += 1
                             }
                             catch (cancelled: CancellationException) { throw cancelled }

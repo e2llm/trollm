@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Context};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,11 +15,28 @@ use uuid::Uuid;
 
 use crate::artifacts;
 use crate::error::{ErrorClass, TaskFailure};
-use crate::events::{dangling_intents, now_ms, DanglingIntent, EventLog, EventType};
+use crate::events::{now_ms, DanglingIntent, EventLog, EventType};
 use crate::plan::*;
 use crate::registry::*;
 use crate::state::*;
 use crate::{fence, template, validate};
+
+/// Hash the same JSON bytes as Value::to_string without allocating that string.
+fn hash_json(value: &Value) -> serde_json::Result<String> {
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(hex(&writer.0.finalize()))
+}
 
 /// Slot name → model instance (§9 leaves supporting types to core).
 #[derive(Debug, Default)]
@@ -255,14 +273,32 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             for cur in state.foreach_cursors.values_mut() {
                 cur.session_items = 0;
             }
-            let events = EventLog::read_all(&run_dir.events_path())?;
-            let pending = dangling_intents(&events);
-            let unsafe_replay = events.iter().any(|e| {
-                e["type"] == "tool_call_result"
-                    && e["intentSeq"].as_u64().is_some()
-                    && e["skipped"] != true
-                    && e["seq"].as_u64().unwrap_or(u64::MAX) > state.event_watermark
-            });
+            let mut pending = BTreeMap::new();
+            let mut answered = std::collections::BTreeSet::new();
+            let mut unsafe_replay = false;
+            EventLog::visit(
+                &run_dir.events_path(),
+                Some(run_dir.run_id()),
+                |event, _| match event["type"].as_str() {
+                    Some("tool_call_intent") => {
+                        let seq = event["seq"].as_u64().expect("validated event sequence");
+                        if !answered.contains(&seq) {
+                            pending.insert(seq, DanglingIntent::from_event(seq, event));
+                        }
+                    }
+                    Some("tool_call_result") => {
+                        if let Some(intent) = event["intentSeq"].as_u64() {
+                            answered.insert(intent);
+                            pending.remove(&intent);
+                            if event["seq"].as_u64().unwrap_or(u64::MAX) > state.event_watermark {
+                                unsafe_replay = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+            )?;
+            let pending = pending.into_values().collect();
             (state, true, pending, unsafe_replay)
         } else {
             (
@@ -695,6 +731,19 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .unwrap_or(Value::Null);
         let mut bound_arguments = BTreeMap::new();
         if let Some(bindings) = &task.tool_arguments {
+            let input = if bindings.values().any(|rule| !rule.from_input.is_empty()) {
+                match serde_json::from_str::<Value>(&self.user_input) {
+                    Ok(Value::Object(input)) => Some(input),
+                    _ => {
+                        return Err(TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            "fromInput requires user_input to be a JSON object",
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
             for (tool, rule) in bindings {
                 let mut values = BTreeMap::new();
                 for (argument, path) in &rule.from_vars {
@@ -704,7 +753,23 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             format!("tool argument source '{path}' is not bound"),
                         )
                     })?;
-                    values.insert(argument.clone(), value.clone());
+                    values.insert(argument.clone(), (value.clone(), "fromVars"));
+                }
+                for (argument, key) in &rule.from_input {
+                    let value =
+                        input
+                            .as_ref()
+                            .and_then(|input| input.get(key))
+                            .ok_or_else(|| {
+                                TaskFailure::new(
+                                    ErrorClass::VerificationFailed,
+                                    format!("fromInput source '{key}' is not bound"),
+                                )
+                            })?;
+                    values.insert(argument.clone(), (value.clone(), "fromInput"));
+                }
+                for (argument, value) in &rule.fixed {
+                    values.insert(argument.clone(), (value.clone(), "fixed"));
                 }
                 bound_arguments.insert(tool.clone(), values);
             }
@@ -763,13 +828,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 let frame = self.state.stack.last_mut().unwrap();
                 frame.counters.steps += 1;
                 frame.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
-                if task.model == "reasoner" {
+                if task.model == CANONICAL_REASONER_SLOT {
                     frame.counters.reasoner_calls += 1;
                 }
             }
             self.state.counters.steps += 1;
             self.state.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
-            if task.model == "reasoner" {
+            if task.model == CANONICAL_REASONER_SLOT {
                 self.state.counters.reasoner_calls += 1;
             }
             self.emit(
@@ -851,13 +916,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     let args = call.args.as_object_mut().ok_or_else(|| {
                         TaskFailure::new(ErrorClass::ToolCallParse, "tool args must be an object")
                     })?;
-                    for (name, value) in bindings {
+                    for (name, (value, source)) in bindings {
                         match args.get(name) {
                             Some(provided) if provided != value => {
                                 return Err(TaskFailure::new(
                                     ErrorClass::ToolCallParse,
                                     format!(
-                                        "tool '{fqn}' argument '{name}' conflicts with fromVars"
+                                        "tool '{fqn}' argument '{name}' conflicts with {source}"
                                     ),
                                 ));
                             }
@@ -904,7 +969,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     .map(|m| m.idempotency == Idempotency::IntentLog)
                     .unwrap_or(false)
                 {
-                    let args_sha256 = hex_sha256(call.args.to_string().as_bytes());
+                    let args_sha256 = hash_json(&call.args)
+                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
                     Some(
                         self.emit(
                             EventType::ToolCallIntent,
@@ -1034,7 +1100,9 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .unwrap_or((0, 0));
         let hit = if steps >= fp.limits.max_steps {
             Some(("maxSteps", steps as u64, fp.limits.max_steps as u64))
-        } else if task.model == "reasoner" && reasoner_calls >= fp.limits.max_reasoner_calls {
+        } else if task.model == CANONICAL_REASONER_SLOT
+            && reasoner_calls >= fp.limits.max_reasoner_calls
+        {
             Some((
                 "maxReasonerCalls",
                 reasoner_calls as u64,
@@ -1752,6 +1820,16 @@ mod recovery_regressions {
     use trollm_mcp::{ToolCall, ToolDescriptor, ToolResult};
     use trollm_models::MockModel;
 
+    #[test]
+    fn streaming_argument_hash_matches_serialized_json() {
+        let value =
+            json!({"unicode":"עברית 🦀", "escaped":"\"\\\n\0", "nested":[null, 42, {"key":true}]});
+        assert_eq!(
+            hash_json(&value).unwrap(),
+            hex_sha256(value.to_string().as_bytes())
+        );
+    }
+
     struct NoGateway;
 
     struct CancelControl;
@@ -1832,6 +1910,52 @@ nodes:
             run,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn streamed_recovery_preserves_future_intent_answers_and_missing_intent_results() {
+        for future_intent in [false, true] {
+            let base = std::env::temp_dir().join(format!("streamed-recovery-{}", Uuid::new_v4()));
+            let run = RunDir::under(&base);
+            let root = plan(
+                "streamed-recovery",
+                "done",
+                "  done: { kind: end, outcome: succeeded }",
+            );
+            let mut original = executor(root.clone(), run.clone());
+            original
+                .log
+                .append(
+                    EventType::ToolCallResult,
+                    json!({"intentSeq": if future_intent { 2 } else { 77 }}),
+                )
+                .unwrap();
+            if future_intent {
+                original.log.append(EventType::ToolCallIntent,
+                    json!({"node":"done", "taskRef":"old-task", "server":"t", "tool":"write", "args":{}})).unwrap();
+                // Both historical records are committed. An answer occurring
+                // before its referenced intent must still suppress uncertainty.
+                original.state.event_watermark = 2;
+            }
+            original.write_snapshot().unwrap();
+            drop(original);
+            let mut restored = executor(root, run);
+            assert!(restored.pending_uncertain.is_empty());
+            assert_eq!(restored.unsafe_completed_replay, !future_intent);
+            let status = restored.resume().unwrap();
+            if future_intent {
+                assert_eq!(status, RunStatus::Succeeded);
+            } else {
+                // A completed result past the watermark blocks execution even
+                // when no record for its referenced intent exists in the log.
+                assert!(
+                    matches!(status, RunStatus::Failed { reason } if reason.contains("unsafe replay"))
+                );
+                assert_eq!(restored.state.counters.steps, 0);
+            }
+            drop(restored);
+            std::fs::remove_dir_all(base).unwrap();
+        }
     }
 
     #[test]

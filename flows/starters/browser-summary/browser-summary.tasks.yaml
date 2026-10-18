@@ -1,6 +1,6 @@
 schemaVersion: ledger.task-registry.v1
 id: browser-summary
-version: 4
+version: 5
 tasks:
   open-page:
     model: coder
@@ -9,6 +9,13 @@ tasks:
     completion: tool-result
     loop: { maxSteps: 1 }
     mutations: { idempotency: intent-log, onUncertain: fail-run }
+    toolArguments:
+      e2llm.act:
+        fromInput:
+          browser: browser
+          target: url
+        fixed:
+          action: open
     outputContract:
       outputs:
         opened: { fromArtifact: opened, format: json, type: object }
@@ -21,6 +28,8 @@ tasks:
     loop: { maxSteps: 1 }
     toolArguments:
       e2llm.read_page:
+        fromInput:
+          browser: browser
         fromVars:
           tabId: open_page.outputs.opened.tabId
     outputContract:

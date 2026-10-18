@@ -36,6 +36,15 @@ require(rustFeatures == "stub" || rustFeatures == "llama") {
 val jniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
 val uniffiGenDir = layout.buildDirectory.dir("generated/uniffi")
 
+// Release signing is explicit and independent of the developer debug key.
+val releaseSigning = listOf(
+    "TROLLM_RELEASE_KEYSTORE_PATH", "TROLLM_RELEASE_KEY_ALIAS",
+    "TROLLM_RELEASE_STORE_PASSWORD", "TROLLM_RELEASE_KEY_PASSWORD",
+).associateWith { System.getenv(it) }
+val releaseSigningComplete = releaseSigning.values.all { !it.isNullOrBlank() }
+val releaseSigningMessage = "Release builds require all TROLLM_RELEASE signing inputs: " +
+    releaseSigning.keys.joinToString(", ")
+
 android {
     namespace = "com.trollm.app"
     ndkVersion = "27.2.12479018"
@@ -56,23 +65,24 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+    }
+
+    if (releaseSigningComplete) {
         signingConfigs.create("projectRelease") {
-            storeFile = file(path)
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            storeFile = file(releaseSigning.getValue("TROLLM_RELEASE_KEYSTORE_PATH")!!)
+            storePassword = releaseSigning.getValue("TROLLM_RELEASE_STORE_PASSWORD")
+            keyAlias = releaseSigning.getValue("TROLLM_RELEASE_KEY_ALIAS")
+            keyPassword = releaseSigning.getValue("TROLLM_RELEASE_KEY_PASSWORD")
         }
         buildTypes.getByName("release") {
             signingConfig = signingConfigs.getByName("projectRelease")
-            isDebuggable = false
         }
     }
+    buildTypes.getByName("release") { isDebuggable = false }
 
     if ((findProperty("trollm.androidBuildType") as String? ?: "debug") == "release" ||
         gradle.startParameter.taskNames.any { it.substringAfterLast(':') in setOf("assembleRelease", "bundleRelease", "packageRelease") }) {
-        require(!System.getenv("TROLLM_DEBUG_KEYSTORE_PATH").isNullOrBlank()) {
-            "Release builds require the project signing identity"
-        }
+        require(releaseSigningComplete) { releaseSigningMessage }
     }
 
     buildFeatures {
@@ -97,9 +107,7 @@ android {
 // Aggregate tasks (for example `assemble`) must not emit an unsigned release.
 tasks.matching { it.name == "packageRelease" || it.name == "packageReleaseBundle" }.configureEach {
     doFirst {
-        check(!System.getenv("TROLLM_DEBUG_KEYSTORE_PATH").isNullOrBlank()) {
-            "Release builds require the project signing identity"
-        }
+        check(releaseSigningComplete) { releaseSigningMessage }
     }
 }
 

@@ -101,11 +101,10 @@ impl ToolGateway for BrowserGateway {
     }
 }
 
-const OPEN: &str = r#"<tool_call>{"server":"e2llm","tool":"act","args":{"browser":"fixture","action":"open","target":"https://example.org/"}}</tool_call>"#;
+const OPEN: &str = r#"<tool_call>{"server":"e2llm","tool":"act","args":{}}</tool_call>"#;
 const LIST: &str =
     r#"<tool_call>{"server":"e2llm","tool":"list_tabs","args":{"browser":"fixture"}}</tool_call>"#;
-const READ: &str =
-    r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"fixture"}}</tool_call>"#;
+const READ: &str = r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{}}</tool_call>"#;
 
 struct FixtureResult {
     status: RunStatus,
@@ -122,6 +121,22 @@ fn run_fixture(
     publish_page: bool,
     final_response: &str,
 ) -> FixtureResult {
+    run_fixture_with_input(
+        coder,
+        opened_complete,
+        publish_page,
+        final_response,
+        json!({"browser": "fixture", "url": "https://example.org/", "question": "Summarize"}),
+    )
+}
+
+fn run_fixture_with_input(
+    coder: &[&str],
+    opened_complete: Option<bool>,
+    publish_page: bool,
+    final_response: &str,
+    input: Value,
+) -> FixtureResult {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../flows/starters/browser-summary");
     let plan = ExecutionPlan::from_yaml_file(&source.join("browser-summary.flow.yaml")).unwrap();
     let registry =
@@ -137,8 +152,7 @@ fn run_fixture(
     let mut executor = Executor::new(
         plan,
         registry,
-        json!({"browser": "fixture", "url": "https://example.org/", "question": "Summarize"})
-            .to_string(),
+        input.to_string(),
         SlotMap::new()
             .with(
                 "coder",
@@ -215,7 +229,12 @@ fn browser_starter_hands_exact_page_to_tool_free_reasoner() {
         ["act", "read_page"]
     );
     assert_eq!(result.coder_prompts.len(), 2);
-    // The model never selects or copies the ID; the typed binding supplies it.
+    assert_eq!(
+        result.calls[0].args,
+        json!({"browser": "fixture", "target": "https://example.org/", "action": "open"})
+    );
+    assert_eq!(result.calls[1].args["browser"], "fixture");
+    // The model never selects or copies runtime-owned values; typed bindings supply them.
     assert_eq!(result.calls[1].args["tabId"], result.opened["tabId"]);
     assert_eq!(result.calls[1].args["tabId"], json!(178));
     assert!(!result.coder_prompts[1].contains("178"));
@@ -223,6 +242,56 @@ fn browser_starter_hands_exact_page_to_tool_free_reasoner() {
     assert_eq!(result.reasoner_prompts.len(), 1);
     assert!(result.reasoner_prompts[0].contains(&result.page.to_string()));
     assert!(!result.reasoner_prompts[0].contains("tabId"));
+}
+
+#[test]
+fn browser_starter_passes_opaque_input_values_exactly_without_model_copying() {
+    let browser = "Chosen browser \"7\" \\ opaque";
+    let url = format!(
+        "https://example.org/a%2Fb?query={}&case=%2f+%2F&literal=%252F#part",
+        "a%20b%26c%3Dd%2Fe+".repeat(64)
+    );
+    let input = json!({"browser": browser, "url": url, "question": "Summarize"});
+    let result = run_fixture_with_input(&[OPEN, READ], Some(true), true, "Summary", input.clone());
+    assert_eq!(result.status, RunStatus::Succeeded);
+    assert_eq!(result.calls.len(), 2);
+    assert_eq!(
+        result.calls[0].args,
+        json!({"browser": input["browser"], "target": input["url"], "action": "open"})
+    );
+    assert_eq!(
+        result.calls[1].args,
+        json!({"browser": input["browser"], "tabId": 178})
+    );
+    for prompt in &result.coder_prompts {
+        assert!(!prompt.contains(browser));
+        assert!(!prompt.contains(url.as_str()));
+        assert!(!prompt.contains("178"));
+        assert!(prompt.contains("\"args\":{}"));
+    }
+}
+
+#[test]
+fn browser_starter_rejects_conflicting_runtime_owned_arguments_before_dispatch() {
+    for args in [
+        json!({"browser": "other"}),
+        json!({"target": "https://other.example/"}),
+        json!({"action": "navigate"}),
+    ] {
+        let response = format!(
+            "<tool_call>{}</tool_call>",
+            json!({"server":"e2llm", "tool":"act", "args":args})
+        );
+        let result = run_fixture(&[&response, READ], Some(true), true, "Unused");
+        assert!(matches!(result.status, RunStatus::Failed { .. }));
+        assert!(result.calls.is_empty());
+        assert!(result.reasoner_prompts.is_empty());
+    }
+    let response = r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"other"}}</tool_call>"#;
+    let result = run_fixture(&[OPEN, response], Some(true), true, "Unused");
+    assert!(matches!(result.status, RunStatus::Failed { .. }));
+    assert_eq!(result.calls.len(), 1);
+    assert!(result.reasoner_prompts.is_empty());
 }
 
 #[test]
@@ -261,7 +330,7 @@ fn browser_starter_rejects_read_prose_and_unauthorized_read_task_tools() {
 
 #[test]
 fn browser_starter_rejects_model_selected_wrong_tab_before_dispatch() {
-    // Native v3 incorrectly selected another existing tab (137). V4 must fail
+    // Native v3 incorrectly selected another existing tab (137). V5 must fail
     // before reading it even if the model supplies a syntactically valid ID.
     let wrong_read = r#"<tool_call>{"server":"e2llm","tool":"read_page","args":{"browser":"fixture","tabId":137}}</tool_call>"#;
     let result = run_fixture(&[OPEN, wrong_read], Some(true), true, "Unused");

@@ -24,13 +24,27 @@ bundle installation, verified sequential downloads, per-flow overrides,
 grant-bound OAuth refresh, manual Bearer setup and bundled text/browser summary
 starters. Secrets use encrypted app storage.
 
+OAuth cleanup now handles coroutine cancellation without invalidating completed
+or replacement logins. Refresh saves rotated state before exposing a token and
+keeps concurrent requests coalesced through the SDK callback. Connection feedback
+uses fixed failure categories without provider text or secrets. These source
+checks do not establish real provider sign-in, callback or refresh acceptance.
+
+Browser starter v5 uses explicit task bindings for the selected browser, exact
+URL, open action and returned tab ID. The model requests the allowed operation
+without copying those values. Runtime supplies omitted arguments and rejects
+conflicts before the existing validation and mutation journal. This addresses
+a native v4 failure to reproduce a long URL; v5 still needs its matching APK
+check, including long URLs and truncated/oversized-page refusal.
+
 Source now loads models lazily on first slot use after checksum verification;
 status and notifications show verification, loading and generation. Models and
 run data remain in persistent app-specific storage. Lost workers leave saved
 progress requiring explicit Resume. Startup never preloads models or replays a
 run. Safety/review fixes, interruptible retries, durable cancellation, readable
-sorted history and typed bridge errors are present. These changes still need a
-matching combined native APK/device check.
+sorted history and typed bridge errors are present. The signed rc.2 candidate
+passed a bounded native lifecycle check; newer source follow-ups still need
+their matching APK/device checks.
 
 Earlier APKs completed paired inference and browser v4 on an 8 GiB API 36
 x86_64 emulator. With manual Bearer authentication, Qwen opened example.org once
@@ -43,10 +57,19 @@ also passed. Ordinary unattended downloads needed operator intervention; these
 checks do not establish byte-transfer recovery or real OAuth login/refresh.
 The older APK is staged in a private `v0.1.0-rc.1` draft.
 
-The current **0.1.0-rc.2 / code 3** configuration is a candidate, not a published
-or accepted release. Source-only checkpoints use their source commit and do not
-renew APK acceptance; see [versioning](VERSIONING.md). Stub/scripted checks do
-not establish real-model or live-service behavior.
+The signed **0.1.0-rc.2 / code 3** candidate installed through an ordinary update
+and preserved all 46 prior runs and both Ready models. A new tool-free native
+run passed Pause/Resume, background/return and explicit recovery after process
+loss, then completed two sequential coder tasks. Cold-open showed Interrupted
+without restarting work; Resume verified the model again. Service and wake lock
+were released after completion, leaving 47 runs. This is an emulator result,
+not physical-phone, real provider sign-in or download-transfer acceptance.
+The candidate has not been published as a release. Source-only checkpoints use
+their source commit and do not renew APK acceptance. The next combined candidate
+is configured as **0.1.0-rc.3 / code 4**, with build, signing and device checks
+pending; see
+[versioning](VERSIONING.md). Stub/scripted checks do not establish real-model or
+live-service behavior.
 
 The [architecture](ARCHITECTURE-ANDROID.md) and
 [v1 schema](../schemas/execution-plan.v1.schema.json) describe current contracts

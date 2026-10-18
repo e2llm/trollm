@@ -339,6 +339,7 @@ impl TrollmRuntime {
     /// Lightweight history metadata, without event-log or result-artifact reads.
     /// Missing legacy metadata leaves an openable row with unknown fields.
     pub fn run_summary(&self, run_id: String) -> Result<RunSummaryInfo, TrollmError> {
+        history::validate_run_id(&run_id)?;
         let live = self.runs.get(&run_id).map(|handle| {
             let phase = handle.status.lock().unwrap();
             let active = handle.control.worker_active()
@@ -396,6 +397,7 @@ impl TrollmRuntime {
     /// §9: current status. Falls back to the persisted snapshot for runs not
     /// in this process (app restart), so the UI survives process death.
     pub fn poll_status(&self, run_id: String) -> Result<RunStatusInfo, TrollmError> {
+        history::validate_run_id(&run_id)?;
         let (phase, worker_active, activity) = match self.runs.get(&run_id) {
             Some(handle) => {
                 let snapshot = {
@@ -433,9 +435,9 @@ impl TrollmRuntime {
                 None,
             ),
         };
-        let (_, last_seq) = run::tail_events(&self.base, &run_id, 0).map_err(TrollmError::run)?;
+        let last_seq = run::last_event_seq(&self.base, &run_id).map_err(TrollmError::run)?;
         let final_report = if matches!(phase, RunPhase::Succeeded) {
-            run::final_report(&self.base, &run_id)
+            run::final_report(&self.base, &run_id).map_err(TrollmError::run)?
         } else {
             None
         };
@@ -452,6 +454,7 @@ impl TrollmRuntime {
     /// §9: pause. Plan-paused runs stay paused; running runs get a
     /// cooperative hold at the next model/tool boundary (see `run.rs` docs).
     pub fn pause(&self, run_id: String) -> Result<(), TrollmError> {
+        history::validate_run_id(&run_id)?;
         let handle = self
             .runs
             .get(&run_id)
@@ -464,6 +467,7 @@ impl TrollmRuntime {
     /// and for cold resume after process death (rebuilds the executor over
     /// the persisted snapshot — core's crash-recovery path, §4.4).
     pub fn resume(&self, run_id: String) -> Result<(), TrollmError> {
+        history::validate_run_id(&run_id)?;
         self.resume_or_reconstruct(run_id.clone(), || {
             // Cold resume: reconstruct from the persisted state.
             let flow_sha = run::plan_sha_of_run(&self.base, &run_id).map_err(TrollmError::run)?;
@@ -488,6 +492,7 @@ impl TrollmRuntime {
     /// durable cancelled outcome. The public terminal phase remains
     /// `Failed { reason: "cancelled" }`.
     pub fn cancel(&self, run_id: String) -> Result<(), TrollmError> {
+        history::validate_run_id(&run_id)?;
         let handle = self
             .runs
             .get(&run_id)
@@ -503,6 +508,7 @@ impl TrollmRuntime {
         run_id: String,
         from_seq: u64,
     ) -> Result<Vec<EventLine>, TrollmError> {
+        history::validate_run_id(&run_id)?;
         let (events, _) =
             run::tail_events(&self.base, &run_id, from_seq).map_err(TrollmError::run)?;
         if events.is_empty()

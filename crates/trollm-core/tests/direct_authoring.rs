@@ -22,17 +22,32 @@ impl ModelSlot for RecordingModel {
 
 #[test]
 fn directly_authored_summary_runs_without_tools_or_recording() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let plan =
-        ExecutionPlan::from_yaml_file(&root.join("flows/examples/minimal-summary.flow.yaml"))
-            .expect("directly authored plan loads without sourceBaseline");
-    assert!(plan.source_baseline.is_none());
-    let registry =
-        TaskRegistry::from_yaml_file(&root.join("flows/tasks/minimal-summary.tasks.yaml"))
-            .expect("summary registry and real prompt load");
-    assert!(registry.source_baseline.is_none());
+    run_summary_fixture(
+        "flows/examples/minimal-summary.flow.yaml",
+        "flows/tasks/minimal-summary.tasks.yaml",
+    );
+}
 
-    let base = common::tmp_dir("direct-authoring");
+#[test]
+fn shipped_text_summary_starter_runs_without_tools() {
+    run_summary_fixture(
+        "flows/starters/text-summary/text-summary.flow.yaml",
+        "flows/starters/text-summary/text-summary.tasks.yaml",
+    );
+}
+
+fn run_summary_fixture(flow_path: &str, registry_path: &str) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let plan = ExecutionPlan::from_yaml_file(&root.join(flow_path))
+        .expect("directly authored plan loads without sourceBaseline");
+    assert!(plan.source_baseline.is_none());
+    assert!(plan.mcp.servers.is_empty());
+    let registry = TaskRegistry::from_yaml_file(&root.join(registry_path))
+        .expect("summary registry and real prompt load");
+    assert!(registry.source_baseline.is_none());
+    assert!(registry.tasks.values().all(|task| task.tools.is_empty()));
+
+    let base = common::tmp_dir(&plan.id);
     let run = RunDir::under(&base);
     let prompts = Arc::new(Mutex::new(Vec::new()));
     // Scripted fixture response: no real model or factual verification occurs.

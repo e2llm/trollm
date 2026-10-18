@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,6 +33,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.mapSaver
 import kotlinx.coroutines.launch
+import com.trollm.app.UiError
+import com.trollm.app.UiOperation
+import com.trollm.app.operationError
+import com.trollm.app.combineUiErrors
+import com.trollm.app.catchingOperation
 import com.trollm.app.RunHistory
 import com.trollm.app.FlowSetup
 import com.trollm.app.StructuredInput
@@ -41,7 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -82,8 +87,11 @@ fun RunScreen(
     var configurationJson by rememberSaveable(flow?.sha256) { mutableStateOf<String?>(null) }
     var finalReport by remember(runId) { mutableStateOf<String?>(null) }
     var lines by remember(runId) { mutableStateOf<List<String>>(emptyList()) }
-    var error by remember(runId, flow?.sha256) { mutableStateOf<String?>(null) }
-    var pollingError by remember(runId) { mutableStateOf<String?>(null) }
+    var error by remember(runId, flow?.sha256) { mutableStateOf<UiError?>(null) }
+    // Keep post-start warnings when the successful UUID changes the screen state.
+    var startedRunError by remember(flow?.sha256) { mutableStateOf<UiError?>(null) }
+    var pollingError by remember(runId) { mutableStateOf<UiError?>(null) }
+    var showTechnicalEvents by remember(runId) { mutableStateOf(false) }
     var presentation by remember(runId) { mutableStateOf<RunPresentation?>(null) }
     var requesting by remember(runId) { mutableStateOf(false) }
     var pollingGeneration by remember(runId) { mutableStateOf(0) }
@@ -107,12 +115,12 @@ fun RunScreen(
 
     LaunchedEffect(flow?.sha256) {
         val selected = flow ?: return@LaunchedEffect
-        runCatching {
+        catchingOperation {
             withContext(Dispatchers.IO) { runtime.flowSetup(selected.sha256)?.let { FlowSetup.parse(it) } }
         }.onSuccess {
             setup = it
             setupChecked = true
-        }.onFailure { error = it.message }
+        }.onFailure { error = operationError(UiOperation.LOAD_SETUP, it) }
     }
 
     if (preparing && flow != null && runId == null) {
@@ -131,7 +139,7 @@ fun RunScreen(
         var cursor = 0uL
         lines = emptyList()
         while (isActive) {
-            val step = runCatching {
+            val step = catchingOperation {
                 withContext(Dispatchers.IO) {
                     val events = runtime.tailEvents(id, cursor)
                     val status = runtime.pollStatus(id)
@@ -147,16 +155,18 @@ fun RunScreen(
                 presentation = presentRun(status.phase, status.workerActive, status.activity)
                 finalReport = status.finalReport
             }.onFailure {
-                if (it is CancellationException) throw it
-                pollingError = it.message
+                pollingError = operationError(UiOperation.OBSERVE_RUN, it)
             }
             if (presentation?.keepPolling == false) break
             delay(300)
-            if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
         }
     }
 
-    Column(Modifier.fillMaxSize().then(if (runId == null) Modifier.verticalScroll(inputScroll) else Modifier).padding(16.dp)) {
+    LaunchedEffect(showTechnicalEvents, lines.size) {
+        if (showTechnicalEvents && lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(inputScroll).padding(16.dp)) {
         Text(setup?.title ?: flow?.id ?: "Run ${runId.orEmpty()}", style = MaterialTheme.typography.headlineSmall)
         Text(
             flow?.let { "sha256 ${it.sha256.take(12)}…" } ?: runId.orEmpty(),
@@ -207,16 +217,16 @@ fun RunScreen(
                 inputAttempted = true
                 val validation = StructuredInput.errors(fields, structuredValues)
                 if (validation.isNotEmpty()) {
-                    error = "Check the input fields before starting."
+                    error = UiError("Check the input fields before starting.")
                     return@Button
                 }
                 val submittedInput = try {
                     StructuredInput.serialize(fields, structuredValues, userInput)
                 } catch (failure: IllegalArgumentException) {
-                    error = failure.message ?: "Check the input fields before starting."
+                    error = operationError(UiOperation.PREPARE_INPUT, failure)
                     return@Button
-                } catch (_: Exception) {
-                    error = "Could not prepare the input. Check the fields and try again."
+                } catch (failure: Exception) {
+                    error = operationError(UiOperation.PREPARE_INPUT, failure)
                     return@Button
                 }
                 val submittedConfiguration = configurationJson
@@ -224,21 +234,24 @@ fun RunScreen(
                 starting = true
                 prepareNotifications()
                 scope.launch {
-                    runCatching {
+                    catchingOperation {
                         withContext(Dispatchers.IO) {
                             check(!runtime.hasActiveRun()) { "Finish or cancel the active run before starting another." }
                             val id = submittedConfiguration?.let {
                                 runtime.startRunConfigured(flow.sha256, submittedInput, it)
                             } ?: runtime.startRun(flow.sha256, submittedInput)
                             // Preserve the successful UUID even if storage/service setup fails.
-                            val storageError = runCatching { RunHistory(context).record(id) }.exceptionOrNull()
-                            val serviceError = runCatching { RunService.start(context.applicationContext, id) }.exceptionOrNull()
-                            id to (storageError ?: serviceError)?.message
+                            val storageError = catchingOperation { RunHistory(context).record(id) }.exceptionOrNull()
+                            val serviceError = catchingOperation { RunService.start(context.applicationContext, id) }.exceptionOrNull()
+                            id to combineUiErrors(
+                                storageError?.let { operationError(UiOperation.SAVE_HISTORY, it) },
+                                serviceError?.let { operationError(UiOperation.BACKGROUND_PROGRESS, it) },
+                            )
                         }
                     }.onSuccess { (id, setupError) ->
                         onRunStarted(id)
-                        error = setupError
-                    }.onFailure { error = it.message }
+                        startedRunError = setupError
+                    }.onFailure { error = operationError(UiOperation.START_RUN, it) }
                     starting = false
                 }
             }) { Text(if (starting) "Starting…" else "Start run") }
@@ -246,27 +259,31 @@ fun RunScreen(
             Text(presentation?.text ?: "Starting…", style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(vertical = 8.dp))
 
+            presentation?.details?.let { TechnicalDetails(it) }
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(enabled = !requesting && presentation?.canPause == true, onClick = {
+                    error = null
                     requesting = true
                     scope.launch {
-                        runCatching { withContext(Dispatchers.IO) { runtime.pause(runId) } }
-                            .onFailure { error = it.message }
+                        catchingOperation { withContext(Dispatchers.IO) { runtime.pause(runId) } }
+                            .onFailure { error = operationError(UiOperation.PAUSE_RUN, it) }
                         requesting = false
                     }
                 }) { Text("Pause") }
                 Button(enabled = !requesting && presentation?.canResume == true, onClick = {
+                    error = null
                     requesting = true
                     prepareNotifications()
                     scope.launch {
                         var resumed = false
-                        runCatching {
+                        catchingOperation {
                             withContext(Dispatchers.IO) {
                                 runtime.resume(runId)
                                 resumed = true
                                 RunService.start(context.applicationContext, runId)
                             }
-                        }.onFailure { error = it.message }
+                        }.onFailure { error = operationError(if (resumed) UiOperation.BACKGROUND_PROGRESS else UiOperation.RESUME_RUN, it) }
                         if (resumed) {
                             // The old disk-only observer stopped. Restart it only
                             // after this explicit user request restores a worker.
@@ -277,18 +294,22 @@ fun RunScreen(
                     }
                 }) { Text("Resume") }
                 Button(enabled = !requesting && presentation?.canCancel == true, onClick = {
+                    error = null
                     requesting = true
                     scope.launch {
-                        runCatching { withContext(Dispatchers.IO) { runtime.cancel(runId) } }
-                            .onFailure { error = it.message }
+                        catchingOperation { withContext(Dispatchers.IO) { runtime.cancel(runId) } }
+                            .onFailure { error = operationError(UiOperation.CANCEL_RUN, it) }
                         requesting = false
                     }
                 }) { Text("Cancel") }
             }
 
-            LazyColumn(
+            Button(onClick = { showTechnicalEvents = !showTechnicalEvents }) {
+                Text(if (showTechnicalEvents) "Hide technical events" else "Show technical events")
+            }
+            if (showTechnicalEvents) LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(vertical = 8.dp),
             ) {
                 items(lines) { Text(it, fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall) }
@@ -303,8 +324,9 @@ fun RunScreen(
         if (!notificationsEnabled && (runId != null || starting)) {
             Text("Background progress notifications are disabled. Enable them in Android app settings.", style = MaterialTheme.typography.bodySmall)
         }
-        error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
-        pollingError?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
+        error?.let { OperationError(it) }
+        pollingError?.let { OperationError(it) }
+        startedRunError?.let { OperationError(it) }
         Button(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back") }
     }
 }

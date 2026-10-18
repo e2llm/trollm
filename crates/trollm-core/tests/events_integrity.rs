@@ -98,8 +98,8 @@ fn expected_run_identity_reserved_payload_and_sequence_exhaustion_are_checked() 
     std::fs::write(&path, record(1).to_string()).unwrap();
     assert!(EventLog::open(&path, "other").is_err());
     let original = std::fs::read(&path).unwrap();
-    let mut log = EventLog::open(&path, "run").unwrap();
     for key in ["ts", "runId", "seq", "type"] {
+        let mut log = EventLog::open(&path, "run").unwrap();
         let mut payload = json!({});
         payload[key] = json!("secret-value");
         let error = log.append(EventType::Error, payload).unwrap_err();
@@ -107,7 +107,6 @@ fn expected_run_identity_reserved_payload_and_sequence_exhaustion_are_checked() 
         assert_eq!(log.last_seq(), 1);
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
-    drop(log);
     let original = record(u64::MAX).to_string();
     std::fs::write(&path, &original).unwrap();
     let mut log = EventLog::open(&path, "run").unwrap();
