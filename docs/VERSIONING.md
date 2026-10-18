@@ -7,9 +7,21 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
-The next configured candidate is **0.1.0-rc.3**, with Android **versionCode 4**
-from `[workspace.metadata.android].version-code` in the root manifest. Its planned
-release tag is `v0.1.0-rc.3`. Building, signing and device acceptance remain pending.
+The next configured candidate is **0.1.0-rc.4**, with Android **versionCode 5**
+from `[workspace.metadata.android].version-code` in the root manifest. It includes
+the transport-diagnostic follow-up. Its build, signing and device checks remain
+pending; the planned release tag is `v0.1.0-rc.4`.
+
+The last signed, installed candidate is **0.1.0-rc.3 / code 4**, from source
+`dc7a331`. Its build and signing checks passed; an ordinary emulator update
+preserved all 49 prior visible runs. A browser v5 attempt opened the exact
+supplied URL, but the tool-call response failed before page reading. Full flow,
+OAuth, download-transfer and physical-phone acceptance remain open. An
+unpublished private `v0.1.0-rc.3` draft retains that verified APK and checksum
+alongside its matching curated source.
+
+The transport-diagnostic follow-up is not in the rc.3 APK. Source-only updates
+do not imply new APK bytes or renewed device acceptance.
 
 The previously tested **0.1.0-rc.2 / code 3** APK retains its own source identity,
 bytes and acceptance evidence. Its checks do not establish acceptance of the

@@ -213,8 +213,7 @@ impl McpClient {
         }
         let resp = req
             .send()
-            .map_err(reqwest::Error::without_url)
-            .context("MCP notification POST failed")?;
+            .map_err(|error| post_send_error(error, "MCP notification POST failed"))?;
         let status = resp.status();
         if !status.is_success() && status.as_u16() != 202 {
             bail!("MCP notification {method} failed: HTTP {status}");
@@ -244,8 +243,7 @@ impl McpClient {
         }
         let resp = req
             .send()
-            .map_err(reqwest::Error::without_url)
-            .with_context(|| format!("MCP {method} POST failed"))?;
+            .map_err(|error| post_send_error(error, &format!("MCP {method} POST failed")))?;
         let status = resp.status();
         if !status.is_success() {
             bail!("MCP {method} failed: HTTP {status}");
@@ -313,6 +311,21 @@ pub(crate) fn required_grant_token(getter: Option<&TokenGetter>) -> Result<Strin
         .and_then(|getter| getter())
         .filter(|token| !token.trim().is_empty())
         .context("MCP connection is no longer authorized; reconnect this connection")
+}
+
+/// Keep a safe category in the outer display: callers may discard source chains.
+fn post_send_error(error: reqwest::Error, context: &str) -> anyhow::Error {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        // A connection error alone does not distinguish DNS, TLS or socket failure.
+        "connection failure"
+    } else if error.is_builder() {
+        "request-building failure"
+    } else {
+        "other transport failure"
+    };
+    anyhow::Error::new(error.without_url()).context(format!("{context} ({category})"))
 }
 
 fn remaining_timeout(timeout: Option<Duration>, started: Instant) -> Result<Option<Duration>> {
@@ -482,6 +495,8 @@ mod tests {
             (rpc_error, "MCP tools/list POST failed"),
             (notification_error, "MCP notification POST failed"),
         ] {
+            let display = error.to_string();
+            assert_eq!(display, format!("{context} (timeout)"));
             let chain = format!("{error:#}");
             assert!(chain.contains(context));
             assert!(chain.contains("timed out"));
@@ -489,5 +504,48 @@ mod tests {
             assert!(!chain.contains("private-endpoint"));
             assert!(!chain.contains("secret-query-token"));
         }
+    }
+
+    #[test]
+    fn builder_send_errors_keep_safe_category_without_session_or_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!(
+            "http://{}/private-endpoint?token=secret-query-token",
+            listener.local_addr().unwrap()
+        );
+        let mut client = McpClient::for_local_test(&url, None).unwrap();
+        // Invalid header syntax makes send fail before touching the socket.
+        client.session_id = Some("secret-session\r\ninvalid".into());
+        for (error, context) in [
+            (
+                client.rpc_raw("tools/call", json!({}), None).unwrap_err(),
+                "MCP tools/call POST failed",
+            ),
+            (
+                client
+                    .notify("notifications/initialized", json!({}), None)
+                    .unwrap_err(),
+                "MCP notification POST failed",
+            ),
+        ] {
+            assert_eq!(
+                error.to_string(),
+                format!("{context} (request-building failure)")
+            );
+            let chain = format!("{error:#}");
+            for secret in [
+                &url,
+                "private-endpoint",
+                "secret-query-token",
+                "secret-session",
+            ] {
+                assert!(!chain.contains(secret));
+            }
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }

@@ -95,6 +95,10 @@ android {
     }
 
     sourceSets {
+        getByName("test") {
+            // Shared Rust/JVM identity cases also work in the curated export without .git.
+            resources.srcDir(repoDir.resolve("crates/trollm-uniffi/tests/fixtures"))
+        }
         getByName("main") {
             // cargo-ndk writes libtrollm_uniffi.so per ABI here.
             jniLibs.srcDir(jniLibsDir)

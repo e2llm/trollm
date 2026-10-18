@@ -39,6 +39,25 @@ pub(crate) struct RunAuthentication {
 }
 
 fn endpoint(value: &str) -> Result<String> {
+    // Url validates the network destination, but its serialization rewrites dot
+    // segments, IP spellings and Unicode. Those are distinct credential pins in
+    // Android's URI-based identity; do not feed rewritten values to callbacks.
+    if value.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '\\' | '"' | '<' | '>' | '`' | '^' | '{' | '}' | '|')
+    }) {
+        bail!("invalid MCP endpoint characters");
+    }
+    let bytes = value.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'%'
+            && !(bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit))
+        {
+            bail!("invalid MCP endpoint escape");
+        }
+    }
     let parsed = url::Url::parse(value).context("invalid MCP endpoint")?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
@@ -48,7 +67,77 @@ fn endpoint(value: &str) -> Result<String> {
     {
         bail!("MCP endpoint must use HTTPS without credentials or fragments");
     }
-    Ok(parsed.to_string())
+    let (scheme, rest) = value.split_once("://").context("missing MCP authority")?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        bail!("MCP endpoint must use HTTPS");
+    }
+    let boundary = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, suffix) = rest.split_at(boundary);
+    let path = suffix.split_once('?').map_or(suffix, |(path, _)| path);
+    if path.contains(['[', ']']) {
+        bail!("invalid MCP endpoint path");
+    }
+    if authority.is_empty() || !authority.is_ascii() || authority.contains(['@', '%']) {
+        bail!("invalid MCP endpoint authority");
+    }
+    let (host, port) = if authority.starts_with('[') {
+        let end = authority.find(']').context("invalid MCP IPv6 authority")? + 1;
+        if !matches!(parsed.host(), Some(url::Host::Ipv6(_))) {
+            bail!("invalid MCP IPv6 host");
+        }
+        let (host, remainder) = authority.split_at(end);
+        let port = if remainder.is_empty() {
+            ""
+        } else {
+            remainder.strip_prefix(':').context("invalid MCP port")?
+        };
+        (host, port)
+    } else {
+        let (host, port) = authority.split_once(':').unwrap_or((authority, ""));
+        // Match URI's ASCII server-host syntax without adopting Url's numeric
+        // host aliases (e.g. 127.1) or decoding percent-encoded DNS names.
+        let labels: Vec<_> = host.strip_suffix('.').unwrap_or(host).split('.').collect();
+        if labels.iter().any(|label| {
+            label.is_empty()
+                || !label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        }) {
+            bail!("invalid MCP hostname");
+        }
+        if labels.len() > 1
+            && !labels.last().unwrap().as_bytes()[0].is_ascii_alphabetic()
+            && (host.ends_with('.')
+                || labels.len() != 4
+                || labels.iter().any(|label| label.parse::<u8>().is_err()))
+        {
+            bail!("invalid MCP numeric hostname");
+        }
+        (host, port)
+    };
+    let port = if port.is_empty() {
+        None
+    } else {
+        if !port.bytes().all(|c| c.is_ascii_digit()) {
+            bail!("invalid MCP port");
+        }
+        Some(port.parse::<u16>().context("invalid MCP port")?)
+    };
+    let port = match port {
+        None | Some(443) => String::new(),
+        Some(port) => format!(":{port}"),
+    };
+    let suffix = if suffix.is_empty() || suffix.starts_with('?') {
+        format!("/{suffix}")
+    } else {
+        suffix.to_owned()
+    };
+    Ok(format!(
+        "https://{}{port}{suffix}",
+        host.to_ascii_lowercase()
+    ))
 }
 
 impl RunAuthentication {
@@ -454,5 +543,208 @@ mod tests {
                 .unwrap()(),
             Some("fixture-private-access-token".into())
         );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EndpointCase {
+        id: String,
+        input: String,
+        expected: Option<String>,
+    }
+
+    fn endpoint_cases() -> Vec<EndpointCase> {
+        serde_json::from_str(include_str!("../tests/fixtures/endpoint-identity.json")).unwrap()
+    }
+
+    #[test]
+    fn endpoint_identity_matches_shared_android_fixtures() {
+        for case in endpoint_cases() {
+            assert_eq!(endpoint(&case.input).ok(), case.expected, "{}", case.id);
+        }
+    }
+
+    #[test]
+    fn invalid_endpoint_fixtures_fail_before_any_credential_callback() {
+        let dir = TestDir::new();
+        let (state, provider) = provider(oauth("grant-a"));
+        for case in endpoint_cases()
+            .into_iter()
+            .filter(|case| case.expected.is_none())
+        {
+            let invalid = ServerConfig::new("invalid", &case.input);
+            assert!(
+                RunAuthentication::resolve(&dir.0, &[server(), invalid], Some(&provider), false)
+                    .is_err(),
+                "{}",
+                case.id
+            );
+            assert_eq!(state.selections.load(Ordering::Relaxed), 0, "{}", case.id);
+            assert!(!dir.0.join(AUTH_FILE).exists());
+        }
+    }
+
+    struct ExactEndpoint {
+        url: String,
+        mode: ConnectionAuth,
+        selections: Mutex<Vec<String>>,
+        token_calls: AtomicUsize,
+    }
+    struct ExactProvider(Arc<ExactEndpoint>);
+    impl TokenProvider for ExactProvider {
+        fn connection_auth(&self, name: String, url: String) -> ConnectionAuth {
+            self.0.selections.lock().unwrap().push(url.clone());
+            if name == "browser" && url == self.0.url {
+                self.0.mode.clone()
+            } else {
+                ConnectionAuth::Unavailable
+            }
+        }
+        fn bearer_token(&self, name: String, url: String) -> Option<String> {
+            self.0.token_calls.fetch_add(1, Ordering::Relaxed);
+            (name == "browser" && url == self.0.url && self.0.mode == ConnectionAuth::Bearer)
+                .then(|| "fixture-exact-token".into())
+        }
+        fn oauth_token(&self, name: String, url: String, grant_id: String) -> Option<String> {
+            self.0.token_calls.fetch_add(1, Ordering::Relaxed);
+            (name == "browser"
+                && url == self.0.url
+                && self.0.mode == ConnectionAuth::Oauth { grant_id })
+            .then(|| "fixture-exact-token".into())
+        }
+    }
+    fn exact_provider(
+        url: &str,
+        mode: ConnectionAuth,
+    ) -> (Arc<ExactEndpoint>, SharedTokenProvider) {
+        let state = Arc::new(ExactEndpoint {
+            url: url.into(),
+            mode,
+            selections: Mutex::new(Vec::new()),
+            token_calls: AtomicUsize::new(0),
+        });
+        let shared: SharedTokenProvider = Arc::new(Box::new(ExactProvider(state.clone())));
+        (state, shared)
+    }
+
+    #[test]
+    fn raw_endpoint_identity_delivers_manual_and_oauth_on_fresh_and_cold_runs() {
+        for mode in [ConnectionAuth::Bearer, oauth("exact-grant")] {
+            for (input, identity) in [
+                (
+                    "HTTPS://EXAMPLE.TEST:00443/a/../mcp?tenant=%2F&x=雪",
+                    "https://example.test/a/../mcp?tenant=%2F&x=雪",
+                ),
+                (
+                    "https://example.test/a/%2e%2e/mcp?",
+                    "https://example.test/a/%2e%2e/mcp?",
+                ),
+                (
+                    "https://[2001:0DB8:0:0:0:0:0:1]:443/café?q=%2f",
+                    "https://[2001:0db8:0:0:0:0:0:1]/café?q=%2f",
+                ),
+            ] {
+                let dir = TestDir::new();
+                let config = || ServerConfig::new("browser", input);
+                let (state, provider) = exact_provider(identity, mode.clone());
+                for resume in [false, true] {
+                    let auth =
+                        RunAuthentication::resolve(&dir.0, &[config()], Some(&provider), resume)
+                            .unwrap();
+                    assert_eq!(auth.servers["browser"].url, identity);
+                    let token = auth
+                        .bind(config(), Some(&provider))
+                        .unwrap()
+                        .token_getter
+                        .unwrap()();
+                    assert_eq!(token.as_deref(), Some("fixture-exact-token"));
+                }
+                assert_eq!(state.token_calls.load(Ordering::Relaxed), 2);
+                assert!(state
+                    .selections
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|url| url == identity));
+                assert!(!fs::read_to_string(dir.0.join(AUTH_FILE))
+                    .unwrap()
+                    .contains("fixture-exact-token"));
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_and_escaped_aliases_never_rebind_or_request_tokens() {
+        let original = "https://example.test/a/../mcp?tenant=%2F&x=雪";
+        for mode in [ConnectionAuth::Bearer, oauth("exact-grant")] {
+            let dir = TestDir::new();
+            let (state, provider) = exact_provider(original, mode);
+            let auth = RunAuthentication::resolve(
+                &dir.0,
+                &[ServerConfig::new("browser", original)],
+                Some(&provider),
+                false,
+            )
+            .unwrap();
+            let saved = fs::read(dir.0.join(AUTH_FILE)).unwrap();
+            let selections = state.selections.lock().unwrap().len();
+            for alias in [
+                "https://example.test/mcp?tenant=%2F&x=雪",
+                "https://example.test/a/%2e%2e/mcp?tenant=%2F&x=雪",
+                "https://example.test/a/../mcp?tenant=%2f&x=雪",
+                "https://example.test/a/../mcp?x=雪&tenant=%2F",
+            ] {
+                assert!(auth
+                    .bind(ServerConfig::new("browser", alias), Some(&provider))
+                    .is_err());
+                assert!(RunAuthentication::resolve(
+                    &dir.0,
+                    &[ServerConfig::new("browser", alias)],
+                    Some(&provider),
+                    true
+                )
+                .is_err());
+                assert_eq!(state.token_calls.load(Ordering::Relaxed), 0);
+                assert_eq!(state.selections.lock().unwrap().len(), selections);
+                assert_eq!(fs::read(dir.0.join(AUTH_FILE)).unwrap(), saved);
+            }
+        }
+    }
+
+    #[test]
+    fn old_collapsed_saved_dot_pin_fails_cold_resume_without_reselection_or_migration() {
+        for mode in [ConnectionAuth::Bearer, oauth("exact-grant")] {
+            let dir = TestDir::new();
+            let (state, provider) = exact_provider("https://example.test/mcp", mode);
+            RunAuthentication::resolve(&dir.0, &[server()], Some(&provider), false).unwrap();
+            let saved = fs::read(dir.0.join(AUTH_FILE)).unwrap();
+            let selections = state.selections.lock().unwrap().len();
+            for raw in [
+                "https://example.test/a/../mcp",
+                "https://example.test/a/%2e%2e/mcp",
+            ] {
+                assert!(RunAuthentication::resolve(
+                    &dir.0,
+                    &[ServerConfig::new("browser", raw)],
+                    Some(&provider),
+                    true
+                )
+                .is_err());
+                assert_eq!(state.selections.lock().unwrap().len(), selections);
+                assert_eq!(state.token_calls.load(Ordering::Relaxed), 0);
+                assert_eq!(fs::read(dir.0.join(AUTH_FILE)).unwrap(), saved);
+            }
+            // Ordinary endpoint pins retain the existing cold-resume behavior.
+            let resumed =
+                RunAuthentication::resolve(&dir.0, &[server()], Some(&provider), true).unwrap();
+            assert_eq!(
+                resumed
+                    .bind(server(), Some(&provider))
+                    .unwrap()
+                    .token_getter
+                    .unwrap()()
+                .as_deref(),
+                Some("fixture-exact-token")
+            );
+        }
     }
 }

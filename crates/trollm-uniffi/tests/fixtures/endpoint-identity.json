@@ -1,0 +1,377 @@
+[
+  {
+    "id": "normal",
+    "input": "https://example.test/mcp",
+    "expected": "https://example.test/mcp"
+  },
+  {
+    "id": "defaults",
+    "input": "HTTPS://EXAMPLE.TEST:443",
+    "expected": "https://example.test/"
+  },
+  {
+    "id": "root",
+    "input": "https://example.test/",
+    "expected": "https://example.test/"
+  },
+  {
+    "id": "dot",
+    "input": "https://example.test/a/../b",
+    "expected": "https://example.test/a/../b"
+  },
+  {
+    "id": "encoded-dot",
+    "input": "https://example.test/a/%2e%2e/b",
+    "expected": "https://example.test/a/%2e%2e/b"
+  },
+  {
+    "id": "encoded-single-dot",
+    "input": "https://example.test/a/%2E/b",
+    "expected": "https://example.test/a/%2E/b"
+  },
+  {
+    "id": "escaped-slash",
+    "input": "https://EXAMPLE.TEST:443/a%2Fb?q=%2F",
+    "expected": "https://example.test/a%2Fb?q=%2F"
+  },
+  {
+    "id": "query-literal",
+    "input": "https://example.test/a/b?q=/",
+    "expected": "https://example.test/a/b?q=/"
+  },
+  {
+    "id": "query-encoded",
+    "input": "https://example.test/a/b?q=%2f",
+    "expected": "https://example.test/a/b?q=%2f"
+  },
+  {
+    "id": "empty-user",
+    "input": "https://@example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "encoded-host",
+    "input": "https://%65xample.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "unicode-path",
+    "input": "https://example.test/café?q=雪",
+    "expected": "https://example.test/café?q=雪"
+  },
+  {
+    "id": "unicode-host",
+    "input": "https://bücher.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "ipv6-full",
+    "input": "https://[2001:0db8:0:0:0:0:0:1]:443/mcp",
+    "expected": "https://[2001:0db8:0:0:0:0:0:1]/mcp"
+  },
+  {
+    "id": "ipv6-short",
+    "input": "https://[2001:db8::1]/mcp",
+    "expected": "https://[2001:db8::1]/mcp"
+  },
+  {
+    "id": "ipv4-short",
+    "input": "https://127.1/mcp",
+    "expected": null
+  },
+  {
+    "id": "ipv4-integer",
+    "input": "https://2130706433/mcp",
+    "expected": "https://2130706433/mcp"
+  },
+  {
+    "id": "ipv4-octal",
+    "input": "https://0177.0.0.1/mcp",
+    "expected": "https://0177.0.0.1/mcp"
+  },
+  {
+    "id": "ipv4-hex",
+    "input": "https://0x7f000001/mcp",
+    "expected": "https://0x7f000001/mcp"
+  },
+  {
+    "id": "invalid-percent",
+    "input": "https://example.test/%zz",
+    "expected": null
+  },
+  {
+    "id": "trailing-percent",
+    "input": "https://example.test/%",
+    "expected": null
+  },
+  {
+    "id": "leading-space",
+    "input": " https://example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "trailing-space",
+    "input": "https://example.test/mcp ",
+    "expected": null
+  },
+  {
+    "id": "path-space",
+    "input": "https://example.test/a b",
+    "expected": null
+  },
+  {
+    "id": "embedded-tab",
+    "input": "https://exa\tmple.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "backslash",
+    "input": "https://example.test/a\\b",
+    "expected": null
+  },
+  {
+    "id": "empty-query",
+    "input": "https://example.test/mcp?",
+    "expected": "https://example.test/mcp?"
+  },
+  {
+    "id": "nondefault-port",
+    "input": "https://example.test:8443/mcp",
+    "expected": "https://example.test:8443/mcp"
+  },
+  {
+    "id": "zero-padded-default-port",
+    "input": "https://example.test:00443/mcp",
+    "expected": "https://example.test/mcp"
+  },
+  {
+    "id": "zero-padded-port",
+    "input": "https://example.test:08443/mcp",
+    "expected": "https://example.test:8443/mcp"
+  },
+  {
+    "id": "zero-port",
+    "input": "https://example.test:0/mcp",
+    "expected": "https://example.test:0/mcp"
+  },
+  {
+    "id": "max-port",
+    "input": "https://example.test:65535/mcp",
+    "expected": "https://example.test:65535/mcp"
+  },
+  {
+    "id": "mixed-case-ipv6",
+    "input": "HTTPS://[2001:0DB8:ABCD:0:0:0:0:1]:00443/mcp?",
+    "expected": "https://[2001:0db8:abcd:0:0:0:0:1]/mcp?"
+  },
+  {
+    "id": "empty-port",
+    "input": "https://example.test:/mcp",
+    "expected": "https://example.test/mcp"
+  },
+  {
+    "id": "negative-port",
+    "input": "https://example.test:-1/mcp",
+    "expected": null
+  },
+  {
+    "id": "overlarge-port",
+    "input": "https://example.test:65536/mcp",
+    "expected": null
+  },
+  {
+    "id": "overflow-port",
+    "input": "https://example.test:999999999999/mcp",
+    "expected": null
+  },
+  {
+    "id": "alphabetic-port",
+    "input": "https://example.test:abc/mcp",
+    "expected": null
+  },
+  {
+    "id": "missing-host",
+    "input": "https:///mcp",
+    "expected": null
+  },
+  {
+    "id": "missing-authority",
+    "input": "https:/mcp",
+    "expected": null
+  },
+  {
+    "id": "relative",
+    "input": "/mcp",
+    "expected": null
+  },
+  {
+    "id": "http",
+    "input": "http://example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "fragment",
+    "input": "https://example.test/mcp#section",
+    "expected": null
+  },
+  {
+    "id": "empty-fragment",
+    "input": "https://example.test/mcp#",
+    "expected": null
+  },
+  {
+    "id": "userinfo",
+    "input": "https://user@example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "password-userinfo",
+    "input": "https://user:secret@example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "empty-password-userinfo",
+    "input": "https://:secret@example.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "unclosed-ipv6",
+    "input": "https://[2001:db8::1/mcp",
+    "expected": null
+  },
+  {
+    "id": "unbracketed-ipv6",
+    "input": "https://2001:db8::1/mcp",
+    "expected": null
+  },
+  {
+    "id": "invalid-ipv6",
+    "input": "https://[not-an-ip]/mcp",
+    "expected": null
+  },
+  {
+    "id": "underscore-host",
+    "input": "https://bad_host.test/mcp",
+    "expected": null
+  },
+  {
+    "id": "quote-path",
+    "input": "https://example.test/a\"b",
+    "expected": null
+  },
+  {
+    "id": "quote-query",
+    "input": "https://example.test/mcp?q=a\"b",
+    "expected": null
+  },
+  {
+    "id": "angle-open-path",
+    "input": "https://example.test/a<b",
+    "expected": null
+  },
+  {
+    "id": "angle-open-query",
+    "input": "https://example.test/mcp?q=a<b",
+    "expected": null
+  },
+  {
+    "id": "angle-close-path",
+    "input": "https://example.test/a>b",
+    "expected": null
+  },
+  {
+    "id": "angle-close-query",
+    "input": "https://example.test/mcp?q=a>b",
+    "expected": null
+  },
+  {
+    "id": "backtick-path",
+    "input": "https://example.test/a`b",
+    "expected": null
+  },
+  {
+    "id": "backtick-query",
+    "input": "https://example.test/mcp?q=a`b",
+    "expected": null
+  },
+  {
+    "id": "caret-path",
+    "input": "https://example.test/a^b",
+    "expected": null
+  },
+  {
+    "id": "caret-query",
+    "input": "https://example.test/mcp?q=a^b",
+    "expected": null
+  },
+  {
+    "id": "brace-open-path",
+    "input": "https://example.test/a{b",
+    "expected": null
+  },
+  {
+    "id": "brace-open-query",
+    "input": "https://example.test/mcp?q=a{b",
+    "expected": null
+  },
+  {
+    "id": "brace-close-path",
+    "input": "https://example.test/a}b",
+    "expected": null
+  },
+  {
+    "id": "brace-close-query",
+    "input": "https://example.test/mcp?q=a}b",
+    "expected": null
+  },
+  {
+    "id": "pipe-path",
+    "input": "https://example.test/a|b",
+    "expected": null
+  },
+  {
+    "id": "pipe-query",
+    "input": "https://example.test/mcp?q=a|b",
+    "expected": null
+  },
+  {
+    "id": "bracket-open-path",
+    "input": "https://example.test/a[b",
+    "expected": null
+  },
+  {
+    "id": "bracket-open-query",
+    "input": "https://example.test/mcp?q=a[b",
+    "expected": "https://example.test/mcp?q=a[b"
+  },
+  {
+    "id": "bracket-close-path",
+    "input": "https://example.test/a]b",
+    "expected": null
+  },
+  {
+    "id": "bracket-close-query",
+    "input": "https://example.test/mcp?q=a]b",
+    "expected": "https://example.test/mcp?q=a]b"
+  },
+  {
+    "id": "trailing-dot-dns",
+    "input": "https://EXAMPLE.TEST./mcp",
+    "expected": "https://example.test./mcp"
+  },
+  {
+    "id": "trailing-dot-ipv4",
+    "input": "https://127.0.0.1./mcp",
+    "expected": null
+  },
+  {
+    "id": "query-order-ab",
+    "input": "https://example.test/mcp?a=1&b=2",
+    "expected": "https://example.test/mcp?a=1&b=2"
+  },
+  {
+    "id": "query-order-ba",
+    "input": "https://example.test/mcp?b=2&a=1",
+    "expected": "https://example.test/mcp?b=2&a=1"
+  }
+]
