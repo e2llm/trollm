@@ -52,18 +52,38 @@ before construction and reuse within the run. UI/notifications show verification
 loading and generation. Persistent interrupted progress needs explicit Resume
 after worker loss; startup never preloads models or replays a run. Safety/review
 fixes, interruptible retry delays, durable cancellation, readable sorted history
-and typed bridge errors are also present. These changes need matching combined
-native APK/device acceptance.
+and typed bridge errors are also present. The installed rc.5 APK passed bounded
+update, retry-wait and bundled-v6 browser checks.
 
-The next configured candidate is **0.1.0-rc.4 / code 5**, with build, signing
-and device checks pending. The signed, installed rc.3/code 4 APK from `dc7a331`
-remains in an unpublished private draft. It preserved all 49 prior visible runs;
-browser v5 opened the exact supplied URL, but its tool-call response failed
-before page reading. The new transport diagnostics are not in that APK.
-The earlier rc.2/code 3 APK retains its bounded update/recovery results.
-Ordinary download transfer/recovery, real OAuth provider login/refresh, the
-updated combined native APK and S21-class arm64 acceptance remain open. This is not a published or
-accepted consumer release. See [versioning](../../docs/VERSIONING.md).
+The current signed, installed candidate is **0.1.0-rc.5 / code 6**, with browser
+v6 bundled in the APK. Its release build and security checks passed. The ordinary
+update preserved all 65 prior visible run IDs. One new retry-wait check showed
+Running during backoff and after Pause/Resume, then Cancelled after Cancel and
+cold reopen, with service/wake cleanup and exactly 66 expected visible run IDs.
+A bundled-v6 native browser case then passed with the correct count of three,
+AMBER-472, all three readings and exact source title/full 319-character URL.
+Both live MCP calls completed; service and wake lock were released. Full history
+preserved exactly 67 expected visible run IDs, including all 66 prior runs.
+Only the owned test tab was closed, preserving the seven baseline tabs. The
+reasoner took 290.797 seconds on the emulator, not phone-performance evidence.
+These bounded checks do not establish a complete consumer release.
+
+Earlier rc.4 checks passed long-URL delivery, truncated/oversized refusal and
+explicit process-loss recovery. OAuth browser handoff and cancellation passed;
+actual account login/refresh remain unaccepted. A controlled amber-violet-amber
+sequence passed with the same externally imported v6 bundle, pinned models and
+4096-token contexts on rc.4.
+Each live MCP run returned the explicit count, page code, all readings and exact
+source title/full URL; the final amber had no violet carryover. Exactly 60
+expected visible run IDs remained, with no active worker or wake lock. This
+accepts only the bounded imported-flow method on rc.4, not arbitrary-page
+accuracy; the separate bundled rc.5 case is recorded above. Ordinary download transfer/recovery
+remains blocked by Android validated-network connectivity. Actual provider
+login/refresh, Doze-specific and physical-phone
+behavior, and matching source/APK publication remain open. The private rc.4
+curated source and unpublished draft are preserved; matching rc.5 publication
+is pending. The consumer release is not yet ready. See
+[versioning](../../docs/VERSIONING.md).
 
 ## Local prerequisites
 
@@ -141,7 +161,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.4` (code `5`), read from the root Cargo manifest through
+`0.1.0-rc.5` (code `6`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. A private build signed by your
 own key cannot update an installation signed by another publisher. This is a
 build recipe; physical-phone acceptance and public APK delivery remain unfinished.

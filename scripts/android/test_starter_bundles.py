@@ -109,7 +109,7 @@ class StarterBundles(unittest.TestCase):
                                 "require": ["tabId"], "forbid": ["sessionId", "selector"]},
         })
         tasks = registry["tasks"]
-        self.assertEqual((plan["version"], registry["version"]), (5, 5))
+        self.assertEqual((plan["version"], registry["version"]), (6, 6))
         self.assertEqual(plan["limits"]["maxSteps"], 3)
         self.assertEqual(plan["limits"]["maxReasonerCalls"], 1)
         expected_chain = (("open_page", "open-page", "read_page"),

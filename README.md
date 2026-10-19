@@ -16,7 +16,8 @@ text** and **Browse and summarize** starters. Native models load on first slot
 use after checksum verification. Status shows verification/loading/generation;
 lost workers require explicit Resume. Safety/review fixes, interruptible retries,
 durable cancellation, readable sorted history and typed bridge errors are also
-present. These changes still need a matching combined native APK/device check.
+present. The installed rc.5 APK has bounded update and retry-wait acceptance;
+its bundled-v6 browser sanity check also passed.
 
 Earlier APKs completed native paired inference and the browser v4 example.org
 flow on an 8 GiB API 36 x86_64 emulator using manual Bearer authentication.
@@ -27,16 +28,38 @@ runs. Queue persistence, Cancel/Retry and free-space preflight also passed;
 ordinary download transfer/recovery and real OAuth provider login/refresh remain
 unaccepted. That APK is held in an older private `v0.1.0-rc.1` draft.
 
-The next configured build candidate is **0.1.0-rc.4 / code 5**; its build,
-signing and device checks are pending. The installed rc.3/code 4 APK remains in
-an unpublished private draft. It preserved all 49 prior visible runs and opened
-the exact supplied browser URL, but its tool-call response failed before page
-reading. The new transport diagnostics are not in that APK. Earlier rc.2/code 3
-update/recovery evidence remains attached to its own build.
-Remaining acceptance includes ordinary download transfer/recovery, real
-provider login/refresh, an updated combined native APK and an S21-class arm64
-phone. Stub/scripted checks establish their own behavior, not real inference or
-live-service acceptance. See [versioning](docs/VERSIONING.md).
+The current signed, installed candidate is **0.1.0-rc.5 / code 6**, with browser
+v6 bundled in the APK. Its release build and security checks passed. The ordinary
+update preserved all 65 prior visible run IDs. One new retry-wait check showed
+Running during backoff and after Pause/Resume, then Cancelled after Cancel and
+cold reopen, with service/wake cleanup and exactly 66 expected visible run IDs.
+A bundled-v6 native browser case then passed with the correct count of three,
+AMBER-472, all three readings and exact source title/full 319-character URL.
+Both live MCP calls completed; service and wake lock were released. Full history
+preserved exactly 67 expected visible run IDs, including all 66 prior runs.
+Only the owned test tab was closed, preserving the seven baseline tabs. The
+reasoner took 290.797 seconds on the emulator, not phone-performance evidence.
+These bounded checks do not establish a complete consumer release.
+
+Earlier rc.4 checks passed exact long-URL delivery, separate truncated/oversized
+refusal and explicit recovery after process loss. OAuth browser handoff and
+cancellation passed without accepting account login/refresh.
+
+Browser v6 retains v5's exact task bindings and requests a direct answer,
+a count when requested and the source title/URL. A controlled amber-violet-amber
+sequence passed with the same externally imported v6 bundle, pinned models and
+4096-token contexts on the rc.4 executor. All three live MCP runs returned the
+explicit count, page code, all readings and exact source title/full URL; the
+amber repeat contained no violet carryover. Final enumeration preserved exactly
+60 expected visible run IDs, with no active worker or wake lock. This bounded
+known-input result does not establish arbitrary-page accuracy or accept rc.5.
+Those imported-flow results belong to rc.4, separate from the completed
+bundled rc.5 sanity case. Ordinary download transfer/recovery remains blocked by Android
+validated-network connectivity. Actual provider login/refresh, Doze-specific
+and physical-phone behavior, and matching source/APK publication remain open. The private rc.4
+curated source and unpublished draft are preserved; matching rc.5 publication
+is pending. The consumer release is not yet ready. See
+[versioning](docs/VERSIONING.md).
 
 The intended experience is install → sign in → choose a supplied flow → provide
 starting input → watch progress and results. A connected browser may run on a PC

@@ -1,6 +1,6 @@
 schemaVersion: ledger.task-registry.v1
 id: browser-summary
-version: 5
+version: 6
 tasks:
   open-page:
     model: coder
