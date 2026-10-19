@@ -7,21 +7,30 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
-The next configured candidate is **0.1.0-rc.4**, with Android **versionCode 5**
-from `[workspace.metadata.android].version-code` in the root manifest. It includes
-the transport-diagnostic follow-up. Its build, signing and device checks remain
-pending; the planned release tag is `v0.1.0-rc.4`.
+The current signed, installed private candidate is **0.1.0-rc.5 / code 6**,
+including bundled browser v6 and the retry-wait activity fix. Source `75d74be7`
+passed signed native release build and security checks. The verified APK has
+SHA-256
+`1d92d1caa57fb031d7b815c8fcbc9850ed6c66a877ce77c77b5176240ec2b1ce`.
+An ordinary update preserved all 65 prior visible runs. The matching retry-wait
+check passed Running/Pause/Resume/Cancel, cold Cancelled and service/wake cleanup,
+with exactly 66 expected visible run IDs afterward. A bundled-v6 browser case
+then passed: explicit count, AMBER-472, all three readings, exact title/full URL
+and both live MCP calls. Full history preserved all 66 prior UUIDs plus that
+run, exactly 67, with service/wake cleanup. The reasoner took 290.797 seconds
+on the emulator, not phone-performance evidence. The intended tag remains
+`v0.1.0-rc.5`.
 
-The last signed, installed candidate is **0.1.0-rc.3 / code 4**, from source
-`dc7a331`. Its build and signing checks passed; an ordinary emulator update
-preserved all 49 prior visible runs. A browser v5 attempt opened the exact
-supplied URL, but the tool-call response failed before page reading. Full flow,
-OAuth, download-transfer and physical-phone acceptance remain open. An
-unpublished private `v0.1.0-rc.3` draft retains that verified APK and checksum
-alongside its matching curated source.
-
-The transport-diagnostic follow-up is not in the rc.3 APK. Source-only updates
-do not imply new APK bytes or renewed device acceptance.
+Earlier rc.4/code 5 evidence remains attached to source `6deadf6` and its APK:
+long-URL delivery, truncated/oversized-result refusal, imported-v6 A-B-A accuracy,
+process-loss recovery, Cancel, Pause/Resume and notification checks retain their
+bounded scopes. The externally imported v6 results do not substitute for the
+separately verified bundled rc.5 sanity case. Actual provider login/refresh, ordinary download
+transfer/recovery, Doze-specific and physical-phone behavior remain open.
+Download scheduling is blocked by Android validated-network connectivity.
+The private rc.4 curated source `4ef7481` and unpublished draft are preserved.
+Matching rc.5 publication is pending. Source-only updates do not imply new APK
+bytes or renewed acceptance.
 
 The previously tested **0.1.0-rc.2 / code 3** APK retains its own source identity,
 bytes and acceptance evidence. Its checks do not establish acceptance of the

@@ -924,6 +924,10 @@ fn drive(
         Err(error) => return Err(anyhow!(error).context("clearing previous worker failure")),
     }
 
+    // Reconstruction is complete. Execution may wait in authored backoff
+    // without invoking a model, so Starting must not survive into that wait.
+    ctl.set_activity(None);
+
     // Cold resume carries its intent into worker startup; it must not depend
     // on a buffered command sent before the worker publishes its pause.
     let mut result = if resume_existing {
@@ -1582,6 +1586,123 @@ mod regression_tests {
             .err()
             .expect("MCP gateway ignored broken configured roots");
         assert!(error.to_string().contains("invalid app MCP root"));
+    }
+
+    #[cfg(all(feature = "stub", not(feature = "llama")))]
+    #[test]
+    fn drive_clears_starting_during_pre_generation_backoff_and_user_resume() {
+        let base = TrustTestDir::new("backoff-activity");
+        fs::create_dir_all(base.0.join("prompts")).unwrap();
+        fs::write(
+            base.0.join("prompts/minimal-summary.md"),
+            "{{ backoff_probe_unbound }}",
+        )
+        .unwrap();
+        let source = include_str!("../../../flows/examples/minimal-summary.flow.yaml")
+            .replace("timeoutS: 60", "timeoutS: 600")
+            .replace(
+                "    onVerified: done",
+                "    onVerified: done\n    onError: { retry: 1, backoffS: 300, then: done }",
+            );
+        let run_plan = RunPlan {
+            configuration: None,
+            argument_constraints: Default::default(),
+            plan: ExecutionPlan::from_yaml_str(&source).unwrap(),
+            registry: TaskRegistry::from_yaml_str(
+                include_str!("../../../flows/tasks/minimal-summary.tasks.yaml"),
+                &base.0,
+            )
+            .unwrap(),
+        };
+        let run_dir = RunDir::under(&base.0);
+        run_dir.create_dirs().unwrap();
+        let events_path = run_dir.path().join("events.jsonl");
+        let (handle, commands) = handle();
+        let ctl = handle.control.clone();
+        let worker_base = base.0.clone();
+        let (done, result) = channel();
+        let worker = std::thread::spawn(move || {
+            let guard = WorkerGuard(ctl.clone());
+            let outcome = drive(
+                run_plan,
+                worker_base,
+                run_dir,
+                String::new(),
+                None,
+                (ctl, commands),
+                false,
+            );
+            drop(guard);
+            let _ = done.send(outcome);
+        });
+        // Always wake/cancel the 300-second wait, including if an assertion fails.
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let wait_for = |ready: &dyn Fn() -> bool| {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !ready() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker did not reach expected state"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            };
+            wait_for(&|| {
+                fs::read_to_string(&events_path)
+                    .is_ok_and(|events| events.contains("prompt render: template variable"))
+            });
+            assert!(handle.control.worker_active());
+            assert_eq!(*handle.status.lock().unwrap(), RunPhase::Running);
+            assert_eq!(handle.control.activity(), None);
+            handle.pause();
+            wait_for(&|| matches!(*handle.status.lock().unwrap(), RunPhase::Paused { .. }));
+            assert_eq!(handle.control.activity(), None);
+            handle.resume();
+            wait_for(&|| matches!(*handle.status.lock().unwrap(), RunPhase::Running));
+            assert!(handle.control.worker_active());
+            assert_eq!(handle.control.activity(), None);
+        }));
+        handle.cancel();
+        let outcome = result.recv_timeout(Duration::from_secs(2));
+        // Join only after completion was reported, keeping failure cleanup bounded.
+        if outcome.is_ok() {
+            worker.join().unwrap();
+        }
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+            .expect("cancel did not wake the backoff worker")
+            .unwrap();
+        assert!(!handle.control.worker_active());
+        assert_eq!(
+            *handle.status.lock().unwrap(),
+            RunPhase::Failed {
+                reason: "cancelled".into()
+            }
+        );
+        let events: Vec<Value> = fs::read_to_string(events_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "error")
+                .count(),
+            1
+        );
+        assert!(events
+            .iter()
+            .any(|event| event["class"] == "verification-failed"
+                && event["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("backoff_probe_unbound"))));
+        assert!(!events.iter().any(|event| matches!(
+            event["type"].as_str(),
+            Some("model_call" | "tool_call_intent" | "tool_call_result")
+        )));
     }
 
     #[cfg(all(feature = "stub", not(feature = "llama")))]

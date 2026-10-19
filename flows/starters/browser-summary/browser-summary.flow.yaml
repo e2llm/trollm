@@ -1,6 +1,6 @@
 schemaVersion: ledger.execution-plan.v1
 id: browser-summary
-version: 5
+version: 6
 setup:
   path: setup.json
   sha256: 7ce6031b458969760322973f17260299dc8dc3beee0128a4a1bb2d777efc72a4
