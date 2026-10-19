@@ -11,8 +11,8 @@ Tokens and OAuth state use Keystore-backed encrypted storage by MCP server name.
 The source includes advanced per-flow overrides and bundled **Summarize text**
 and **Browse and summarize** starters, installed idempotently before flow listing. Flows
 appear above retained history, using their setup titles when available.
-Ordinary unattended download admission and live browser OAuth/refresh still need
-device acceptance; this is not a ready consumer journey.
+Ordinary download transfer/recovery and actual OAuth refresh still need device
+acceptance; this is not a ready consumer journey.
 
 New and retried model downloads wait for an unmetered network by default;
 metered use requires a choice on the preparation screen, and roaming is blocked.
@@ -35,55 +35,70 @@ Python helper tests verify that both committed assets match their sources.
 Setup pins Hugging Face revision URLs, sizes and SHA-256 hashes for the GGUF
 weights; no vision/audio projectors are downloaded.
 
-Earlier APKs passed native text-summary, paired Qwen/Gemma inference and browser
-v4 with manual Bearer authentication on an 8 GiB API 36 x86_64 emulator. The
-browser opened example.org once, read the exact returned tab and gave a complete
-page artifact to tool-free Gemma for an accurate visible summary. Native controls,
-background/return and debug process-loss recovery also passed within their scope.
-
-An older signed APK (`0.1.0 / code 2`) passed an ordinary emulator update,
-preserved prior history and completed a new native pair, leaving 46 runs.
-Queued-download persistence, Cancel/Retry and free-space preflight passed with
-small fixtures. This does not establish byte-transfer recovery. That APK remains
-in a private `v0.1.0-rc.1` draft; its evidence does not cover newer source.
-
-Current source loads native slots on first use, with streaming SHA-256 verification
-before construction and reuse within the run. UI/notifications show verification,
+Native slots load on first use, with streaming SHA-256 verification before
+construction and reuse within the run. UI/notifications show verification,
 loading and generation. Persistent interrupted progress needs explicit Resume
-after worker loss; startup never preloads models or replays a run. Safety/review
-fixes, interruptible retry delays, durable cancellation, readable sorted history
-and typed bridge errors are also present. The installed rc.5 APK passed bounded
-update, retry-wait and bundled-v6 browser checks.
+after worker loss; startup never preloads models or replays a run. Interruptible
+retry delays, durable cancellation, readable history and typed bridge errors
+are also present.
 
-The current signed, installed candidate is **0.1.0-rc.5 / code 6**, with browser
-v6 bundled in the APK. Its release build and security checks passed. The ordinary
-update preserved all 65 prior visible run IDs. One new retry-wait check showed
-Running during backoff and after Pause/Resume, then Cancelled after Cancel and
-cold reopen, with service/wake cleanup and exactly 66 expected visible run IDs.
-A bundled-v6 native browser case then passed with the correct count of three,
-AMBER-472, all three readings and exact source title/full 319-character URL.
-Both live MCP calls completed; service and wake lock were released. Full history
-preserved exactly 67 expected visible run IDs, including all 66 prior runs.
-Only the owned test tab was closed, preserving the seven baseline tabs. The
-reasoner took 290.797 seconds on the emulator, not phone-performance evidence.
-These bounded checks do not establish a complete consumer release.
+On 2026-10-19, signed **0.1.0-rc.5 / Android code 6** passed email-OTP OAuth
+login/callback and connection persistence after cold reopen on an 8 GiB API 36
+x86_64 emulator. Live MCP open/read and a bounded native browser known-answer
+check passed with Qwen3.5-0.8B and Gemma 4 E2B, including exact source information
+and service/wake-lock cleanup. Earlier scoped checks covered signed updates,
+controls, recovery and page guards on their respective builds.
 
-Earlier rc.4 checks passed long-URL delivery, truncated/oversized refusal and
-explicit process-loss recovery. OAuth browser handoff and cancellation passed;
-actual account login/refresh remain unaccepted. A controlled amber-violet-amber
-sequence passed with the same externally imported v6 bundle, pinned models and
-4096-token contexts on rc.4.
-Each live MCP run returned the explicit count, page code, all readings and exact
-source title/full URL; the final amber had no violet carryover. Exactly 60
-expected visible run IDs remained, with no active worker or wake lock. This
-accepts only the bounded imported-flow method on rc.4, not arbitrary-page
-accuracy; the separate bundled rc.5 case is recorded above. Ordinary download transfer/recovery
-remains blocked by Android validated-network connectivity. Actual provider
-login/refresh, Doze-specific and physical-phone
-behavior, and matching source/APK publication remain open. The private rc.4
-curated source and unpublished draft are preserved; matching rc.5 publication
-is pending. The consumer release is not yet ready. See
-[versioning](../../docs/VERSIONING.md).
+Actual OAuth refresh, ordinary download transfer/recovery, Doze-specific behavior
+and physical-phone acceptance remain open. Downloads are blocked by Android
+validated-network connectivity. Emulator results do not establish phone
+performance or arbitrary-page accuracy. No ready consumer APK/public release is
+provided; see [versioning](../../docs/VERSIONING.md).
+
+## On-device data layout
+
+The app passes `filesDir` to the Rust runtime, which creates
+`filesDir/trollm/` per ARCHITECTURE-ANDROID.md §8 (`flows/`, `tasks/`,
+`bundles/`, `models/`, `runs/`, `cache/mcp/`). Flow bundles are installed via
+the Install screen (uncompressed ustar tar + `manifest.json` with per-file
+sha256s; format decision documented in `crates/trollm-uniffi/src/tar.rs`);
+flows with setup descriptors use the app's model preparation/download screen.
+Downloads are sequential, size/SHA-256 verified and published to immutable
+hash-named files in app-specific external storage. Rust rehashes weights before
+native loading; effective paths/settings are saved per run for cold resume.
+Legacy manually provisioned `models/<slot>.gguf` plus matching
+`models/<slot>.gguf.sha256` remain supported. Airgap bundles can still be
+installed from the file picker after `adb push`.
+
+
+## Run history and recovery
+
+The flow list discovers durable run UUIDs from app preferences and the runtime's
+`trollm/runs` directories. Rows show the available flow title/id, start time and
+outcome, newest first, with the UUID underneath. Missing or corrupt metadata
+keeps the row accessible with unknown fields. Lightweight snapshot summaries
+avoid scanning event logs; active rows refresh while the screen is visible.
+Back keeps history; selection/input survives
+activity recreation, and launching the app restores the last selected run.
+Notifications open their run UUID. Existing runs can be viewed even if their
+original flow is no longer installed. On process restart, Resume invokes the
+runtime's cold-recovery API for that UUID and reattaches foreground ownership;
+Pause/Cancel need a live runtime handle and expose FFI errors in the UI.
+
+Pause/Cancel also interrupt retry delays. Resume continues the remaining delay;
+cancellation skips authored retries and persists a cancelled outcome for cold
+history. Native inference and synchronous network calls still observe control
+at their next boundary. User pause remains an in-process hold; process loss
+requires explicit Resume under the existing recovery safeguards.
+
+The foreground service observes each UUID once and retains shared ownership
+until all attached runs finish. A polling error does not remove an owner.
+The existing one-hour wake-lock ceiling remains. Pure Kotlin/JUnit tests cover bounded bundle input, identity and service ownership;
+device navigation/restart and real FFI checks provide separate integration validation.
+
+Bindings generation uses `--metadata-no-deps --no-format`: exported bridge
+types all belong to the workspace crate, so resolving optional/platform-only
+dependencies and invoking an external Kotlin formatter are unnecessary.
 
 ## Local prerequisites
 
@@ -162,9 +177,7 @@ Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
 `0.1.0-rc.5` (code `6`), read from the root Cargo manifest through
-`cargo metadata --no-deps --offline --locked`. A private build signed by your
-own key cannot update an installation signed by another publisher. This is a
-build recipe; physical-phone acceptance and public APK delivery remain unfinished.
+`cargo metadata --no-deps --offline --locked`. This is a build recipe; physical-phone acceptance and public APK delivery remain unfinished.
 
 Run only flows from authors you trust. Bundles are not publisher signed and
 can request remote tool calls that read, send or change data using granted
@@ -190,21 +203,17 @@ effective model paths/settings are saved per run for cold resume.
 Legacy `models/<slot>.gguf` plus matching `models/<slot>.gguf.sha256` remain
 supported. Manual Bearer tokens are captured per gateway. OAuth runs retain the
 same grant and endpoint through refresh and cold resume; logout or a replacement
-login cannot silently switch their account. Live sign-in/refresh, byte-transfer recovery,
-unattended downloads and physical arm64 acceptance remain open. Earlier APKs
-passed debug process-loss recovery and ordinary signed update/paired-inference
-checks within the historical scope above.
-The browser starter passed on the emulator with manual
-Bearer setup. The tool-free Qwen/Gemma pair and advanced model overrides also
-passed on an 8 GiB emulator.
+login cannot silently switch their account. Actual refresh, download
+transfer/recovery and physical arm64 acceptance remain open. The emulator login and native browser result above establish only their
+recorded scope.
 Never put credentials in a flow bundle.
 
-## Android-installed corporate CAs
+## Android-installed additional CAs
 
 Android HTTPS connections, including model downloads through DownloadManager,
 trust system roots and CAs installed by the user or device administrator. This
 applies to both debug and release builds. Normal certificate-chain and hostname
-verification remain enabled; no corporate certificate is embedded in the APK.
+verification remain enabled; no deployment certificate is embedded in the APK.
 This deliberately trusts all CAs in the device user's CA store.
 
 Install an approved CA through Android Settings → Security & privacy → More
