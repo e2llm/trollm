@@ -15,3 +15,18 @@ apps/android/app/src/main/jniLibs/
 **/__pycache__/
 *.jks
 *.keystore
+
+# Local credentials, agent state and diagnostics never belong in source.
+/.agents/
+/.codex/
+/.aws/
+/.claude/
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.log
+/reviews/
+/review-archive/

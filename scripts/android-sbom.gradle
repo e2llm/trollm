@@ -1,5 +1,5 @@
 // Export the selected JVM dependency graph without an additional Gradle plugin.
-// Invoke with --init-script ../../ci/android-sbom.gradle :app:exportAndroidSbom.
+// Invoke with --init-script ../../scripts/android-sbom.gradle :app:exportAndroidSbom.
 import groovy.json.JsonOutput
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.UnresolvedDependencyResult
