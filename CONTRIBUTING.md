@@ -1,11 +1,44 @@
 # Contributing to trollm
 
-Use this repository's Issues and contribution channel for reports and changes.
-Describe the problem, intended behavior, relevant source revision and validation.
-Coordinate specification, architecture and product design changes with the
-maintainer. A curated source checkout has separate history from the development
-repository. For vulnerabilities, follow [SECURITY.md](SECURITY.md); do not post
-sensitive details in public Issues.
+Use [GitHub Issues](https://github.com/e2llm/trollm/issues) for community bug
+reports, questions and proposed improvements, and open pull requests against
+GitHub `main`. Contributors do not need access to the development repository.
+If you already work in that repository, use its existing issue/MR workflow.
+For vulnerabilities, follow [SECURITY.md](SECURITY.md); do not post sensitive
+details in Issues or pull requests.
+
+Agent-assisted contributions are welcome. Start from [AGENTS.md](AGENTS.md),
+review the generated changes and run the relevant checks. The contributor is
+responsible for the patch and its validation regardless of the tools used.
+
+## Choose and submit a change
+
+- Browse [good first issues](https://github.com/e2llm/trollm/labels/good%20first%20issue)
+  for bounded starting points and [help wanted](https://github.com/e2llm/trollm/labels/help%20wanted)
+  for larger contributions. The [product plan](docs/PRODUCT-PLAN.md) gives context;
+  a planned feature is not necessarily ready to implement.
+- Describe the problem, intended behavior, relevant source/build revision and
+  how to reproduce it. Include only sanitized examples and diagnostics.
+- Discuss specification, architecture and product design changes with the
+  maintainer before implementing them. Routine fixes within the current contract
+  can go straight to a focused pull request.
+- Explain what changed and why, link the issue if there is one, and report the
+  checks actually run and their limits. Include tests for changed behavior where
+  useful; documentation-only changes do not need unrelated builds.
+
+### How a GitHub pull request reaches the source tree
+
+GitHub contains a curated source tree with separate history from the development
+repository. Maintainers review a GitHub pull request, integrate accepted changes
+into the development tree while retaining contributor attribution, run its
+checks, and publish the resulting curated snapshot. The maintainer links that
+GitHub commit back to the pull request before closing it as integrated. A public
+pull request may therefore be closed without GitHub marking it as merged.
+
+Do not merge a GitHub-only change and assume it will survive the next export.
+Maintainers must first integrate it into the source tree or its export policy.
+Contributors should branch from GitHub `main`; they do not need to reproduce the
+private delivery setup or work with the other repository's history.
 
 ## Start with the current scope
 
@@ -16,6 +49,11 @@ qualifications define current behavior. [Flow contract direction](docs/FLOW-CONT
 and the [authoring guide](docs/FLOW-AUTHORING.md) include proposed work, not an
 implemented replacement format. Follow [versioning](docs/VERSIONING.md) for the
 shared Rust/Android release identity and Android update codes.
+
+For a small end-to-end source example, follow [Anatomy of a
+flow](docs/ANATOMY-OF-A-FLOW.md). It uses the current format and an existing
+scripted executor test before introducing MCP-backed flows. Check
+[third-party notices](THIRD_PARTY_NOTICES.md) when adding or changing dependencies.
 
 ## Find the implementation
 

@@ -5,6 +5,10 @@ actions F1–F4 in the [product plan](PRODUCT-PLAN.md). The new metadata and aut
 pack are not implemented yet. For executable material today, see the
 [flow references and their limits](../flows/README.md).
 
+For a walkthrough of the implemented format, read [Anatomy of a
+flow](ANATOMY-OF-A-FLOW.md). It follows the actual plan, registry, prompt and
+scripted executor test; the authoring pack described below remains proposed.
+
 Start with the [minimal summary reference](../flows/README.md#minimal-summary)
 for a complete, directly authored v1 plan, registry and prompt. It requires no
 browser recording or MCP connection. Its regression test uses a scripted model;

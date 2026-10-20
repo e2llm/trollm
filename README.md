@@ -40,6 +40,8 @@ ready; source updates do not renew acceptance of different APK bytes.
 
 ## Start here
 
+- [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md): a small current-format example
+  and its scripted executor test, with no Android SDK or model weights required
 - [Agent onboarding](AGENTS.md): reading order, runtime path and source map
 - [Contributing](CONTRIBUTING.md): portable checks and change workflow
 - [Product direction and current limits](docs/PRODUCT-PLAN.md)
@@ -49,6 +51,7 @@ ready; source updates do not renew acceptance of different APK bytes.
 - [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md) and
   [authoring guide](docs/FLOW-AUTHORING.md): proposed authoring work
 - [Versioning](docs/VERSIONING.md) and [security policy](SECURITY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md): runtime dependencies and model sources
 
 `crates/` contains the executor, model interface, MCP gateway and UniFFI bridge.
 `apps/android/` contains the app. `flows/` and `schemas/` contain current
