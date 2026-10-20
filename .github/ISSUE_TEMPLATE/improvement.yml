@@ -1,0 +1,27 @@
+name: Improvement or flow idea
+description: Describe a useful change, question or workflow with a concrete outcome.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or question
+      description: Who needs this and what is difficult with the current behavior? Link a relevant public example or document if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior. For a flow, include inputs, expected results and any external actions or required tools. Use placeholders for private data.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Possible approach and constraints
+      description: Optional implementation idea, alternatives or validation approach. Contract and architecture changes need maintainer discussion before implementation.
+  - type: markdown
+    attributes:
+      value: |
+        See [CONTRIBUTING.md](https://github.com/e2llm/trollm/blob/main/CONTRIBUTING.md) and the [product plan](https://github.com/e2llm/trollm/blob/main/docs/PRODUCT-PLAN.md).
+        Please keep credentials, private endpoints and personal data out of the issue.

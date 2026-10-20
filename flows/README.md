@@ -3,6 +3,9 @@
 These files illustrate the execution-plan and task-registry contracts. They are
 source inputs, rather than prebuilt bundles ready to install in the Android app.
 
+New to the format? Start with [Anatomy of a flow](../docs/ANATOMY-OF-A-FLOW.md),
+which connects the minimal plan, registry, prompt and scripted executor test.
+
 In the current v1 runtime, `input.promptTemplate` is reserved metadata and is not
 rendered. Task-registry `prompt` files supply model instructions and can reference
 `{{ user_input }}`. Existing example values are retained for compatibility; editing

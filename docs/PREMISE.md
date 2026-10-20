@@ -16,8 +16,10 @@ hardware (Android phone first; Raspberry Pi / Linux edge boxes later) with a
   policies (cache / paginate / shape / mutation journaling), enforces budgets, and records
   every transition in an append-only event log.
 
-Current model targets are Qwen3.5-0.8B and Gemma 4 E2B Q4 text-only; exact files,
-role assignment and inference settings are pending the working reference setup.
+The current browser starter pins a Qwen3.5-0.8B Q4_K_M coder and a Gemma 4 E2B IT
+Q4_K_M reasoner, both used for text. Its [setup descriptor](../flows/starters/browser-summary/setup.json)
+records the exact model files, revisions, checksums and settings. The
+[minimal summary](ANATOMY-OF-A-FLOW.md) uses only the coder slot.
 The runtime's explicit transition rules determine progress through the authored
 flow. See the [product plan](PRODUCT-PLAN.md) for the application experience and
 the [flow ICD direction](FLOW-CONTRACT-DIRECTION.md) for planned format changes.

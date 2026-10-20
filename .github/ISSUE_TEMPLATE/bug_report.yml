@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible problem in the app, runtime or development tools.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        trollm is an integration prototype. Please include enough detail to reproduce the problem.
+        Do not include credentials, private endpoints, personal flow inputs or unsanitized logs.
+        For security vulnerabilities, follow [SECURITY.md](https://github.com/e2llm/trollm/blob/main/SECURITY.md).
+  - type: textarea
+    id: identity
+    attributes:
+      label: Source or app build
+      description: Source commit, or APK version and version code. Add the APK checksum if available.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Relevant OS/tool versions, device or emulator, Android API level, and whether this uses scripted responses or real models/MCP. Omit device serials and private service addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest useful reproduction, including a public flow/example name or sanitized configuration when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics and checks
+      description: Optional error text, small log excerpt, screenshot or commands already tried. Run logs can contain tool arguments, results and other private data; review them before sharing.
