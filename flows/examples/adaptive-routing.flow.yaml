@@ -1,0 +1,39 @@
+schemaVersion: ledger.execution-plan.v1
+id: adaptive-routing
+version: 1
+limits: { maxSteps: 10, maxReasonerCalls: 4, maxTokensTotal: 4096, timeoutS: 180, artifactMaxMb: 1 }
+onLimit: abort
+models:
+  coder: { ctx: 4096 }
+  reasoner: { ctx: 4096 }
+mcp: { servers: [], policies: {} }
+entryStep: advise
+nodes:
+  advise:
+    kind: task
+    taskRef: assess-text
+    onVerified: decide
+  decide:
+    kind: task
+    taskRef: choose-next
+    promptSupplement: |
+      You are choosing the next step, not writing the summary.
+      Choose summarize when the supplied text supports a useful summary,
+      unresolved when essential information is missing, or reconsider when
+      another bounded assessment would help. Use only the declared route tool.
+    routes:
+      summarize: summarize
+      unresolved: explain
+      reconsider: advise
+  summarize:
+    kind: task
+    taskRef: report
+    promptSupplement: Summarize the supplied text using the advisory assessment. Add no unsupported facts.
+    onVerified: done
+  explain:
+    kind: task
+    taskRef: report
+    promptSupplement: Explain what information is missing and why no useful summary was produced.
+    onVerified: unresolved
+  done: { kind: end, outcome: succeeded }
+  unresolved: { kind: end, outcome: failed }

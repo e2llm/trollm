@@ -1,5 +1,9 @@
 # Authoring a flow with an LLM
 
+For the approved coder-directed routing and node-context extension, start with
+[Coder-directed flows](ADAPTIVE-FLOWS.md). That bounded implementation contract
+is separate from the wider proposed authoring pack below.
+
 Status: **authoring direction, 2026-10-11**. The intended workflow below guides
 actions F1–F4 in the [product plan](PRODUCT-PLAN.md). The new metadata and authoring
 pack are not implemented yet. For executable material today, see the

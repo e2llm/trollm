@@ -17,8 +17,13 @@ BROWSER_SOURCE = REPO / "flows/starters/browser-summary"
 BROWSER_ASSET = ASSET.with_name("browser-summary.tar")
 BROWSER_FILES = ("browser-summary.flow.yaml", "browser-summary.tasks.yaml", "setup.json",
                  "prompts/open-page.md", "prompts/read-page.md", "prompts/summarize-page.md")
+CHECK_TOTAL_SOURCE = REPO / "flows/starters/check-total"
+CHECK_TOTAL_ASSET = ASSET.with_name("check-total.tar")
+CHECK_TOTAL_FILES = ("check-total.flow.yaml", "check-total.tasks.yaml", "setup.json",
+                     "prompts/sum.md", "prompts/compare.md", "prompts/advise.md", "prompts/report.md")
 STARTERS = {"text-summary": (SOURCE, ASSET, FILES),
-            "browser-summary": (BROWSER_SOURCE, BROWSER_ASSET, BROWSER_FILES)}
+            "browser-summary": (BROWSER_SOURCE, BROWSER_ASSET, BROWSER_FILES),
+            "check-total": (CHECK_TOTAL_SOURCE, CHECK_TOTAL_ASSET, CHECK_TOTAL_FILES)}
 
 
 def build_bundle(source=SOURCE, *, starter="text-summary"):

@@ -8,9 +8,10 @@ The included app has flow installation, run history, foreground run ownership
 and execution controls. Source includes verified model downloads and a browser
 OAuth client with grant-bound refresh; manual Bearer setup remains supported.
 Tokens and OAuth state use Keystore-backed encrypted storage by MCP server name.
-The source includes advanced per-flow overrides and bundled **Summarize text**
-and **Browse and summarize** starters, installed idempotently before flow listing. Flows
-appear above retained history, using their setup titles when available.
+The source includes advanced per-flow overrides and bundled **Summarize text**,
+**Browse and summarize** and **Check a total** starters, installed idempotently
+before flow listing. Flows appear above retained history, using their setup
+titles when available.
 Ordinary download transfer/recovery and actual OAuth refresh still need device
 acceptance; this is not a ready consumer journey.
 
@@ -29,9 +30,22 @@ to reading; it rejects a conflicting model ID before dispatch and does not list
 other tabs. Qwen opens and reads the page; Gemma receives its
 exact artifact and has no tools. Empty, truncated or oversized results fail.
 
+The **Check a total** starter asks for text describing exactly two item amounts
+and a separate budget, entered as a decimal without currency signs. Qwen selects
+the two operands for the built-in calculator; the runtime binds the saved sum
+and your budget for comparison. Gemma receives the original input and both exact
+results, then Qwen produces a final report. It needs no MCP connection or sign-in
+and reuses the browser starter's pinned models. It performs no browser or purchase
+actions. Arithmetic is exact for the selected operands; selection and advice are
+model work. Its scripted tests do not establish native-device acceptance.
+
+Current source prepares **0.1.0-rc.6 / Android code 7** with `local.calculate`
+and this starter. Source checks cover scripted execution, pinned bundles and
+native tool-fence grammar; rc.6 real-model and device acceptance remain open.
+
 Edit starters under `flows/starters/`, update their setup pins if needed, and run
 `python3 scripts/android/make_starter_bundles.py` from the repository root. The
-Python helper tests verify that both committed assets match their sources.
+Python helper tests verify that all three committed assets match their sources.
 Setup pins Hugging Face revision URLs, sizes and SHA-256 hashes for the GGUF
 weights; no vision/audio projectors are downloaded.
 
@@ -176,7 +190,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.5` (code `6`), read from the root Cargo manifest through
+`0.1.0-rc.6` (code `7`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. This is a build recipe; physical-phone acceptance and public APK delivery remain unfinished.
 
 Run only flows from authors you trust. Bundles are not publisher signed and

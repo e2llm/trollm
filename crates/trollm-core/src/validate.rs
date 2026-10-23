@@ -56,6 +56,11 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
         problems.push(format!("plan '{}': {error:#}", plan.id));
     }
 
+    if plan.mcp.servers.iter().any(|s| s.name == "flow")
+        || plan.mcp.policies.keys().any(|k| k.starts_with("flow."))
+    {
+        problems.push("flow is a reserved runtime namespace, not a remote server or policy".into());
+    }
     if let Some(setup) = &plan.setup {
         if let Err(problem) = setup.validate() {
             problems.push(problem);
@@ -84,15 +89,69 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
                 ));
             }
         }
+        if node
+            .prompt_supplement
+            .as_ref()
+            .is_some_and(|s| s.len() > 16 * 1024)
+        {
+            problems.push(format!("{}: promptSupplement exceeds 16 KiB", at(name)));
+        }
+        if let Some(routes) = &node.routes {
+            if routes.is_empty()
+                || routes.len() > 16
+                || routes.keys().any(|key| {
+                    let mut chars = key.bytes();
+                    key.len() > 64
+                        || !matches!(chars.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+                        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                })
+            {
+                problems.push(format!("{}: routes requires 1 through 16 ASCII identifier names, at most 64 characters", at(name)));
+            }
+            if node.on_verified.is_some() {
+                problems.push(format!(
+                    "{}: routes and onVerified are mutually exclusive",
+                    at(name)
+                ));
+            }
+            for target in routes.values() {
+                if matches!(
+                    target,
+                    Transition::Inline(InlineTransition {
+                        status: InlineStatus::Paused,
+                        resume_at: None,
+                        ..
+                    })
+                ) {
+                    problems.push(format!(
+                        "{}: paused route requires resumeAt continuation",
+                        at(name)
+                    ));
+                }
+                check_inline_resume(target, plan, &at(name), problems);
+                if let Transition::Node(target) = target {
+                    if !plan.nodes.contains_key(target) {
+                        problems.push(format!(
+                            "{}: route targets unknown node '{target}'",
+                            at(name)
+                        ));
+                    }
+                }
+            }
+        }
+        if node.kind != NodeKind::Task
+            && (node.routes.is_some() || node.prompt_supplement.is_some())
+        {
+            problems.push(format!("{}: task-only fields on other node kind", at(name)));
+        }
         match node.kind {
             NodeKind::Task => {
                 if node.task_ref.is_none() {
                     problems.push(format!("{}: task node missing taskRef", at(name)));
                 }
-                // Transition coverage (§4.2): a task always ends verified or in
-                // error; error is covered by the onError default, so onVerified
-                // is statically required.
-                if node.on_verified.is_none() {
+                // A successful task needs either its fixed verified edge or
+                // authored routes. Errors retain the onError default.
+                if node.on_verified.is_none() && node.routes.is_none() {
                     problems.push(format!(
                         "{}: task node missing onVerified (unhandled-transition would occur)",
                         at(name)
@@ -232,6 +291,7 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
         .flatten()
         .collect();
         for (key, t) in transitions {
+            check_inline_resume(t, plan, &at(name), problems);
             if let Transition::Node(target) = t {
                 if !plan.nodes.contains_key(target) {
                     problems.push(format!(
@@ -239,6 +299,21 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
                         at(name)
                     ));
                 }
+            }
+        }
+    }
+}
+
+fn check_inline_resume(t: &Transition, plan: &ExecutionPlan, at: &str, problems: &mut Vec<String>) {
+    if let Transition::Inline(inline) = t {
+        if let Some(target) = &inline.resume_at {
+            if inline.status != InlineStatus::Paused {
+                problems.push(format!(
+                    "{at}: resumeAt is only valid on paused transitions"
+                ));
+            }
+            if !plan.nodes.contains_key(target) {
+                problems.push(format!("{at}: resumeAt targets unknown node '{target}'"));
             }
         }
     }
@@ -339,6 +414,18 @@ fn check_plan_against_registry(
             ));
             continue;
         };
+        if matches!(
+            task.completion,
+            crate::registry::TaskCompletion::FlowRoute
+                | crate::registry::TaskCompletion::ToolResult
+        ) && matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.values().any(|o| matches!(o, NodeOutputBinding::FromModel { .. })))
+        {
+            problems.push(format!("plan '{}' node '{name}': tool-result/flow-route completion cannot bind model outputs", plan.id));
+        }
+        if (task.completion == crate::registry::TaskCompletion::FlowRoute) != node.routes.is_some()
+        {
+            problems.push(format!("plan '{}' node '{name}': flow-route requires routes, other completions require onVerified", plan.id));
+        }
         if !plan.models.contains_key(&task.model) {
             problems.push(format!(
                 "plan '{}' node '{name}': task '{task_ref}' uses model slot '{}' not declared in plan.models",
@@ -389,6 +476,9 @@ pub(crate) fn validate_mutation_safety(
                 let Some((server, tool_name)) = tool.split_once('.') else {
                     return false;
                 };
+                if server == "flow" {
+                    return false;
+                }
                 root.mcp
                     .policies
                     .get(tool)

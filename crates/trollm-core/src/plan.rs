@@ -181,12 +181,34 @@ pub enum Transition {
     Inline(InlineTransition),
 }
 
+/// New optional authored fields distinguish omission from explicit null.
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Err(serde::de::Error::custom("field must not be null"));
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InlineTransition {
     pub status: InlineStatus,
     #[serde(default)]
     pub reason: String,
+    #[serde(
+        rename = "resumeAt",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub resume_at: Option<String>,
 }
 
 /// Closed set per §4.2.
@@ -315,6 +337,18 @@ pub struct Node {
     pub verify: Option<NodeVerify>,
     #[serde(default)]
     pub on_verified: Option<Transition>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub routes: Option<BTreeMap<String, Transition>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub prompt_supplement: Option<String>,
     #[serde(default)]
     pub on_error: Option<OnError>,
 

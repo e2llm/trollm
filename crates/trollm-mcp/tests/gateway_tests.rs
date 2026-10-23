@@ -337,7 +337,12 @@ fn list_tools_via_streamable_http() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"list_issues"));
     assert!(names.contains(&"close_issue"));
-    assert!(tools.iter().all(|t| t.server == "tracker"));
+    assert!(tools
+        .iter()
+        .all(|t| t.server == "tracker" || t.server == "local"));
+    assert!(tools
+        .iter()
+        .any(|t| t.server == "local" && t.name == "calculate"));
     assert_eq!(server.count("list"), 1);
     assert!(server.count("initialize") >= 1);
 }

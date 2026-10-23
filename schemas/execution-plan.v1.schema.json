@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trollm.dev/schemas/execution-plan.v1.schema.json",
   "title": "ledger.execution-plan.v1",
-  "description": "Trollm execution plan (docs/ARCHITECTURE-ANDROID.md §3). All routing is authoring-time; node kinds and transition keys are closed sets.",
+  "description": "Trollm execution plan. Authored graph exits selected by deterministic completion or explicit coder flow.choose calls.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -42,10 +42,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "promptTemplate": {
-          "type": "string",
-          "description": "Reserved metadata; not rendered by the v1 runtime. Task-registry prompt files supply instructions and may reference {{ user_input }}."
-        }
+        "promptTemplate": { "type": "string", "description": "Reserved metadata; not rendered by the v1 runtime. Task-registry prompt files supply instructions and may reference {{ user_input }}." }
       }
     },
     "limits": {
@@ -61,10 +58,7 @@
         "artifactMaxMb": { "type": "integer", "minimum": 0 }
       }
     },
-    "onLimit": {
-      "description": "Terminal run-level budget policy.",
-      "enum": ["abort", "respond_partial"]
-    },
+    "onLimit": { "description": "Terminal run-level budget policy.", "enum": ["abort", "respond_partial"] },
     "models": {
       "type": "object",
       "description": "SLOTS ONLY. Weights are pinned by the app, never by the plan.",
@@ -94,10 +88,7 @@
             }
           }
         },
-        "policies": {
-          "type": "object",
-          "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Opaque to this schema."
-        }
+        "policies": { "type": "object", "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Opaque to this schema." }
       }
     },
     "entryStep": { "type": "string", "minLength": 1 },
@@ -115,10 +106,13 @@
         {
           "type": "object",
           "required": ["status"],
+          "if": { "properties": { "status": { "const": "failed" } } },
+          "then": { "not": { "required": ["resumeAt"] } },
           "additionalProperties": false,
           "properties": {
             "status": { "enum": ["paused", "failed"] },
-            "reason": { "type": "string" }
+            "reason": { "type": "string" },
+            "resumeAt": { "type": "string", "minLength": 1 }
           }
         }
       ]
@@ -185,7 +179,7 @@
         {
           "description": "kind: task",
           "type": "object",
-          "required": ["kind", "taskRef", "onVerified"],
+          "required": ["kind", "taskRef"],
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "task" },
@@ -202,24 +196,35 @@
               }
             },
             "onVerified": { "$ref": "#/$defs/transition" },
-            "onError": { "$ref": "#/$defs/onError" }
-          }
+            "onError": { "$ref": "#/$defs/onError" },
+            "routes": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 16,
+              "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$" },
+              "additionalProperties": {
+                "$ref": "#/$defs/transition",
+                "if": { "type": "object", "required": ["status"], "properties": { "status": { "const": "paused" } } },
+                "then": { "required": ["resumeAt"] }
+              }
+            },
+            "promptSupplement": { "type": "string", "maxLength": 16384, "description": "Inline task instructions, runtime-capped at 16 KiB UTF-8." }
+          },
+          "oneOf": [
+            {
+              "required": ["onVerified"],
+              "not": { "required": ["routes"] }
+            },
+            {
+              "required": ["routes"],
+              "not": { "required": ["onVerified"] }
+            }
+          ]
         },
         {
           "description": "kind: foreach",
           "type": "object",
-          "required": [
-            "kind",
-            "items",
-            "itemKey",
-            "bindAs",
-            "enumeration",
-            "ordering",
-            "body",
-            "outputs",
-            "onEmpty",
-            "onComplete"
-          ],
+          "required": ["kind", "items", "itemKey", "bindAs", "enumeration", "ordering", "body", "outputs", "onEmpty", "onComplete"],
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "foreach" },
@@ -256,11 +261,7 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "end" },
-            "outcome": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Subflows also use 'skipped'. Root frames route only 'succeeded' and 'failed'; anything else is the runtime unhandled-transition failure (§4.2)."
-            }
+            "outcome": { "type": "string", "minLength": 1, "description": "Subflows also use 'skipped'. Root frames route only 'succeeded' and 'failed'; anything else is the runtime unhandled-transition failure (§4.2)." }
           }
         }
       ]

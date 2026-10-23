@@ -1,135 +1,180 @@
 # Working in trollm
 
-## What this project does
+## What we are building
 
-trollm (pronounced “tro-le-lem”) is an Android-first runtime for explicit AI
-workflows using small local models, remote MCP tools and persistent working data.
-It is an integration prototype targeting Android 13/API 33+; source availability
-and passing host tests do not establish a ready consumer release. See the local
-README and product plan for current scope and acceptance gaps.
+trollm (pronounced “tro-le-lem”) is an Android app and Rust runtime for authored
+workflows using small local language models. A user chooses a flow, supplies
+input, and follows its progress. Tools run locally or through remote MCP
+(Model Context Protocol) servers. A browser can be on another computer.
 
-The Kotlin/Compose app prepares flows, models and connections, then calls Rust
-through UniFFI. `trollm-core` loads and validates plans and task registries and
-runs a deterministic stack machine over `task`, `foreach` and `end` nodes.
-`trollm-models` supplies model slots; the coder can use granted tools, while the
-`reasoner` slot is tool-free. `trollm-mcp` validates and dispatches tool
-calls through its gateway and policies. The executor records events, artifacts,
-budgets and recovery state. Android owns UI, credentials and run lifecycle,
-including a foreground service and wake lock while working. Lost workers require
-explicit Resume; opening the app does not preload models or replay runs.
+The design breaks a larger job into short model tasks. Ordinary code handles
+exact computation, saved data, allowed transitions and execution limits. This is
+an Android 13/API 33+ integration prototype. [README.md](README.md) records
+current capabilities and acceptance gaps.
 
-Model prose is advisory output. Deterministic verification checks declared
-structure and artifacts; it does not prove prose accuracy. Local inference also
-does not make remote-tool workflows offline or keep their tool data on-device.
+## The three roles
 
-## First-session reading spine
+Here, `coder` and `reasoner` name model roles **inside the app**:
 
-Read these before choosing where to change behavior:
-
-1. `README.md`; purpose, prototype status and entry points.
-2. `CONTRIBUTING.md`; checks and contribution workflow for this checkout.
-3. `docs/PRODUCT-PLAN.md`; priorities, agreed direction and deferred work.
-4. `docs/PREMISE.md`; design invariants and rationale.
-5. `docs/ARCHITECTURE-ANDROID.md`; execution contracts, especially the later
-   implementation qualifications and setup additions, not just the overview.
-6. `flows/README.md` and the minimal-summary plan, registry and prompt it links;
-   the smallest complete source example. Then read the relevant schema, parser
-   and tests for the area being changed.
-
-For Android work also read `apps/android/README.md`. For security-sensitive work
-read `SECURITY.md` and `docs/SECURITY-ENTERPRISE.md`. Use the validation/readiness
-record when available for the exact scope of device evidence.
-
-## Contracts and plans
-
-Current contracts live together in `schemas/`, the Rust parsers/validators and
-`docs/ARCHITECTURE-ANDROID.md`, with implementation qualifications in that document.
-If these disagree, report the concrete conflict before changing a consequential
-contract. `docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` include
-proposed work; do not implement their fields as if already accepted by v1.
-The existing optional pinned setup descriptor has its own
-`schemas/flow-setup.v1.schema.json`; inspect the actual reader before assuming a
-proposed setup feature is implemented.
-
-Task-registry prompt files supply model instructions and bindings such as
-`{{ user_input }}`. The plan's `input.promptTemplate` is reserved and inactive.
-The minimal-summary and ticket-triage references are exercised with scripted
-dependencies. Procurement is an incomplete design sketch, not an executable
-bundle. Android installation uses a hash-pinned bundle; see the bridge's bundle
-reader and the Android guide rather than inventing a packaging format.
-
-## Find the implementation
-
-| Area | Responsibility |
+| Role | Job |
 | --- | --- |
-| `crates/trollm-core/` | Plan/registry parsing, validation, executor, templates, events, artifacts and durable state; integration tests in `tests/`. |
-| `crates/trollm-models/` | Model-slot interface, tool-call fences, chat templates and optional llama.cpp backend. |
-| `crates/trollm-mcp/` | MCP transport, gateway, tool schemas, policies and cache. |
-| `crates/trollm-uniffi/` | Android-facing API, bundle/setup handling, run configuration and history. |
-| `apps/android/app/src/main/` | Kotlin/Compose UI, model preparation, connections/secrets and run service; JVM tests in `../test/`. |
-| `flows/` | Reference plans, task registries, prompts and bundled-starter source inputs. |
-| `schemas/` | Versioned execution-plan and setup JSON schemas. |
-| `scripts/` | Portable validation and device helpers; development delivery tooling may also be present. |
-| `docs/` | Architecture, product direction, security, versioning and development guidance. |
+| **Coder** | Reads instructions and observations; calls explicitly granted tools or writes prose. |
+| **Reasoner** | Receives evidence and a question; returns advice in ordinary text (prose). It has no tools. |
+| **Runtime / executor** | Rust code that runs the graph, checks calls and outputs, saves results, and enforces step/token/time limits and recovery rules. Older docs also call it the “ledger.” |
 
-Keep the Rust workspace and Android app together. Preserve existing user edits.
-Do not hand-edit generated UniFFI bindings, libraries, APKs or other build outputs;
-change their sources and use the documented generation path.
+A flow can use one or both model roles. The graph declares the possible next
+steps. Some transitions are fixed; a coder can also choose an authored exit with
+the `flow.choose` tool. The runtime validates and records that choice. It never
+selects a branch by interpreting words in the reasoner's answer.
 
-## Make and check changes
+### Concrete example: Check a total
 
-Specification, architecture and product design decisions belong to the main
-agent. Sub-agents bring material decisions to it before implementation; the main
-agent consults the user when their input is needed. Within approved design, make
-routine implementation choices and finish the work. If agents are used, give them
-bounded tasks and distinct file ownership. Keep coordination simple.
+The existing [starter](flows/starters/check-total/) accepts text such as
+“Two items cost 39.99 and 40.10” plus a separate budget of 80:
 
-Check available RAM and disk before builds or downloads. Reuse installed tools,
-bound concurrency and keep host checks small. On constrained hosts, leave
-Android/llama.cpp compilation to the existing build environment; do not download
-model weights or SDK/NDK installations. For device work use the configured ADB
-connection, an explicit serial and one device-action owner. Follow the Android
-guide and any device runbook available in the checkout.
+1. A coder selects the amounts and calls the phone's `local.calculate` tool to
+   add them. The result contains `80.09`.
+2. Another coder task calls the calculator to compare the saved sum with the
+   supplied budget. Runtime argument bindings supply those exact values.
+3. The tool-free reasoner receives the original text and both actual calculator
+   results, then gives advice in prose.
+4. A coder receives that evidence and advice and writes the final report.
 
-Rust is pinned by `rust-toolchain.toml`. Select relevant checks from
-`CONTRIBUTING.md`; the common host checks, run from the repository root, are:
+The calculator performs arithmetic; the model selects what to calculate. Correct
+arithmetic does not prove it selected the right amounts. Likewise, a successful
+run means its declared checks passed, not that all model statements are true.
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace --no-default-features
-cargo test --locked -p trollm-uniffi --features stub
-python3 scripts/release_version.py --check
-python3 scripts/validate-examples.py
-scripts/check-wrapper.sh
-python3 -m unittest discover -s scripts/android -p 'test_*.py'
-```
+## What makes a flow
 
-Python dependencies are listed in `scripts/requirements.txt`; use an existing suitable
-environment when available. Default/stub tests require no model weights. The
-bridge without either `stub` or `llama` compiles but cannot start a model run.
-Native checks and Android commands have separate requirements in the contribution
-and Android guides. Run relevant tests once changes settle. Report whether
-validation used scripted/stub dependencies, JVM tests, real models or live MCP;
-none substitutes for another. Let long build jobs finish without polling loops.
+Start with [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md), which walks through
+the complete, tool-free minimal-summary example and its existing test.
 
-Preserve contract compatibility and update schema, reader, examples and consumers
-together when an approved format change requires it. Follow `docs/VERSIONING.md`
-for shared Rust/Android versions and increasing Android update codes. Keep changes
-reviewable and report remaining checks or acceptance gaps. Follow the maintainer's
-authorization for merging, deployment and publication; do not add approval steps
-for actions they have already authorized.
+| Source | What belongs there |
+| --- | --- |
+| `*.flow.yaml` (plan) | Graph nodes, transitions, run budgets and references to tasks. A node is one position in the graph. |
+| `*.tasks.yaml` (registry) | Reusable task definitions: model role, prompt file, tool grants, generation bounds, completion mode and expected outputs. A node's `taskRef` selects a registry key. |
+| Prompt `.md` files | Instructions for a model task, with bindings such as `{{ user_input }}`. A node's `promptSupplement` adds instructions for that step. |
+| Optional `setup.json` | Android input fields, pinned model downloads/settings and connection defaults. Credentials stay outside it. |
 
-## Checkout and security boundaries
+An **artifact** is saved working data, such as an original tool result. A
+**binding** passes a saved value to a later task without asking a model to
+transcribe it. Preserve original evidence alongside model advice.
 
-The public source tree is curated from a development checkout and has separate
-history and fewer delivery/operator files. This onboarding file applies to both.
-Use the local `CONTRIBUTING.md` for the correct contribution destination. Where
-export tooling is present, follow its manifest and overlays when changing exported
-content. Source refreshes do not publish APKs or prove device acceptance; omitted
-internal tooling is not required for portable source checks.
+**Edit the registry-linked prompt to change model instructions.** The plan's
+`input.promptTemplate` field is reserved and inactive.
 
-Keep credentials, account tokens, private endpoints, device details, model weights,
-caches and unsanitized diagnostic artifacts out of source and public reports.
-Use placeholder configuration in examples and the existing credential storage
-paths in application code. Follow `SECURITY.md` for private vulnerability reporting.
+Android installs a bundle containing the plan, registry, prompts and optional
+setup, checked against a manifest of file checksums. Use the existing bundle generator and
+reader; a loose YAML file is not an installable bundle. A new runtime capability
+requires an APK containing its code, as well as a flow that uses it.
+
+## Choose the right place to change
+
+Workflow-specific steps and instructions belong in `flows/`. Reuse generic
+tasks and tools. A missing general runtime capability needs a design discussion
+with the maintainer before implementation.
+
+| Change | Start here |
+| --- | --- |
+| A flow's procedure, prompts or model/setup defaults | `flows/`; [flow guide](flows/README.md) |
+| Routing, validation, variables, artifacts or recovery | `crates/trollm-core/src/`; start with `plan.rs`, `registry.rs`, `validate.rs`, `exec.rs` |
+| Tool dispatch, arguments, policies or an isolated built-in operation | `crates/trollm-mcp/src/`; `gateway.rs`, `policy.rs`, `local.rs` |
+| Model calls, tool-call syntax, chat templates or llama.cpp | `crates/trollm-models/src/` |
+| Android bundle/setup handling or the Kotlin-to-Rust API | `crates/trollm-uniffi/src/` |
+| Screens, downloads, credentials or run lifecycle | `apps/android/app/src/main/` |
+
+The Kotlin/Compose app calls Rust through a **UniFFI** generated bridge. Rust
+uses llama.cpp for local inference. Browser starters use the separate E2LLM
+service for browser perception and readiness; trollm coordinates its tool calls.
+
+## Read for the task at hand
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for workflow/checks and
+[PRODUCT-PLAN.md](docs/PRODUCT-PLAN.md) for priorities. Before changing behavior,
+read [PREMISE.md](docs/PREMISE.md) and the relevant contract:
+
+| Working on | Read next |
+| --- | --- |
+| Flow control, step instructions or generation limits | [ADAPTIVE-FLOWS.md](docs/ADAPTIVE-FLOWS.md); the executable `flows/examples/adaptive-routing.flow.yaml` and its registry |
+| Built-in tools and calculator arguments/results | [BUILTIN-TOOLS.md](docs/BUILTIN-TOOLS.md) |
+| Runtime behavior or formats | [ARCHITECTURE-ANDROID.md](docs/ARCHITECTURE-ANDROID.md), including its later implementation qualifications; relevant `schemas/`, reader and tests |
+| Android | [Android guide](apps/android/README.md) |
+| Security | [SECURITY.md](SECURITY.md) and [enterprise security](docs/SECURITY-ENTERPRISE.md) |
+
+If `docs/AMAZON-DEVELOPMENT.md` exists, read it for that branch's Amazon flow,
+host checks and phone-owner handoff. Keep its business logic in the flow.
+
+`docs/ADAPTIVE-FLOWS.md` describes **implemented** routing.
+`docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` contain
+**proposals**; their proposed fields may not exist.
+Check current schemas, readers and architecture qualifications; report conflicts
+before changing a consequential contract. Minimal-summary and ticket-triage have
+scripted tests; procurement is an incomplete design sketch.
+
+## Design rules to preserve
+
+- Keep computation in isolated coder-invoked tools and procedure in the graph.
+  Do not add site/task-name special cases to the executor, model-free tool nodes,
+  or a flow expression language.
+- Model prose stays advisory. Structured model output goes through the validated
+  tool-call boundary; do not require a model to emit JSON worklists or magic
+  completion words. The reasoner remains tool-free.
+- `local.calculate` runs on the phone; `flow.choose` is handled by the runtime.
+  Both need explicit task grants. Neither is a remote server or setup connection.
+- Validate output/artifact contracts before transitioning. Keep bundles and
+  model files pinned by SHA-256 checksums. Preserve original results through bindings.
+- A failed or interrupted write may already have taken effect. Preserve mutation
+  journaling and conservative recovery; observe before attempting another write.
+- Models load on first use. Opening the app does not preload models or replay
+  runs. Lost workers require explicit Resume; Android owns foreground execution,
+  credentials and persistent app data.
+
+## Make and check a change
+
+Check `git status --short` and the current branch; preserve others' edits. Find
+the source and nearest test using the map above. The main agent/maintainer owns
+specification, architecture and product decisions. Sub-agents raise material
+departures before implementation. Finish routine approved work without
+re-requesting granted permissions.
+
+Keep Rust and Android together. Edit sources; generate bindings and starter
+archives with the documented tools. Keep builds, weights and local environments
+out of Git. Update schema, reader, examples and consumers together for approved
+format changes. Follow [versioning](docs/VERSIONING.md) for release identities.
+
+**Check RAM and disk before compiling or downloading.** Reuse installed tools
+and bound concurrency. On constrained hosts, leave Android/llama.cpp builds to
+the existing build environment; do not download weights or SDK/NDK installations.
+Device work needs the configured ADB connection, an explicit serial and one owner.
+
+Use checks for the changed layer. `CONTRIBUTING.md` has full commands;
+`rust-toolchain.toml` pins Rust and `scripts/requirements.txt` lists Python dependencies.
+
+- Docs only: check accuracy, links and the diff; use export validation when
+  present. No Rust or Android build is needed.
+- Flow changes: run `python3 scripts/validate-examples.py` and the matching core
+  integration test. For the smallest example:
+  `CARGO_BUILD_JOBS=2 cargo test --locked -p trollm-core --test direct_authoring --no-default-features`.
+- Packaged starters: regenerate with `scripts/android/make_starter_bundles.py`,
+  check with its `--check` flag, and run the relevant bundle/helper tests.
+- Rust changes: run relevant tests, formatting and Clippy from `CONTRIBUTING.md`.
+  Bridge host tests use `--features stub`; a bridge with neither `stub` nor
+  `llama` compiles but cannot start model runs.
+
+Scripted/stub tests need no weights and test wiring and execution rules. Report
+whether checks used scripted models, JVM tests, real models or live MCP; one does
+not establish the others. Run relevant checks once changes settle. Avoid long
+CI polling loops.
+
+## Public and private checkouts
+
+This file applies to both. Public source has curated history and fewer operator
+files. Use local `CONTRIBUTING.md` for the contribution destination and any export
+manifest/overlays present here. Portable checks need no omitted private tooling;
+source publication does not publish APKs.
+
+Remote tools can transmit data and require connectivity. Keep credentials,
+private endpoints, device details, caches and unsanitized diagnostics out of Git
+and public reports. Use placeholders and existing credential storage. Follow
+`SECURITY.md` for private reporting and existing maintainer authorization for
+merges, deployment and publication.

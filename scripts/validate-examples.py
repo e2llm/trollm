@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check plan schemas/edges and the ticket-triage and minimal-summary references.
+"""Check plan schemas/edges and complete reference registries and prompts.
 
 Procurement is a design skeleton: its registry and evaluate-product subflow are
 not supplied. Validate its schema/edges, but do not present it as executable.
@@ -29,7 +29,14 @@ for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")):
     for node in nodes.values():
         edges = [node.get(key) for key in ("onVerified", "onEmpty", "onComplete", "onLimit")]
         edges.append(node.get("onError", {}).get("then"))
+        edges.extend(node.get("routes", {}).values())
+        for route in node.get("routes", {}).values():
+            if isinstance(route, dict) and route["status"] == "paused" and "resumeAt" not in route:
+                raise ValueError(f"{path}: paused route requires resumeAt")
         for edge in edges:
+            if isinstance(edge, dict) and "resumeAt" in edge:
+                if edge["status"] != "paused" or edge["resumeAt"] not in nodes:
+                    raise ValueError(f"{path}: invalid resumeAt continuation")
             if isinstance(edge, str) and edge not in nodes:
                 raise ValueError(f"{path}: unknown transition {edge}")
     print(f"schema and transitions OK: {path.relative_to(ROOT)}")
@@ -37,6 +44,8 @@ for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")):
 for root_flow, registry_file in (
     ("ticket-triage", "tickets.tasks.yaml"),
     ("minimal-summary", "minimal-summary.tasks.yaml"),
+    ("prose-calculation", "prose-calculation.tasks.yaml"),
+    ("adaptive-routing", "adaptive-routing.tasks.yaml"),
 ):
     registry_path = ROOT / "flows/tasks" / registry_file
     registry = yaml.safe_load(registry_path.read_text())
@@ -59,6 +68,15 @@ for root_flow, registry_file in (
         for node in plans[flow_id]["nodes"].values():
             if node["kind"] == "task" and node["taskRef"] not in registry["tasks"]:
                 raise ValueError(f"{flow_id}: missing task {node['taskRef']}")
+            if node["kind"] == "task":
+                task = registry["tasks"][node["taskRef"]]
+                routing = task.get("completion", "model-prose") == "flow-route"
+                if routing != ("routes" in node):
+                    raise ValueError(f"{flow_id}: routes require flow-route completion")
+                if routing and (task["model"] != "coder" or "flow.choose" not in task.get("tools", [])):
+                    raise ValueError(f"{flow_id}: routing requires coder and flow.choose")
+                if len(node.get("promptSupplement", "").encode("utf-8")) > 16 * 1024:
+                    raise ValueError(f"{flow_id}: promptSupplement exceeds 16 KiB")
             for key in ("body", "between"):
                 if key in node:
                     pending.append(node[key]["flowRef"])

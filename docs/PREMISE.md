@@ -57,9 +57,11 @@ and actual deployment requirements.
 
 These are load-bearing. Any change that violates one is a redesign, not a patch.
 
-1. **Flow logic lives in deterministic code, never in models.** Transitions key off
-   ledger-side verification results, enumeration state, and budget counters — never off model
-   prose. No magic strings.
+1. **The graph defines allowed flow control; the runtime enforces it.** Transitions
+   use verification results, enumeration state, budgets and explicitly declared
+   coder tool choices. The approved [adaptive-flow contract](ADAPTIVE-FLOWS.md)
+   adds bounded selection among authored exits. Model prose never becomes a
+   branch condition, and models cannot invent graph edges. No magic strings.
 2. **The ledger handles all structured data; models handle only prose.** Structured data
    (worklists, item records, write intents) moves ledger-to-ledger (artifact files → variable
    bindings). Prose moves model-to-model. Models never transcribe data; the ledger never
@@ -79,9 +81,9 @@ These are load-bearing. Any change that violates one is a redesign, not a patch.
    orchestration outside the model runtime. Measure the configured model pair's
    memory separately on the target phone; the earlier two-1B-model RAM example
    is not a measurement of the current model targets.
-7. **Deterministic escalation.** When the reasoner is consulted is written in the flow
-   (authoring-time), possibly plus a budget-capped explicit coder request flag. Never
-   free-form model-driven routing.
+7. **Authored escalation.** Reasoner consultations and permitted alternatives are
+   declared in the flow. Coder control tools can select declared exits under
+   runtime budgets; they cannot create consultations or arbitrary destinations.
 
 ## Use cases
 

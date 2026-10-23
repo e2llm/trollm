@@ -1,0 +1,25 @@
+{
+  "format": "trollm.local.calculate.cases.v1",
+  "cases": [
+    {"name": "decimal addition", "args": {"operation": "add", "left": "0.1", "right": "0.2"}, "result": {"format": "trollm.local.calculate.v1", "operation": "add", "left": "0.1", "right": "0.2", "result": "0.3"}},
+    {"name": "cart total", "args": {"operation": "add", "left": "39.99", "right": "40.10"}, "result": {"format": "trollm.local.calculate.v1", "operation": "add", "left": "39.99", "right": "40.10", "result": "80.09"}},
+    {"name": "over budget", "args": {"operation": "compare", "left": "80.09", "right": "80"}, "result": {"format": "trollm.local.calculate.v1", "operation": "compare", "left": "80.09", "right": "80", "result": "greater"}},
+    {"name": "equal amounts", "args": {"operation": "compare", "left": "80.00", "right": "80"}, "result": {"format": "trollm.local.calculate.v1", "operation": "compare", "left": "80.00", "right": "80", "result": "equal"}},
+    {"name": "negative ordering", "args": {"operation": "compare", "left": "-1", "right": "0"}, "result": {"format": "trollm.local.calculate.v1", "operation": "compare", "left": "-1", "right": "0", "result": "less"}},
+    {"name": "quantity multiplication", "args": {"operation": "multiply", "left": "19.99", "right": "2"}, "result": {"format": "trollm.local.calculate.v1", "operation": "multiply", "left": "19.99", "right": "2", "result": "39.98"}},
+    {"name": "subtraction", "args": {"operation": "subtract", "left": "5.00", "right": "7.5"}, "result": {"format": "trollm.local.calculate.v1", "operation": "subtract", "left": "5.00", "right": "7.5", "result": "-2.5"}},
+    {"name": "exact division", "args": {"operation": "divide", "left": "1", "right": "8"}, "result": {"format": "trollm.local.calculate.v1", "operation": "divide", "left": "1", "right": "8", "result": "0.125"}},
+    {"name": "negative zero", "args": {"operation": "add", "left": "-0.000000", "right": "0"}, "result": {"format": "trollm.local.calculate.v1", "operation": "add", "left": "-0.000000", "right": "0", "result": "0"}},
+    {"name": "range boundary", "args": {"operation": "add", "left": "999999999999.999998", "right": "0.000001"}, "result": {"format": "trollm.local.calculate.v1", "operation": "add", "left": "999999999999.999998", "right": "0.000001", "result": "999999999999.999999"}},
+    {"name": "zero division", "args": {"operation": "divide", "left": "1", "right": "0"}, "error": "local.calculate: division-by-zero"},
+    {"name": "no implicit rounding", "args": {"operation": "divide", "left": "1", "right": "3"}, "error": "local.calculate: precision-exceeded"},
+    {"name": "small product", "args": {"operation": "multiply", "left": "0.000001", "right": "0.1"}, "error": "local.calculate: precision-exceeded"},
+    {"name": "overflow", "args": {"operation": "add", "left": "999999999999.999999", "right": "0.000001"}, "error": "local.calculate: out-of-range"},
+    {"name": "no JSON numbers", "args": {"operation": "add", "left": 1, "right": "2"}, "error": "local.calculate: invalid-arguments"},
+    {"name": "no locale guessing", "args": {"operation": "add", "left": "1,234.56", "right": "0"}, "error": "local.calculate: invalid-arguments"},
+    {"name": "no expressions", "args": {"operation": "add", "left": "1+2", "right": "0"}, "error": "local.calculate: invalid-arguments"},
+    {"name": "no trailing newline", "args": {"operation": "add", "left": "1\n", "right": "0"}, "error": "local.calculate: invalid-arguments"},
+    {"name": "no extra fields", "args": {"operation": "add", "left": "1", "right": "2", "extra": true}, "error": "local.calculate: invalid-arguments"},
+    {"name": "unsupported operation", "args": {"operation": "eval", "left": "1", "right": "2"}, "error": "local.calculate: invalid-arguments"}
+  ]
+}

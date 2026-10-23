@@ -290,7 +290,7 @@ fn paged_catalog_routes_cursor_and_freezes_second_page_tools() {
         None,
     );
     let tools = gw.list_tools().unwrap();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     assert_eq!(
         tools
             .iter()

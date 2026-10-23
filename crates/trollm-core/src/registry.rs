@@ -37,6 +37,10 @@ pub struct TaskRegistry {
 pub struct TaskDef {
     /// Slot name only (§5); resolved against the plan's `models` slots.
     pub model: String,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub generation_timeout_s: Option<u64>,
     /// Path to the prompt template, relative to the registry file.
     pub prompt: String,
     /// Tool allowlist, entries `<server>.<tool>`; may be empty (§5).
@@ -64,6 +68,7 @@ pub enum TaskCompletion {
     #[default]
     ModelProse,
     ToolResult,
+    FlowRoute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +95,30 @@ impl TaskDef {
             self.model != CANONICAL_REASONER_SLOT || self.tools.is_empty(),
             "canonical reasoner model slot must not grant tools"
         );
+        anyhow::ensure!(
+            self.max_output_tokens
+                .is_none_or(|n| (1..=2048).contains(&n)),
+            "maxOutputTokens must be 1 through 2048"
+        );
+        anyhow::ensure!(
+            self.generation_timeout_s
+                .is_none_or(|n| (1..=600).contains(&n)),
+            "generationTimeoutS must be 1 through 600"
+        );
+        for tool in &self.tools {
+            if tool.starts_with("flow.") {
+                anyhow::ensure!(
+                    tool == "flow.choose" && self.completion == TaskCompletion::FlowRoute,
+                    "flow.choose requires flow-route completion; unknown flow tools are forbidden"
+                );
+            }
+        }
+        if self.completion == TaskCompletion::FlowRoute {
+            anyhow::ensure!(
+                self.model == "coder" && self.tools.iter().any(|t| t == "flow.choose"),
+                "flow-route completion requires coder and flow.choose"
+            );
+        }
         if let Some(bindings) = &self.tool_arguments {
             anyhow::ensure!(
                 self.completion == TaskCompletion::ToolResult,
@@ -137,21 +166,26 @@ impl TaskDef {
                 }
             }
         }
-        if self.completion == TaskCompletion::ToolResult {
+        if matches!(
+            self.completion,
+            TaskCompletion::ToolResult | TaskCompletion::FlowRoute
+        ) {
             anyhow::ensure!(
                 !self.tools.is_empty(),
-                "tool-result completion requires tools"
+                "tool-result/flow-route completion requires tools"
             );
             anyhow::ensure!(
-                self.loop_spec
-                    .as_ref()
-                    .map(|spec| spec.max_steps)
-                    .unwrap_or(1)
-                    == 1,
+                self.completion == TaskCompletion::FlowRoute
+                    || self
+                        .loop_spec
+                        .as_ref()
+                        .map(|spec| spec.max_steps)
+                        .unwrap_or(1)
+                        == 1,
                 "tool-result completion requires loop.maxSteps = 1"
             );
             anyhow::ensure!(
-                !self.output_contract.allow_noop,
+                self.completion == TaskCompletion::FlowRoute || !self.output_contract.allow_noop,
                 "tool-result completion cannot allowNoop"
             );
             anyhow::ensure!(
@@ -160,7 +194,7 @@ impl TaskDef {
                     .outputs
                     .values()
                     .any(|output| matches!(output, OutputSpec::FromModel { .. })),
-                "tool-result completion cannot declare model outputs"
+                "tool-result/flow-route completion cannot declare model outputs"
             );
         }
         Ok(())

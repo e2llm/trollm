@@ -129,6 +129,8 @@ impl LlamaCppSlot {
 
 impl ModelSlot for LlamaCppSlot {
     fn generate(&mut self, req: GenerateRequest) -> Result<GenerateResponse> {
+        let deadline = crate::deadline::GenerationDeadline::new(req.max_duration);
+        deadline.check()?;
         let vocab = self.model.vocab();
         // Raw ledger/MCP content is one user message. Reserved vocabulary
         // controls inside it could otherwise close that message after the
@@ -203,6 +205,7 @@ impl ModelSlot for LlamaCppSlot {
             .get() as usize;
         let mut batch = LlamaBatch::new(batch_size, 1);
         for (chunk_index, chunk) in prompt_tokens.chunks(batch_size).enumerate() {
+            deadline.check()?;
             batch.clear();
             let start = chunk_index * batch_size;
             for (offset, token) in chunk.iter().enumerate() {
@@ -212,6 +215,7 @@ impl ModelSlot for LlamaCppSlot {
             }
             ctx.decode(&mut batch)
                 .context("llama prompt prefill failed")?;
+            deadline.check()?;
         }
 
         let tokens_in = prompt_tokens.len() as u32;
@@ -222,12 +226,14 @@ impl ModelSlot for LlamaCppSlot {
         let finish;
 
         loop {
+            deadline.check()?;
             if tokens_out >= max_out {
                 finish = FinishReason::Length;
                 break;
             }
             // sample() also accepts the token, advancing grammar/sampler state.
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            deadline.check()?;
             if vocab.is_eog(token) {
                 finish = FinishReason::Stop;
                 break;
@@ -252,6 +258,7 @@ impl ModelSlot for LlamaCppSlot {
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
             n_cur += 1;
+            deadline.check()?;
             ctx.decode(&mut batch).context("llama decode failed")?;
         }
 
@@ -330,6 +337,7 @@ mod tests {
                 prompt: "The capital of France is".into(),
                 grammar_gbnf: None,
                 max_tokens: 16,
+                max_duration: None,
                 stop: vec![],
             })
             .unwrap();
@@ -354,6 +362,7 @@ mod tests {
                 prompt: "Fetch issue 7 from the tracker. Reply with a tool call.".into(),
                 grammar_gbnf: Some(grammar),
                 max_tokens: 128,
+                max_duration: None,
                 stop: vec![],
             })
             .unwrap();
@@ -395,6 +404,7 @@ mod tests {
             ("tracker".to_string(), "get_issue".to_string()),
             ("files".to_string(), "read".to_string()),
             ("we\"ird\\שרת".to_string(), "t\t工具".to_string()),
+            ("local".to_string(), "calculate".to_string()),
         ];
         let grammar = crate::fence::tool_call_grammar(&pairs);
         let fence = |server: &str, tool: &str, args: serde_json::Value| {
@@ -409,6 +419,16 @@ mod tests {
         let mut cases = vec![
             (first.clone(), true),
             (fence("files", "read", serde_json::json!({})), true),
+            // Grammar checks the granted pair and JSON shape. Decimal bounds
+            // and calculator argument semantics belong to gateway validation.
+            (
+                fence(
+                    "local",
+                    "calculate",
+                    serde_json::json!({"operation": "add", "left": "39.99", "right": "40.10"}),
+                ),
+                true,
+            ),
             (
                 fence(
                     &pairs[2].0,
@@ -420,6 +440,9 @@ mod tests {
             (format!("{first}\n{first}"), true),
             ("Finished without tools. <other>".to_string(), true),
             (fence("tracker", "read", serde_json::json!({})), false),
+            (fence("local", "unknown", serde_json::json!({})), false),
+            (fence("local", "get_issue", serde_json::json!({})), false),
+            (fence("tracker", "calculate", serde_json::json!({})), false),
             (fence("unknown", "get_issue", serde_json::json!({})), false),
             (fence("tracker", "get_issue", serde_json::json!([])), false),
             (format!("prose {first}"), false),

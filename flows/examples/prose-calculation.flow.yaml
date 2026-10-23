@@ -1,0 +1,39 @@
+# Literal user prose -> coder calculations -> tool-free advice -> coder report.
+# Example input: "My cart has items at 39.99 and 40.10. My budget is 80."
+# The fixed teaching budget is 80; this is not a general cart parser.
+# Arithmetic verification does not verify operand selection or real-world facts.
+schemaVersion: ledger.execution-plan.v1
+id: prose-calculation
+version: 1
+input:
+  promptTemplate: "{{ user_input }}"
+limits: { maxSteps: 4, maxReasonerCalls: 1, maxTokensTotal: 16384, timeoutS: 120, artifactMaxMb: 1 }
+onLimit: abort
+models:
+  coder: { ctx: 4096 }
+  reasoner: { ctx: 4096 }
+mcp:
+  servers: []
+  policies:
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required: [format, operation, left, right, result]
+          properties:
+            format: { const: trollm.local.calculate.v1 }
+            operation: { enum: [add, compare] }
+            left: { type: string }
+            right: { type: string }
+            result: { type: string, minLength: 1 }
+entryStep: sum
+nodes:
+  sum: { kind: task, taskRef: sum-cart, onVerified: compare }
+  compare: { kind: task, taskRef: compare-budget, onVerified: advise }
+  advise: { kind: task, taskRef: advise-cart, onVerified: report }
+  report: { kind: task, taskRef: report-cart, onVerified: done }
+  done: { kind: end, outcome: succeeded }

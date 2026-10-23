@@ -2208,6 +2208,7 @@ mod regression_tests {
             prompt: "hello".into(),
             grammar_gbnf: None,
             max_tokens: 8,
+            max_duration: None,
             stop: vec![],
         }
     }

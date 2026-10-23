@@ -62,6 +62,11 @@ pub enum ProxyEvent {
         tool: String,
         args_hash: String,
     },
+    LocalCall {
+        server: String,
+        tool: String,
+        args_hash: String,
+    },
 }
 
 impl ProxyEvent {
@@ -76,6 +81,7 @@ impl ProxyEvent {
             Self::ShapedToFile { .. } => "shaped_to_file",
             Self::MutationPassthrough { .. } => "mutation_passthrough",
             Self::LiveCall { .. } => "live_call",
+            Self::LocalCall { .. } => "local_call",
         }
     }
 }
