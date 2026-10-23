@@ -6,6 +6,14 @@ until implemented and accepted on the relevant build.
 
 ## Intended experience
 
+The approved [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds
+coder selection among authored exits, node prompt
+supplements, recovery context and per-task generation limits. The graph remains
+a coordinator of model tasks; the reasoner supplies advisory prose and ordinary
+tools remain coder-invoked code. Host unit/integration checks cover this work;
+physical-phone acceptance of the separate Amazon development flow is a distinct
+maintainer activity.
+
 A user installs trollm, signs in to E2LLM, chooses a supplied flow, provides input
 and follows progress and results. A browser may run on a PC while inference runs
 on the phone. Android 13/API 33+, S21-class hardware or newer and signed sideloaded
@@ -21,7 +29,15 @@ The Rust workspace provides explicit execution plans, model slots, an MCP
 gateway, durable artifacts and an Android bridge. The Compose app provides
 bundle installation, checksum-verified sequential model preparation, per-flow
 overrides, browser OAuth with grant-bound refresh, manual Bearer setup and
-bundled text/browser summary starters. Secrets use encrypted app storage.
+bundled text/browser summary and **Check a total** starters. Secrets use encrypted
+app storage.
+
+Current source prepares **0.1.0-rc.6 / Android code 7** with built-in
+`local.calculate`. **Check a total** adds two amounts selected from text and
+compares the exact result with a supplied budget, using prepared models without
+an MCP connection. Coverage includes scripted executor/gateway tests, pinned
+bundles and native tool-fence grammar. Arithmetic does not verify model operand
+selection; rc.6 real-model and device acceptance remain open.
 
 Models load on first slot use after checksum verification and are reused within
 the run. Status shows verification, loading and generation. Models and run data

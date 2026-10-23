@@ -38,6 +38,27 @@ pub struct Frame {
     pub node_outputs: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
     pub counters: Counters,
+    #[serde(default)]
+    pub last_error: Option<LastError>,
+}
+
+/// Small recovery record retained until the next task failure in this frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastError {
+    pub node: String,
+    pub class: crate::error::ErrorClass,
+    pub detail: String,
+    pub mutation_outcome: MutationOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MutationOutcome {
+    #[default]
+    None,
+    Returned,
+    Unknown,
 }
 
 /// Per-foreach cursor (§4.4 `foreachCursors`). v1 plans key these by node id
@@ -140,6 +161,7 @@ impl RunState {
                 node: entry_node.to_string(),
                 vars: Value::Object(serde_json::Map::new()),
                 node_outputs: BTreeMap::new(),
+                last_error: None,
                 counters: Counters {
                     started_at: now,
                     ..Counters::default()

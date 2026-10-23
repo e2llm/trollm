@@ -9,6 +9,10 @@ pub mod llama;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+#[cfg(any(feature = "llama", test))]
+mod deadline;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinishReason {
@@ -22,6 +26,8 @@ pub struct GenerateRequest {
     pub prompt: String,
     pub grammar_gbnf: Option<String>,
     pub max_tokens: u32,
+    /// Cooperative per-generation limit; native decode operations cannot be preempted.
+    pub max_duration: Option<Duration>,
     pub stop: Vec<String>,
 }
 
@@ -96,6 +102,7 @@ mod tests {
             prompt: prompt.to_string(),
             grammar_gbnf: None,
             max_tokens: 16,
+            max_duration: None,
             stop: vec![],
         }
     }
@@ -121,6 +128,7 @@ mod tests {
         let mut r = req("hello world");
         r.grammar_gbnf = Some("root ::= ...".into());
         r.stop = vec!["STOP".into()];
+        r.max_duration = Some(Duration::from_secs(3));
         m.generate(r).unwrap();
         m.generate(req("again")).unwrap();
         assert_eq!(m.recorded_requests().len(), 2);
@@ -128,6 +136,10 @@ mod tests {
         assert_eq!(
             m.recorded_requests()[0].grammar_gbnf.as_deref(),
             Some("root ::= ...")
+        );
+        assert_eq!(
+            m.recorded_requests()[0].max_duration,
+            Some(Duration::from_secs(3))
         );
         assert_eq!(m.recorded_requests()[1].prompt, "again");
         assert_eq!(m.remaining(), 0);

@@ -138,8 +138,12 @@ impl SetupInput {
             let Some((server, name)) = tool.split_once('.') else {
                 bail!("toolArguments keys must be server.tool");
             };
-            if !servers.contains_key(server) || !argument_name(name) {
-                bail!("toolArguments must name a declared server and an exact tool");
+            let builtin = server == trollm_mcp::local::SERVER && name == trollm_mcp::local::TOOL;
+            let declared_remote = server != trollm_mcp::local::SERVER
+                && server != "flow"
+                && servers.contains_key(server);
+            if !(builtin || declared_remote) || !argument_name(name) {
+                bail!("toolArguments must name a declared server or a known built-in tool");
             }
             for name in rule
                 .from_input
@@ -346,6 +350,12 @@ fn declarations(
         }
     }
     for server in &plan.mcp.servers {
+        if server.name == "flow" {
+            bail!("MCP server name flow is reserved for runtime control tools");
+        }
+        if server.name == trollm_mcp::local::SERVER {
+            bail!("MCP server name local is reserved for built-in tools");
+        }
         if let Some(previous) = servers.insert(server.name.clone(), server.url.clone()) {
             if previous != server.url {
                 bail!("conflicting MCP server URL declarations in flow tree");
@@ -406,6 +416,9 @@ impl FlowSetup {
             input.validate(&servers)?;
         }
         for (name, connection) in &self.connections {
+            if name == "flow" {
+                bail!("setup connection flow is reserved for runtime control tools");
+            }
             if !safe_key(name) || servers.get(name) != Some(&connection.url) {
                 bail!("setup connections must match declared server names and default URLs");
             }
@@ -528,6 +541,62 @@ nodes: { done: { kind: end, outcome: succeeded } }
         let legacy: SetupInput = serde_json::from_value(json!({"label":"Text"})).unwrap();
         let raw = "  plain old input, not JSON  ";
         assert_eq!(legacy.resolve(raw).unwrap().canonical, raw);
+    }
+
+    #[test]
+    fn structured_input_can_constrain_builtin_without_a_connection() {
+        let input = json!({
+            "fields": [{"key": "limit", "label": "Budget", "required": true}],
+            "toolArguments": {"local.calculate": {
+                "fromInput": {"right": "limit"}, "fixed": {"operation": "compare"}
+            }}
+        });
+        let setup = setup_with_input(input.clone());
+        setup.validate(&plan()).unwrap();
+        let resolved = setup.input.unwrap().resolve(r#"{"limit":"80"}"#).unwrap();
+        assert_eq!(
+            resolved.argument_constraints["local.calculate"]["properties"]["right"]["const"],
+            "80"
+        );
+        let mut unknown = input.clone();
+        unknown["toolArguments"] = json!({"local.unknown": {"fixed": {"operation": "compare"}}});
+        assert!(setup_with_input(unknown).validate(&plan()).is_err());
+        let mut conflicting = plan();
+        conflicting.mcp.servers[0].name = "local".into();
+        assert!(setup_with_input(input)
+            .validate(&conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved"));
+    }
+
+    #[test]
+    fn runtime_flow_namespace_cannot_be_a_setup_connection_or_argument_binding() {
+        let mut descriptor = value();
+        descriptor["connections"]["flow"] = json!({
+            "url": "https://example.org/mcp", "auth": "bearer"
+        });
+        let setup: FlowSetup = serde_json::from_value(descriptor).unwrap();
+        assert!(setup
+            .validate(&plan())
+            .unwrap_err()
+            .to_string()
+            .contains("reserved"));
+        let mut remote_flow = plan();
+        remote_flow.mcp.servers[0].name = "flow".into();
+        let ordinary_setup: FlowSetup = serde_json::from_value(value()).unwrap();
+        assert!(ordinary_setup
+            .validate(&remote_flow)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved"));
+        for tool in ["flow.choose", "flow.unknown"] {
+            let setup = setup_with_input(json!({
+                "fields": [{"key": "route", "label": "Route"}],
+                "toolArguments": {tool: {"fromInput": {"route": "route"}}}
+            }));
+            assert!(setup.validate(&plan()).is_err());
+        }
     }
 
     #[test]

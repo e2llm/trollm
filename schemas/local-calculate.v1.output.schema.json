@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.calculate v1 result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "operation", "left", "right", "result"],
+  "properties": {
+    "format": {"const": "trollm.local.calculate.v1"},
+    "operation": {"enum": ["add", "subtract", "multiply", "divide", "compare"]},
+    "left": {"$ref": "#/$defs/decimal"},
+    "right": {"$ref": "#/$defs/decimal"},
+    "result": {"type": "string"}
+  },
+  "if": {"properties": {"operation": {"const": "compare"}}},
+  "then": {"properties": {"result": {"enum": ["less", "equal", "greater"]}}},
+  "else": {
+    "properties": {
+      "result": {
+        "type": "string",
+        "maxLength": 20,
+        "pattern": "^-?(0|[1-9][0-9]{0,11})([.][0-9]{0,5}[1-9])?$",
+        "not": {"anyOf": [{"const": "-0"}, {"pattern": "[\\r\\n]"}]}
+      }
+    }
+  },
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^-?(0|[1-9][0-9]{0,11})([.][0-9]{1,6})?$",
+      "not": {"pattern": "[\\r\\n]"}
+    }
+  }
+}

@@ -7,6 +7,12 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
+The current source candidate is **0.1.0-rc.6 / Android code 7**. It includes
+built-in `local.calculate` and the **Check a total** starter. This version bump
+prepares the next APK identity; it does not transfer the recorded rc.5 device
+acceptance to a new build. Curated source publication can precede APK acceptance
+and does not publish a binary release or change a previous release tag.
+
 Use a `v`-prefixed product version for release tags. Increase the product version
 when preparing a new product release candidate or release, and strictly increase
 Android `versionCode` for every newly distributed APK, including pre-releases.

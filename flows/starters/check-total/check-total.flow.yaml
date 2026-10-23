@@ -1,0 +1,38 @@
+schemaVersion: ledger.execution-plan.v1
+id: check-total
+version: 1
+setup:
+  path: setup.json
+  sha256: "51b3aabbc78d875fd067fda0c446e59af86e48521c39980debbc1f591fa340f4"
+input:
+  promptTemplate: "{{ user_input }}"
+limits: { maxSteps: 4, maxReasonerCalls: 1, maxTokensTotal: 16384, timeoutS: 120, artifactMaxMb: 1 }
+onLimit: abort
+models:
+  coder: { ctx: 4096 }
+  reasoner: { ctx: 4096 }
+mcp:
+  servers: []
+  policies:
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required: [format, operation, left, right, result]
+          properties:
+            format: { const: trollm.local.calculate.v1 }
+            operation: { enum: [add, compare] }
+            left: { type: string }
+            right: { type: string }
+            result: { type: string, minLength: 1 }
+entryStep: sum
+nodes:
+  sum: { kind: task, taskRef: sum-cart, onVerified: compare }
+  compare: { kind: task, taskRef: compare-budget, onVerified: advise }
+  advise: { kind: task, taskRef: advise-cart, onVerified: report }
+  report: { kind: task, taskRef: report-cart, onVerified: done }
+  done: { kind: end, outcome: succeeded }

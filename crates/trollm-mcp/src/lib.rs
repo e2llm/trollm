@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub mod cache;
 pub mod events;
 pub mod gateway;
+pub mod local;
 pub mod policy;
 mod schema;
 pub mod transport;
@@ -37,6 +38,7 @@ pub enum Provenance {
     Live,
     Cache,
     ServedFromFile,
+    Local,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +58,6 @@ pub trait ToolGateway: Send {
     /// dispatch tools. Concrete gateways also protect their direct call path.
     fn validate_call(&self, call: &ToolCall) -> Result<()>;
     /// Executes a tool call, applying gateway policies (cache/paginate/serveFrom/
-    /// shape/mutation). Implementations must be the ONLY path models have to MCP.
+    /// shape/mutation). Implementations must be the ONLY path models have to tools.
     fn call(&mut self, call: &ToolCall) -> Result<ToolResult>;
 }

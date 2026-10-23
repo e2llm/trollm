@@ -153,6 +153,7 @@ struct FramePlan {
 
 /// Result of one successful coder loop (§5).
 struct TaskOutcome {
+    route: Option<String>,
     prose: String,
     tool_calls_made: u32,
     /// Artifacts reported by the gateway during this task, keyed by logical
@@ -186,6 +187,7 @@ pub struct Executor<M: ModelSlot, G: ToolGateway> {
     pause_reason: String,
     fail_reason: String,
     cancel_requested: bool,
+    mutation_outcome: crate::state::MutationOutcome,
     control: Option<Arc<dyn ExecutionControl>>,
 }
 
@@ -218,11 +220,16 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     .task_ref
                     .as_deref()
                     .and_then(|task| registry.task(task))
-                    .is_some_and(|task| task.completion == TaskCompletion::ToolResult)
+                    .is_some_and(|task| {
+                        matches!(
+                            task.completion,
+                            TaskCompletion::ToolResult | TaskCompletion::FlowRoute
+                        )
+                    })
                 {
                     anyhow::ensure!(
                         !matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.values().any(|output| matches!(output, NodeOutputBinding::FromModel { .. }))),
-                        "plan '{}' node '{name}': tool-result completion cannot bind model outputs",
+                        "plan '{}' node '{name}': tool-result/flow-route completion cannot bind model outputs",
                         plan.id
                     );
                 }
@@ -330,6 +337,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             pause_reason: String::new(),
             fail_reason,
             cancel_requested: false,
+            mutation_outcome: crate::state::MutationOutcome::None,
             control: None,
         })
     }
@@ -595,11 +603,16 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 };
                 self.emit(
                     EventType::Transition,
-                    json!({ "plan": plan_id, "from": from, "to": to, "key": key }),
+                    json!({ "plan": plan_id, "from": from, "to": to, "key": key, "resumeAt": inline.resume_at }),
                 )?;
                 match inline.status {
                     InlineStatus::Paused => {
                         self.emit(EventType::Paused, json!({ "reason": inline.reason }))?;
+                        if let Some(target) = &inline.resume_at {
+                            self.state.stack.last_mut().expect("active frame").node =
+                                target.clone();
+                            self.node_retries = 0;
+                        }
                         self.state.status = StateStatus::Paused;
                         self.pause_reason = inline.reason.clone();
                         self.persist_snapshot()?;
@@ -685,6 +698,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .cloned()
             .ok_or_else(|| anyhow!("taskRef {:?} not in registry", node.task_ref))?;
 
+        self.mutation_outcome = crate::state::MutationOutcome::None;
         let outcome = self.run_task_loop(node_id, node, &task, fp);
         let cancelled = self.control_cancelled();
         match outcome {
@@ -699,8 +713,18 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         if self.control_cancelled() {
                             return self.finish_cancelled();
                         }
-                        let t = node.on_verified.clone().expect("validated");
-                        self.transit("onVerified", &t)
+                        if let Some(route) = &outcome.route {
+                            let t = node
+                                .routes
+                                .as_ref()
+                                .and_then(|r| r.get(route))
+                                .expect("validated route")
+                                .clone();
+                            self.transit(&format!("routes.{route}"), &t)
+                        } else {
+                            let t = node.on_verified.clone().expect("validated");
+                            self.transit("onVerified", &t)
+                        }
                     }
                     Err(f) => self.handle_task_error(node_id, node, fp, f),
                 }
@@ -723,12 +747,23 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         fp: &FramePlan,
     ) -> Result<TaskLoopOutcome, TaskFailure> {
         let task_ref = node.task_ref.clone().unwrap_or_default();
-        let frame_vars = self
+        let mut frame_vars = self
             .state
             .stack
             .last()
             .map(|f| f.vars.clone())
             .unwrap_or(Value::Null);
+        let opted_in = node.prompt_supplement.is_some() || node.routes.is_some();
+        let runtime = json!({ "node": node_id, "taskRef": task_ref, "routes": node.routes.as_ref().cloned().unwrap_or_default(), "lastError": self.state.stack.last().and_then(|f| f.last_error.as_ref()) });
+        if opted_in {
+            if !frame_vars.is_object() {
+                frame_vars = json!({});
+            }
+            frame_vars
+                .as_object_mut()
+                .unwrap()
+                .insert("runtime".into(), runtime.clone());
+        }
         let mut bound_arguments = BTreeMap::new();
         if let Some(bindings) = &task.tool_arguments {
             let input = if bindings.values().any(|rule| !rule.from_input.is_empty()) {
@@ -786,6 +821,23 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 )
             })?;
 
+        if opted_in {
+            context = format!("[Task registry instructions]\n{context}");
+            if let Some(supplement) = &node.prompt_supplement {
+                let rendered = template::render(supplement, &frame_vars, &self.user_input)
+                    .map_err(|e| {
+                        TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            format!("prompt supplement render: {e}"),
+                        )
+                    })?;
+                context.push_str(&format!("\n[Node instructions]\n{rendered}"));
+            }
+            context.push_str(&format!(
+                "\n[Runtime context]\n{runtime}\n[/Runtime context]\n"
+            ));
+        }
+
         let max_steps = task.loop_spec.as_ref().map(|l| l.max_steps).unwrap_or(1);
         let mut tool_calls_made = 0u32;
         let mut artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -808,7 +860,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             .collect::<Vec<_>>(),
                     ))
                 },
-                max_tokens: 2048,
+                max_tokens: task.max_output_tokens.unwrap_or(2048),
+                max_duration: task
+                    .generation_timeout_s
+                    .map(std::time::Duration::from_secs),
                 stop: Vec::new(),
             };
             let t0 = Instant::now();
@@ -888,6 +943,46 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
             let mut calls = fence::extract_tool_calls(&resp.text)
                 .map_err(|e| TaskFailure::new(ErrorClass::ToolCallParse, e.to_string()))?;
+            // Control and action calls may never share a generation. Validate
+            // this before any gateway preflight or dispatch.
+            if calls.iter().any(|c| c.server == "flow") {
+                if calls.len() != 1 || task.completion != TaskCompletion::FlowRoute {
+                    return Err(TaskFailure::new(
+                        ErrorClass::ToolCallParse,
+                        "flow.choose requires a single control call and flow-route completion",
+                    ));
+                }
+                let call = &calls[0];
+                if call.tool != "choose" || !task.tools.iter().any(|t| t == "flow.choose") {
+                    return Err(TaskFailure::new(
+                        ErrorClass::ToolCallParse,
+                        "unauthorized flow control tool",
+                    ));
+                }
+                let route = call
+                    .args
+                    .as_object()
+                    .filter(|args| args.len() == 1)
+                    .and_then(|args| args.get("route"))
+                    .and_then(Value::as_str)
+                    .filter(|route| {
+                        node.routes
+                            .as_ref()
+                            .is_some_and(|routes| routes.contains_key(*route))
+                    })
+                    .ok_or_else(|| {
+                        TaskFailure::new(
+                            ErrorClass::ToolCallParse,
+                            "flow.choose requires exactly one declared string route",
+                        )
+                    })?;
+                return Ok(TaskLoopOutcome::Completed(TaskOutcome {
+                    route: Some(route.to_string()),
+                    prose: String::new(),
+                    tool_calls_made: tool_calls_made + 1,
+                    artifacts,
+                }));
+            }
             if task.completion == TaskCompletion::ToolResult && calls.len() != 1 {
                 return Err(TaskFailure::new(
                     ErrorClass::ToolCallParse,
@@ -895,6 +990,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 ));
             }
             if calls.is_empty() {
+                if task.completion == TaskCompletion::FlowRoute {
+                    return Err(TaskFailure::new(
+                        ErrorClass::VerificationFailed,
+                        "flow-route completion requires flow.choose; prose cannot complete it",
+                    ));
+                }
                 // No fence: this generation is the node's prose output (§5).
                 prose = Some(resp.text.trim().to_string());
                 break;
@@ -986,11 +1087,30 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     None
                 };
 
+                let is_mutation = self.gateway.tool_class(&call.server, &call.tool)
+                    == trollm_mcp::policy::ToolClass::Mutation
+                    || self
+                        .plan
+                        .mcp
+                        .policies
+                        .get(&fqn)
+                        .and_then(|p| p.get("class"))
+                        .and_then(Value::as_str)
+                        == Some("mutation");
+                let previous_mutation_outcome = self.mutation_outcome;
+                if is_mutation {
+                    self.mutation_outcome = crate::state::MutationOutcome::Unknown;
+                }
                 let t0 = Instant::now();
                 let result = self
                     .gateway
                     .call(call)
                     .map_err(|e| TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {e}")))?;
+                if is_mutation
+                    && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
+                {
+                    self.mutation_outcome = crate::state::MutationOutcome::Returned;
+                }
                 let call_ms = t0.elapsed().as_millis() as u64;
 
                 self.emit(
@@ -1029,6 +1149,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 if task.completion == TaskCompletion::ToolResult {
                     return Ok(TaskLoopOutcome::Completed(TaskOutcome {
                         // This mode forbids all model-prose output bindings.
+                        route: None,
                         prose: String::new(),
                         tool_calls_made,
                         artifacts,
@@ -1056,6 +1177,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             )
         })?;
         Ok(TaskLoopOutcome::Completed(TaskOutcome {
+            route: None,
             prose,
             tool_calls_made,
             artifacts,
@@ -1152,6 +1274,16 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
             return self.finish_cancelled();
         }
+        self.state
+            .stack
+            .last_mut()
+            .expect("active frame")
+            .last_error = Some(crate::state::LastError {
+            node: node_id.to_string(),
+            class: failure.class,
+            detail: failure.detail.chars().take(1024).collect(),
+            mutation_outcome: self.mutation_outcome,
+        });
         self.emit(
             EventType::Error,
             json!({
@@ -1167,6 +1299,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             then: Transition::Inline(InlineTransition {
                 status: InlineStatus::Failed,
                 reason: failure.class.as_str().to_string(),
+                resume_at: None,
             }),
         });
         if self.node_retries < policy.retry {
@@ -1536,6 +1669,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             node: child_entry.clone(),
             vars: Value::Object(child_vars),
             node_outputs: BTreeMap::new(),
+            last_error: None,
             counters: Counters {
                 started_at: now_ms(),
                 ..Counters::default()
@@ -1619,6 +1753,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 node: child_entry.clone(),
                 vars: Value::Object(child_vars),
                 node_outputs: BTreeMap::new(),
+                last_error: None,
                 counters: Counters {
                     started_at: now_ms(),
                     ..Counters::default()

@@ -1,0 +1,32 @@
+schemaVersion: ledger.task-registry.v1
+id: adaptive-routing
+version: 1
+tasks:
+  assess-text:
+    model: reasoner
+    prompt: prompts/adaptive-assess.md
+    tools: []
+    loop: { maxSteps: 1 }
+    maxOutputTokens: 256
+    generationTimeoutS: 60
+    outputContract:
+      outputs:
+        advice: { from: model, type: prose }
+  choose-next:
+    model: coder
+    prompt: prompts/adaptive-choose.md
+    tools: [flow.choose]
+    completion: flow-route
+    loop: { maxSteps: 1 }
+    maxOutputTokens: 128
+    generationTimeoutS: 60
+  report:
+    model: coder
+    prompt: prompts/adaptive-report.md
+    tools: []
+    loop: { maxSteps: 1 }
+    maxOutputTokens: 256
+    generationTimeoutS: 60
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }

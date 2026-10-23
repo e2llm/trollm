@@ -173,7 +173,60 @@ class StarterBundles(unittest.TestCase):
                         {**page, "stats": {"contentNodes": 1, "truncated": True}}):
             self.assertFalse(validator.is_valid(invalid))
 
-    def test_both_assets_are_installed_and_explicit_output_retains_text_default(self):
+    def test_check_total_manifest_setup_and_local_bindings(self):
+        data = fixture.build_bundle(starter="check-total")
+        self.assertEqual(data, fixture.CHECK_TOTAL_ASSET.read_bytes())
+        self.assertEqual(data, fixture.build_bundle(starter="check-total"))
+        self.assertLess(len(data), 32 * 1024)
+        files = self.unpack("check-total")
+        manifest = json.loads(files.pop("manifest.json"))
+        self.assertEqual(set(files), set(fixture.CHECK_TOTAL_FILES))
+        self.assertEqual({entry["path"] for entry in manifest["files"]}, set(files))
+        for entry in manifest["files"]:
+            self.assertEqual(entry["sha256"], hashlib.sha256(files[entry["path"]]).hexdigest())
+        plan = yaml.safe_load(files[manifest["entryFlow"]])
+        setup = json.loads(files["setup.json"])
+        registry = yaml.safe_load(files[manifest["taskRegistry"]])
+        for schema, value in (("execution-plan.v1.schema.json", plan),
+                              ("flow-setup.v1.schema.json", setup)):
+            Draft202012Validator(json.loads((fixture.REPO / "schemas" / schema).read_text())).validate(value)
+        self.assertEqual((plan["id"], registry["id"], plan["version"], registry["version"]),
+                         ("check-total", "check-total", 1, 1))
+        self.assertEqual(plan["setup"]["sha256"], hashlib.sha256(files["setup.json"]).hexdigest())
+        self.assertEqual(setup["title"], "Check a total")
+        self.assertEqual(setup["connections"], {})
+        self.assertEqual(plan["mcp"]["servers"], [])
+        browser_setup = json.loads((fixture.BROWSER_SOURCE / "setup.json").read_text())
+        self.assertEqual(setup["models"], browser_setup["models"])
+        self.assertEqual(plan["models"], {slot: {"ctx": model["ctx"]}
+                                          for slot, model in setup["models"].items()})
+        self.assertEqual([(field["key"], field["kind"], field["required"], field["maxLength"])
+                          for field in setup["input"]["fields"]],
+                         [("text", "text", True, 2048), ("budget", "text", True, 20)])
+        self.assertNotIn("toolArguments", setup["input"])
+        tasks = registry["tasks"]
+        self.assertEqual(tasks["sum-cart"]["toolArguments"],
+                         {"local.calculate": {"fixed": {"operation": "add"}}})
+        self.assertEqual(tasks["compare-budget"]["toolArguments"], {"local.calculate": {
+            "fromVars": {"left": "sum.outputs.calculation.result"},
+            "fromInput": {"right": "budget"}, "fixed": {"operation": "compare"}}})
+        for name in ("sum-cart", "compare-budget"):
+            self.assertEqual(tasks[name]["tools"], ["local.calculate"])
+            self.assertEqual(tasks[name]["completion"], "tool-result")
+            self.assertEqual(tasks[name]["outputContract"]["requireArtifactComplete"], ["calculation"])
+            self.assertIn('<tool_call>{"server":"local","tool":"calculate","args":',
+                          files[tasks[name]["prompt"]].decode())
+        for name, slot in (("advise-cart", "reasoner"), ("report-cart", "coder")):
+            self.assertEqual(tasks[name]["tools"], [])
+            self.assertEqual(tasks[name]["model"], slot)
+            prompt = files[tasks[name]["prompt"]].decode()
+            for binding in ("user_input", "sum.outputs.calculation", "compare.outputs.calculation"):
+                self.assertIn("{{ " + binding + " }}", prompt)
+        self.assertIn("{{ advise.outputs.advice }}", files[tasks["report-cart"]["prompt"]].decode())
+        policy = plan["mcp"]["policies"]["local.calculate"]
+        self.assertEqual((policy["class"], policy["resultArtifact"]), ("read", "calculation"))
+
+    def test_all_assets_are_installed_and_explicit_output_retains_text_default(self):
         source = (fixture.REPO / "apps/android/app/src/main/java/com/trollm/app/StarterFlows.kt").read_text()
         for name in fixture.STARTERS:
             self.assertIn(f'"flows/{name}.tar"', source)

@@ -973,6 +973,45 @@ fn setup_bundle(descriptor: Option<&[u8]>, pin: &str) -> Vec<u8> {
 }
 
 #[test]
+fn bundled_local_starter_installs_with_pinned_models_and_no_connections() {
+    let base = temp_base("local-starter-install");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bytes =
+        std::fs::read(root.join("apps/android/app/src/main/assets/flows/check-total.tar")).unwrap();
+    let installed = rt.install_flow_bundle(bytes.clone()).unwrap();
+    assert_eq!(installed.flow_id, "check-total");
+    let setup: serde_json::Value = serde_json::from_str(
+        &rt.flow_setup(installed.flow_sha256.clone())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let source_setup: trollm_uniffi::setup::FlowSetup = serde_json::from_slice(
+        &std::fs::read(root.join("flows/starters/check-total/setup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(setup, serde_json::to_value(source_setup).unwrap());
+    assert!(setup["connections"].as_object().unwrap().is_empty());
+    assert_eq!(setup["models"].as_object().unwrap().len(), 2);
+    assert_eq!(setup["input"]["fields"][0]["key"], "text");
+    assert_eq!(setup["input"]["fields"][1]["key"], "budget");
+    let plan = trollm_core::ExecutionPlan::from_yaml_file(
+        &base
+            .join("trollm/bundles")
+            .join(&installed.flow_sha256)
+            .join("check-total.flow.yaml"),
+    )
+    .unwrap();
+    assert!(plan.mcp.servers.is_empty());
+    assert_eq!(
+        rt.install_flow_bundle(bytes).unwrap().flow_sha256,
+        installed.flow_sha256
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn setup_install_pins_descriptor_and_changes_root_identity() {
     let base = temp_base("setup-pins");
     let first = serde_json::to_vec(&setup_fixture()).unwrap();
@@ -1175,6 +1214,93 @@ fn new_bundle_import_rejects_authoring_typos_and_reasoner_tool_grants() {
             error.to_string().contains(expected),
             "expected {expected}: {error}"
         );
+        assert!(rt.list_flows().unwrap().is_empty());
+    }
+    drop(rt);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+fn routing_bundle(flow: &str, registry: &str) -> Vec<u8> {
+    let files: Vec<(&str, &[u8])> = vec![
+        ("hello-flow.flow.yaml", flow.as_bytes()),
+        ("hello.tasks.yaml", registry.as_bytes()),
+        ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+    ];
+    let manifest = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+    let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", &manifest)];
+    all.extend(files);
+    build_tar(&all)
+}
+
+fn routing_sources() -> (String, String) {
+    (
+        GOOD_FLOW.replace("onVerified: done", "routes: { finish: done }\n    promptSupplement: Choose a legal route."),
+        GOOD_REGISTRY
+            .replace("tools: []", "tools: [flow.choose]\n    completion: flow-route\n    maxOutputTokens: 128\n    generationTimeoutS: 5")
+            .replace("outputs: { report: { from: model, type: prose } }", "outputs: {}"),
+    )
+}
+
+#[test]
+fn routing_bundle_import_needs_no_remote_server_or_setup_connection() {
+    let base = temp_base("flow-route-import");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let (flow, registry) = routing_sources();
+    let installed = rt
+        .install_flow_bundle(routing_bundle(&flow, &registry))
+        .unwrap();
+    assert_eq!(installed.flow_id, "hello-flow");
+    assert!(rt.flow_setup(installed.flow_sha256).unwrap().is_none());
+    assert_eq!(rt.list_flows().unwrap().len(), 1);
+    drop(rt);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn routing_bundle_import_rejects_invalid_routes_and_control_grants() {
+    let base = temp_base("flow-route-reject");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let (flow, registry) = routing_sources();
+    for (flow, registry) in [
+        (
+            flow.replace("finish: done", "finish: missing"),
+            registry.clone(),
+        ),
+        (
+            flow.replace("finish: done", "bad.name: done"),
+            registry.clone(),
+        ),
+        (
+            flow.clone(),
+            registry.replace("flow.choose", "flow.unknown"),
+        ),
+        (
+            flow.clone(),
+            registry.replace("model: coder", "model: reasoner"),
+        ),
+        (
+            flow.clone(),
+            registry.replace("tools: [flow.choose]", "tools: []"),
+        ),
+        (
+            flow.clone(),
+            registry.replace("completion: flow-route", "completion: tool-result"),
+        ),
+        (
+            flow.replace(
+                "servers: []",
+                "servers: [{ name: flow, url: 'https://example.org/mcp' }]",
+            ),
+            registry.clone(),
+        ),
+        (
+            flow.replace("policies: {}", "policies: { flow.choose: {} }"),
+            registry.clone(),
+        ),
+    ] {
+        assert!(rt
+            .install_flow_bundle(routing_bundle(&flow, &registry))
+            .is_err());
         assert!(rt.list_flows().unwrap().is_empty());
     }
     drop(rt);

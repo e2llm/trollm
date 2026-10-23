@@ -1,9 +1,10 @@
-//! McpGateway: the single choke point between models and remote MCP servers.
+//! McpGateway: the single choke point for models' builtin and remote tool calls.
 //! Applies the §6 per-tool policies (cache / paginate / serveFrom / shape /
 //! mutation passthrough) on top of the streamable-HTTP transport.
 
 use crate::cache::{safe_path_component, write_file_atomic, CacheStore};
 use crate::events::ProxyEvent;
+use crate::local;
 use crate::policy::{split_policy_key, OnMiss, PolicySet, ShapePolicy, ToolClass, ToolPolicy};
 use crate::schema::ToolSchema;
 use crate::transport::{
@@ -224,6 +225,7 @@ impl ServerEntry {
 
 pub struct McpGateway {
     servers: HashMap<String, ServerEntry>,
+    local_calculator: CatalogTool,
     policies: PolicySet,
     result_validators: HashMap<String, ToolSchema>,
     argument_constraints: HashMap<String, ToolSchema>,
@@ -242,8 +244,32 @@ impl McpGateway {
         sink: Option<EventSink>,
     ) -> Result<Self> {
         policies.validate()?;
+        for (key, policy) in &policies.policies {
+            if let Some((server, tool)) = split_policy_key(key) {
+                if server == local::SERVER {
+                    if tool != local::TOOL {
+                        bail!("unknown builtin local tool in policy '{key}'");
+                    }
+                    if policy.class != ToolClass::Read
+                        || policy.cache.is_some()
+                        || policy.paginate.is_some()
+                        || policy.serve_from.is_some()
+                        || policy.on_miss.is_some()
+                        || policy.passthrough
+                    {
+                        bail!("builtin local tool policy '{key}' only supports read, resultArtifact, resultValidation, shape, timeoutS and default retry");
+                    }
+                }
+            }
+        }
         let mut names = HashSet::new();
         for server in &servers {
+            if server.name == "flow" {
+                bail!("MCP server name 'flow' is reserved for runtime control tools");
+            }
+            if server.name == local::SERVER {
+                bail!("MCP server name 'local' is reserved for builtin tools");
+            }
             if server.name.trim().is_empty() || !names.insert(server.name.clone()) {
                 bail!("MCP server names must be nonempty and unique");
             }
@@ -295,6 +321,13 @@ impl McpGateway {
             .collect();
         Ok(Self {
             servers,
+            local_calculator: {
+                let descriptor = local::descriptor();
+                CatalogTool {
+                    schema: ToolSchema::compile(&descriptor.input_schema)?,
+                    descriptor,
+                }
+            },
             policies,
             result_validators,
             argument_constraints: HashMap::new(),
@@ -319,7 +352,9 @@ impl McpGateway {
                 let (server, tool) = key
                     .split_once('.')
                     .context("argument constraint key must be server.tool")?;
-                if !self.servers.contains_key(server) || tool.is_empty() {
+                if !is_local_tool(server, tool)
+                    && (!self.servers.contains_key(server) || tool.is_empty())
+                {
                     bail!("argument constraint must name a declared server and exact tool");
                 }
                 Ok((key, ToolSchema::compile(&schema)?))
@@ -365,6 +400,13 @@ impl McpGateway {
             .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))
     }
 
+    fn require_tool_credentials(&self, server: &str, tool: &str) -> Result<()> {
+        if is_local_tool(server, tool) {
+            return Ok(());
+        }
+        self.server(server)?.require_credentials()
+    }
+
     fn call_live(
         &self,
         server: &str,
@@ -393,6 +435,12 @@ impl McpGateway {
             bail!("MCP tool arguments must be an object");
         }
         self.validate_argument_constraints(server, tool, args)?;
+        if server == local::SERVER {
+            if tool != local::TOOL {
+                bail!("unknown builtin local tool");
+            }
+            return self.local_calculator.schema.validate(args);
+        }
         let catalog = self.server(server)?.catalog()?;
         let entry = catalog
             .get(tool)
@@ -410,7 +458,7 @@ impl ToolGateway for McpGateway {
 
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         self.require_audit()?;
-        let mut out = Vec::new();
+        let mut out = vec![self.local_calculator.descriptor.clone()];
         for entry in self.servers.values() {
             out.extend(
                 entry
@@ -459,8 +507,17 @@ impl ToolGateway for McpGateway {
             Some(p) if p.paginate.is_some() && p.cache.is_some() => self.call_paginated(call, p),
             Some(p) if p.cache.is_some() => self.call_cached_read(call, p),
             _ => {
-                // No policy (or a read policy without any strategy): plain live call.
+                // Read calls without a strategy share validation and publication.
                 let args_hash = CacheStore::hash_args(&call.args, None, None);
+                if is_local_tool(&call.server, &call.tool) {
+                    self.emit(ProxyEvent::LocalCall {
+                        server: call.server.clone(),
+                        tool: call.tool.clone(),
+                        args_hash,
+                    })?;
+                    let payload = local::calculate(&call.args)?;
+                    return self.finish_result(call, policy.as_ref(), payload, Provenance::Local);
+                }
                 let payload = self.call_live(
                     &call.server,
                     &call.tool,
@@ -799,7 +856,7 @@ impl McpGateway {
         policy: Option<&ToolPolicy>,
         payload: &Value,
     ) -> Result<Option<PathBuf>> {
-        self.server(&call.server)?.require_credentials()?;
+        self.require_tool_credentials(&call.server, &call.tool)?;
         let result_path = policy
             .and_then(|p| p.result_artifact.as_ref())
             .map(|name| self.artifact_dir.join(format!("{name}.json")));
@@ -849,7 +906,7 @@ impl McpGateway {
             )?;
             artifacts.push(path);
         }
-        self.server(&call.server)?.require_credentials()?;
+        self.require_tool_credentials(&call.server, &call.tool)?;
         Ok(ToolResult {
             content_for_model: content,
             artifacts,
@@ -937,6 +994,10 @@ impl McpGateway {
         })?;
         Ok(json!({ "path": path, "bytes": byte_len, "preview": preview }))
     }
+}
+
+fn is_local_tool(server: &str, tool: &str) -> bool {
+    server == local::SERVER && tool == local::TOOL
 }
 
 fn preview_of(value: &Value) -> String {

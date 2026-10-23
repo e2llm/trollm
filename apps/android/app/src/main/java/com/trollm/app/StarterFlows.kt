@@ -10,7 +10,7 @@ import uniffi.trollm_uniffi.TrollmRuntime
 /** Install current packaged starters idempotently; retain imports and past runs. */
 object StarterFlows {
     private val lock = Mutex()
-    private val assets = listOf("flows/text-summary.tar", "flows/browser-summary.tar")
+    private val assets = listOf("flows/text-summary.tar", "flows/browser-summary.tar", "flows/check-total.tar")
 
     suspend fun ensureInstalled(context: Context, runtime: TrollmRuntime) = withContext(Dispatchers.IO) {
         lock.withLock {

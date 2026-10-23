@@ -1,0 +1,47 @@
+schemaVersion: ledger.task-registry.v1
+id: prose-calculation
+version: 1
+tasks:
+  sum-cart:
+    model: coder
+    prompt: prompts/prose-calculation-sum.md
+    tools: [local.calculate]
+    completion: tool-result
+    loop: { maxSteps: 1 }
+    toolArguments:
+      local.calculate:
+        fixed: { operation: add }
+    outputContract:
+      outputs:
+        calculation: { fromArtifact: calculation, format: json, type: object }
+      requireArtifactComplete: [calculation]
+  compare-budget:
+    model: coder
+    prompt: prompts/prose-calculation-compare.md
+    tools: [local.calculate]
+    completion: tool-result
+    loop: { maxSteps: 1 }
+    toolArguments:
+      local.calculate:
+        fromVars: { left: sum.outputs.calculation.result }
+        fixed: { operation: compare, right: "80" }
+    outputContract:
+      outputs:
+        calculation: { fromArtifact: calculation, format: json, type: object }
+      requireArtifactComplete: [calculation]
+  advise-cart:
+    model: reasoner
+    prompt: prompts/prose-calculation-advise.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        advice: { from: model, type: prose }
+  report-cart:
+    model: coder
+    prompt: prompts/prose-calculation-report.md
+    tools: []
+    loop: { maxSteps: 1 }
+    outputContract:
+      outputs:
+        report: { from: model, type: prose }

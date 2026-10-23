@@ -1,5 +1,11 @@
 # trollm — Android Architecture (v1 target)
 
+The approved [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds explicit
+coder control tools, authored routes, node instructions, recovery context and
+per-task generation limits. It supersedes the static-routing restriction below
+for opted-in tasks; legacy task/foreach/end behavior remains supported. This
+extension is implemented in source and does not add a model-free tool node.
+
 Normative document. Implementation agents: **implement exactly this**. If a consequential
 decision is missing or contradictory here, STOP and report the question — do not assume.
 Non-consequential choices (formatting, internal helpers, which micro-library for YAML) are
@@ -161,9 +167,15 @@ validation. Other slot names do not acquire an inferred semantic role.
 
 ### 4.2 Transition keys — closed set
 
-`onVerified`, `onComplete`, `onEmpty`, `onLimit`, `onError`. Values are node ids, or inline
-`{ status: paused|failed, reason: string }`. **No expressions, no conditions on model
-output.** A missing transition key for an outcome that occurred = plan validation error at
+`onVerified`, `onComplete`, `onEmpty`, `onLimit`, `onError`, and the authored
+`routes` map for `completion: flow-route` tasks. Routes replace `onVerified` on
+those nodes. Values are node ids or inline `{ status: paused|failed, reason: string }`.
+A paused route also supplies `resumeAt`, an existing continuation node persisted
+with the paused state. It resumes there without replaying the completed chooser.
+Legacy inline pauses outside routes can omit this field and keep their existing
+behavior. There are no expressions or conditions on model prose. A coder requests
+a declared route through `flow.choose`; the runtime verifies and applies it.
+A missing transition key for an outcome that occurred = plan validation error at
 load time where statically checkable, else runtime `failed` with reason `unhandled-transition`.
 
 ### 4.3 Verification (ledger-side, deterministic)
@@ -279,6 +291,21 @@ gateway return is necessary but does not bypass artifact verification. Authored
 `onError` handling, including retries, remains unchanged: this is one call per
 attempt, not an at-most-once guarantee across retries or recovery.
 
+Tasks may instead use `completion: flow-route`, with the literal `coder` slot,
+an explicit `flow.choose` grant and node-level authored routes. Ordinary tools
+may run in its bounded loop, but only a single `flow.choose` call in its own
+generation can complete the task. Mixed control/action generations reject before
+dispatch. Model-derived outputs are forbidden; artifact verification still runs.
+The control call never goes to the MCP gateway. See the
+[adaptive-flow contract](ADAPTIVE-FLOWS.md) for the complete interface, prompt
+supplements, runtime context and persisted recovery information.
+
+Optional task `maxOutputTokens` (1 through 2048) and `generationTimeoutS`
+(1 through 600) bound each generation. Omission preserves the original token
+ceiling and supplies no additional deadline. Native deadlines are cooperative
+between prefill batches and tokens. They do not preempt one decode operation
+or weaken length/grammar-rejection failure handling.
+
 Single-call tasks may supply arguments from frame values, structured input or
 literal constants:
 
@@ -354,6 +381,12 @@ a positive integer, remove it from the first server request, and validate every
 actual request including server-supplied continuation cursors before sending it.
 
 ## 6. MCP smart proxy — policy language (normative)
+
+The gateway also supplies the reserved `local.calculate` built-in described in
+[Built-in tools](BUILTIN-TOOLS.md). It uses the same coder grants, tool-call
+validation, result policies and artifact bindings, with no remote server or
+credentials. The reasoner remains tool-free. A flow using this capability needs
+an APK built from the implementation; a bundle update alone cannot add it.
 
 Per-tool policy, keyed `<server>.<tool>`:
 
@@ -495,7 +528,8 @@ or the legacy model sidecar manifests, and are verified separately from the bund
 ```rust
 pub enum FinishReason { Stop, Length, GrammarReject }
 pub struct GenerateRequest { pub prompt: String, pub grammar_gbnf: Option<String>,
-                             pub max_tokens: u32, pub stop: Vec<String> }
+                             pub max_tokens: u32, pub stop: Vec<String>,
+                             pub max_duration: Option<std::time::Duration> }
 pub struct GenerateResponse { pub text: String, pub tokens_in: u32,
                               pub tokens_out: u32, pub finish: FinishReason }
 pub trait ModelSlot: Send {

@@ -152,6 +152,14 @@ impl PolicySet {
 
     pub(crate) fn validate(&self) -> Result<()> {
         for (key, policy) in &self.policies {
+            if split_policy_key(key).is_some_and(|(server, _)| server == "flow") {
+                bail!("policy '{key}': flow is reserved for runtime control tools");
+            }
+            if policy.serve_from.as_ref().is_some_and(|source| {
+                split_policy_key(&source.fetched_by).is_some_and(|(server, _)| server == "flow")
+            }) {
+                bail!("policy '{key}': flow runtime control tools cannot be cache sources");
+            }
             if let Some(retry) = &policy.retry {
                 if retry.attempts != 1 || retry.backoff_s != 0 {
                     bail!("policy '{key}': transport retries are unsupported; omit retry or set retry.attempts to 1 and retry.backoffS to 0");
