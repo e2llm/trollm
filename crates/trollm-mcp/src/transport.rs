@@ -177,7 +177,7 @@ impl McpClient {
     ) -> Result<Value> {
         let started = Instant::now();
         self.ensure_session(timeout)?;
-        let result = self.rpc_raw(
+        let mut result = self.rpc_raw(
             "tools/call",
             json!({ "name": tool, "arguments": args }),
             remaining_timeout(timeout, started)?,
@@ -188,7 +188,17 @@ impl McpClient {
                 .take(128)
                 .flat_map(char::escape_default)
                 .collect();
-            bail!("MCP tool {tool_context} reported isError (remote diagnostic omitted)");
+            // Measure the canonical payload once, even when MCP echoes the
+            // structured result as text. Error status is carried by the type.
+            if let Some(object) = result.as_object_mut() {
+                object.remove("isError");
+            }
+            let payload = extract_tool_payload(&result);
+            return Err(received_response_error(
+                &payload,
+                "tools/call",
+                format!("MCP tool {tool_context} reported isError (remote diagnostic omitted)"),
+            ));
         }
         Ok(result)
     }
@@ -279,9 +289,17 @@ impl McpClient {
         };
         if let Some(error) = message.get("error") {
             if let Some(code) = error.get("code").and_then(Value::as_i64) {
-                bail!("MCP {method} returned error code {code}");
+                return Err(received_response_error(
+                    error,
+                    method,
+                    format!("MCP {method} returned error code {code}"),
+                ));
             }
-            bail!("MCP {method} returned error with invalid or missing code");
+            return Err(received_response_error(
+                error,
+                method,
+                format!("MCP {method} returned error with invalid or missing code"),
+            ));
         }
         message
             .get("result")
@@ -547,5 +565,30 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+}
+
+/// Preserve numeric response size while keeping remote diagnostics out of errors.
+#[derive(Debug)]
+pub(crate) struct ReceivedResponseError {
+    pub compact_json_utf8_bytes: u64,
+    pub origin: String,
+    detail: String,
+}
+impl std::fmt::Display for ReceivedResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+impl std::error::Error for ReceivedResponseError {}
+fn received_response_error(value: &Value, origin: &str, detail: String) -> anyhow::Error {
+    match crate::json_size::compact_bytes(value) {
+        Ok(bytes) => ReceivedResponseError {
+            compact_json_utf8_bytes: bytes,
+            origin: origin.to_string(),
+            detail,
+        }
+        .into(),
+        Err(error) => error.context(detail),
     }
 }

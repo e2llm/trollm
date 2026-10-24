@@ -4,6 +4,14 @@ trollm is an Android-first integration prototype, provided here as a source-only
 preview. No ready consumer APK is supplied. Proposed interfaces remain plans
 until implemented and accepted on the relevant build.
 
+The generic runtime also supports task-specific tool-call grammars, explicit
+model-owned argument names, typed array bindings, bounded artifact field views
+and nested MCP pagination metadata. Remaining run deadlines bound generation
+and dispatch, with private failure diagnostics and local byte-size accounting.
+These changes preserve coder-invoked tools and advisory reasoner prose; see the
+[architecture](ARCHITECTURE-ANDROID.md) and [flow practices](FLOW-PRACTICES.md).
+Source checks and companion inspection do not establish APK or model acceptance.
+
 ## Intended experience
 
 The approved [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds

@@ -33,7 +33,9 @@ A task node using this completion mode declares `routes` instead of
 `onVerified`: a nonempty map of at most 16 authored route names to ordinary
 transitions (node IDs or inline paused/failed transitions). A paused route must
 include an explicit `resumeAt` node ID; the paused snapshot stores that node as
-the continuation. This prevents resuming a completed chooser or mutation task.
+the continuation. Authors can select a fresh observation or other safe next step
+instead of resuming the completed chooser or mutation task. The validator checks
+that the destination exists; it does not prohibit selecting the chooser itself.
 `resumeAt` is valid only on paused transitions and must name an existing node.
 Legacy inline pauses without `resumeAt` retain their previous behavior outside
 routes. Explicit null is rejected for `routes`, `promptSupplement` and
@@ -78,7 +80,9 @@ assess_next:
 
 ## Step instructions and recovery context
 
-Task nodes may add `promptSupplement`, an inline template capped at 16 KiB.
+Task nodes may add `promptSupplement`, an inline template capped at 16 KiB of
+UTF-8 bytes. JSON Schema's `maxLength` counts characters; the runtime's byte
+check is authoritative and can reject a shorter non-ASCII template.
 Rendering uses the existing variable substitution, not expressions. Compose
 the registry prompt, then the supplement, then runtime context, with labelled
 boundaries. Nodes with either a supplement or routes opt into this context;
@@ -88,8 +92,11 @@ For opted-in nodes, the reserved template variable `runtime` contains the
 current `node`, `taskRef`, the declared `routes`, and `lastError` (initially
 null). The same bounded context is appended automatically so a routing model
 always sees its legal choices. Do not dump the whole run into the prompt.
-Authored instructions and context are separate from untrusted tool responses
-and advisory model prose. Templates can bind the relevant stored outputs.
+Labelled sections distinguish authored instructions, runtime context and bound
+outputs; they are not a trust boundary for model interpretation. In particular,
+`lastError.detail` can contain gateway or remote-service error text and must be
+treated as untrusted diagnostic data, never instructions. Templates can bind
+the relevant stored outputs and advisory prose without making them authoritative.
 
 `lastError` records the last failed task in this frame: `node`, `class`, a bounded
 `detail`, and `mutationOutcome`. Its values are `none` (no mutation dispatched
@@ -111,11 +118,16 @@ handling of uncommitted and uncertain mutations.
 
 Task definitions add optional `maxOutputTokens` (1 through 2048) and
 `generationTimeoutS` (1 through 600). Omission preserves the 2048-token ceiling
-and no additional per-generation deadline. The native backend checks deadlines
+and no additional per-generation deadline. The remaining run/active-frame
+deadline still applies. The native backend checks deadlines
 between prefill batches and generated tokens; it cannot preempt one native
 decode operation. Existing overall budgets, cancellation and finish-reason
-failure behavior remain. Truncated or grammar-rejected output cannot dispatch
-tools or complete a step.
+failure behavior remain. Truncated, timed-out or grammar-rejected output cannot dispatch
+tools or complete a step. Calls, discovery and pagination use the remaining
+run deadline too; returned mutation outcomes are journaled before a late result
+ends the run. The runtime never treats a timeout as proof that a write did not
+happen. See [the architecture contract](ARCHITECTURE-ANDROID.md) for argument
+constraints, compact artifact views and private failure diagnostics.
 
 ## Implementation and handoff
 

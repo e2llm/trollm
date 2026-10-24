@@ -1,7 +1,8 @@
 # Built-in tools: interface contract v1
 
-Agreed design, 2026-10-21. This contract accompanies the implementation of
-`local.calculate`. It defines a source capability; older APKs do not gain it by
+Calculator design agreed 2026-10-21; literal extraction added 2026-10-24.
+This contract accompanies `local.calculate` and `local.extract_decimal`.
+It defines source capabilities; older APKs do not gain them by
 installing a new flow bundle. Build an APK containing the implementation before
 claiming phone acceptance. The fixture and scripted checks below require no
 Android device, model weights or live MCP server.
@@ -77,9 +78,78 @@ produce no successful tool result. Existing executor error classes remain:
 argument validation uses `tool-call-parse`; execution errors use `mcp-error`.
 Do not turn an error, truncated model generation or missing result into success.
 
+## Literal decimal extraction contract
+
+`local.extract_decimal` is an optional coder-invoked read tool. It has no site
+rules, browser access or semantic price validation. Its machine-readable contracts
+are [input](../schemas/local-extract-decimal.v1.input.schema.json) and
+[output](../schemas/local-extract-decimal.v1.output.schema.json). Grant it explicitly
+with `tools: [local.extract_decimal]`; no setup connection is needed.
+
+Supply exactly `primary`, `secondary` and `rules`. Both sources are required
+strings, each at most 16,384 UTF-8 bytes. Use an empty string for unavailable
+source text. Rules accept only these authored fields:
+
+| Field | Meaning |
+| --- | --- |
+| `prefix` | Required nonempty literal immediately before the numeric text, allowing intervening whitespace. |
+| `fractionDigits` | Required integer from 1 through 6; exactly this many fractional digits must match. |
+| `after` | Optional literal; keep the text after its first occurrence. A missing marker leaves this source unmatched. |
+| `before` | Optional literal; keep the text before its first occurrence within the remaining window. A missing marker leaves this source unmatched. |
+| `stopBefore` | Optional array of at most 16 nonempty literals; cut the window at the earliest occurrence, using ASCII case-insensitive matching. |
+| `minimumExclusive` | Optional signed calculator-format decimal string; every numeric match must be strictly greater. |
+
+Markers and prefix are limited to 256 UTF-8 bytes each. `after`, `before` and
+`prefix` are case-sensitive. JSON Schema `maxLength` counts characters; additional
+standalone and gateway admission validation enforces the stricter UTF-8 byte
+bounds before dispatch. The sources' text is never interpreted as JSON, HTML,
+URLs or selectors.
+
+Within each window the tool examines literal prefix occurrences and accepts an
+unsigned integer of at most 12 digits, without redundant leading zeros, followed
+by either a decimal point or whitespace, then the exact fractional width. For
+example, with prefix `$` and width 2, both `$2.90` and `$2 90` yield `"2.9"`.
+There is no locale conversion, exponent support, rounding or inference about
+currency. Malformed candidates do not match. An additional dot immediately after
+the fraction prevents that candidate from matching. Other trailing text is not
+interpreted. Authored rules must scope the input appropriately.
+
+Two matches in one source are ambiguous even when their numeric values are equal.
+If each source has one match, their exact numeric values must agree. **One matching
+source is sufficient for success**, with the other explicitly marked `unmatched`;
+this is not two-source corroboration. `minimumExclusive` checks only actual
+matches: it cannot turn a missing or malformed source into corroboration or prove
+that a matched value is a current product price. A matched value at or below the
+bound fails even if another candidate or source would pass. The tool does not
+filter low values to select a preferred candidate.
+
+The result contains `format: trollm.local.extract_decimal.v1`, the canonical
+`decimal` string and two `sources` records in primary/secondary order. Each record
+contains `role`, `textSha256` of the entire original source, `status` (`matched` or
+`unmatched`) and `decimal` (canonical string or null). Hashes identify inputs; they
+do not save the source text. Preserve original observations separately and bind
+the extraction artifact at the task boundary when later tasks need it.
+
+Stable standalone errors are `local.extract_decimal: invalid-arguments`,
+`local.extract_decimal: no-match`, `local.extract_decimal: ambiguous-source`,
+`local.extract_decimal: sources-disagree` and
+`local.extract_decimal: outside-authored-bound`. Gateway schema validation may
+instead report the existing bounded field-path diagnostic for invalid arguments.
+No failure produces a successful tool result. Existing executor error classes,
+read policies, setup constraints, task grants, argument bindings, audit redaction
+and original-result artifact publication apply as for the calculator.
+
+Focused tests use literal fixtures and scripted model calls, without weights or
+network:
+
+```sh
+cargo test --locked -p trollm-mcp --no-default-features --test extract_decimal
+cargo test --locked -p trollm-core --no-default-features --test local_decimal
+```
+
 ## Policies, bindings and artifacts
 
-The calculator is a read-class operation. Its policies support the existing
+Both built-in tools are read-class operations. Their policies support the existing
 `resultArtifact`, `resultValidation` and `shape` behavior, with ordinary limits
 and the single-attempt retry defaults. Mutation classification, passthrough,
 cache, pagination and `serveFrom`/`onMiss` policies are rejected for local tools.

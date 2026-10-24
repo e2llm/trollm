@@ -285,12 +285,26 @@ fn capacity_blocks_intent_dispatch_and_preserves_uncertainty_after_effect() {
         let size = fs::metadata(run.events_path()).unwrap().len();
         assert!(size <= MAX_EVENT_LOG_BYTES);
         if after_effect {
-            for _ in 0..2 {
-                let mut restored = executor(&base, run.clone(), effects.clone());
-                assert!(restored.resume().is_err());
-                assert_eq!(effects.load(Ordering::SeqCst), 1);
-                assert_eq!(fs::metadata(run.events_path()).unwrap().len(), size);
+            let snapshot = fs::read(run.snapshot_path()).unwrap();
+            for explicit_resume in [true, false] {
+                for _ in 0..2 {
+                    let mut restored = executor(&base, run.clone(), effects.clone());
+                    let result = if explicit_resume {
+                        restored.resume()
+                    } else {
+                        restored.run_until_blocked()
+                    };
+                    assert!(result.unwrap_err().to_string().contains("log exceeds"));
+                    assert_eq!(effects.load(Ordering::SeqCst), 1);
+                    assert_eq!(fs::metadata(run.events_path()).unwrap().len(), size);
+                    assert_eq!(fs::read(run.snapshot_path()).unwrap(), snapshot);
+                }
             }
+            let rejected_recovery_events = EventLog::read_all(&run.events_path()).unwrap();
+            assert!(!rejected_recovery_events
+                .iter()
+                .any(|event| event["type"] == "resumed"));
+            assert_eq!(dangling_intents(&rejected_recovery_events).len(), 1);
         }
     }
     fs::remove_dir_all(base).unwrap();

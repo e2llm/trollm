@@ -3,11 +3,13 @@
 //! Trollm (docs/ARCHITECTURE-ANDROID.md §3–§9). All routing is
 //! authoring-time; models emit prose plus the §5.1 tool-call fence.
 
+pub mod artifact_view;
 pub mod artifacts;
 pub mod error;
 pub mod events;
 pub mod exec;
 pub mod fence;
+mod json_size;
 pub mod plan;
 pub mod registry;
 pub mod state;

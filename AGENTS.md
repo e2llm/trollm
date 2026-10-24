@@ -58,7 +58,12 @@ the complete, tool-free minimal-summary example and its existing test.
 
 An **artifact** is saved working data, such as an original tool result. A
 **binding** passes a saved value to a later task without asking a model to
-transcribe it. Preserve original evidence alongside model advice.
+transcribe it. Bindings can select unsigned array indices; task `modelFields`
+can restrict which arguments the coder supplies. An optional artifact `view`
+selects bounded JSON fields for the next prompt without modifying saved evidence.
+These are structural contracts, not expressions or semantic extraction; see the
+architecture and small-model practices below. Preserve original evidence alongside
+model advice.
 
 **Edit the registry-linked prompt to change model instructions.** The plan's
 `input.promptTemplate` field is reserved and inactive.
@@ -89,9 +94,14 @@ service for browser perception and readiness; trollm coordinates its tool calls.
 
 ## Read for the task at hand
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for workflow/checks and
-[PRODUCT-PLAN.md](docs/PRODUCT-PLAN.md) for priorities. Before changing behavior,
-read [PREMISE.md](docs/PREMISE.md) and the relevant contract:
+For a first session, read in this order:
+
+1. [README.md](README.md), then [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md)
+   and its linked source example: purpose and one complete execution path.
+2. [CONTRIBUTING.md](CONTRIBUTING.md) and [PRODUCT-PLAN.md](docs/PRODUCT-PLAN.md):
+   workflow, checks, priorities and acceptance gaps.
+3. [PREMISE.md](docs/PREMISE.md), then the relevant contract below and its
+   schema, reader and tests. The [documentation index](docs/README.md) is a map.
 
 | Working on | Read next |
 | --- | --- |
@@ -104,6 +114,9 @@ read [PREMISE.md](docs/PREMISE.md) and the relevant contract:
 
 If `docs/AMAZON-DEVELOPMENT.md` exists, read it for that branch's Amazon flow,
 host checks and phone-owner handoff. Keep its business logic in the flow.
+If `docs/AMAZON-PORT-PLAN.md` exists, it records the current aligned port and
+remaining checks. [Small-model flow practices](docs/FLOW-PRACTICES.md) explains
+how to apply browser-run lessons without adding special cases to the runtime.
 
 `docs/ADAPTIVE-FLOWS.md` describes **implemented** routing.
 `docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` contain

@@ -186,6 +186,18 @@ outputs) the meta sidecar says `complete: true`. Verification NEVER inspects mod
 A `task` whose contract accepts a no-op must say so (`allowNoop: true`) — triage's `act`
 step is the canonical case.
 
+Artifact output bindings in either a task contract or a plan node may add
+`view: {fields: {id: true, attributes: {href: true}}, maxBytes: 6144}`.
+The nonempty recursive field mask selects exact JSON keys; `true` copies the
+selected branch, and an object applies the nested mask. Arrays apply the same
+mask to every item, including parsed JSONL records. Missing keys are skipped;
+a present scalar where an object mask is required fails verification. Views do
+not filter, sort, interpret text, or modify saved artifacts. `maxBytes` is required
+(1 through 1,048,576) and bounds the compact UTF-8 JSON representation of the
+selected output; overflow fails without truncation. Omit `view` to retain the
+existing complete output. Keep separate raw and view bindings when later code
+needs the complete data while the next model needs only selected fields.
+
 ### 4.4 Executor = stack machine
 
 - `flowRef` pushes a call frame (plan id + sha256, bound inputs, own counter scope).
@@ -218,7 +230,9 @@ step is the canonical case.
 Every `task` may declare `onError: { retry: N, backoffS: S, then: <nodeId|{status...}> }`.
 Default if absent: `retry: 0`, then `{ status: failed, reason: <error-class> }`.
 Each `backoffS` must be an integer from 0 through 300 seconds inclusive, including
-in loaded subflows. This bounds each retry delay, not the total run duration.
+in loaded subflows. Each wait is also capped by the remaining active-frame run
+deadline; expiry applies `onLimit` before another attempt. Pause/cancel remains
+cooperative, with an explicit user hold checked again when resumed.
 Automatic retry is rejected for tasks granted mutation tools and for any task
 declaring `mutations.idempotency: intent-log`, including a journaled read-only task.
 Read-only tasks without intent logging retain automatic retries. This prevents
@@ -271,8 +285,8 @@ fence → gateway executes → append result → repeat → else the text is the
 → verify contract → transition. Loop exit without prose after `maxSteps` =
 `verification-failed`.
 
-Every `model_call` records `finishReason`: `stop`, `length` or `grammar-reject`.
-Length-limited or grammar-rejected responses fail as `model-error` before prose
+Every `model_call` records `finishReason`: `stop`, `length`, `timeout` or `grammar-reject`.
+Length-limited, timed-out or grammar-rejected responses fail as `model-error` before prose
 acceptance or tool-call parsing/dispatch, even if their text contains a complete
 fence. No automatic continuation is added. Token use is still counted; if that
 response also exceeds its frame's token budget, the existing `onLimit` policy
@@ -305,6 +319,17 @@ Optional task `maxOutputTokens` (1 through 2048) and `generationTimeoutS`
 ceiling and supplies no additional deadline. Native deadlines are cooperative
 between prefill batches and tokens. They do not preempt one decode operation
 or weaken length/grammar-rejection failure handling.
+The generation deadline is also capped by the earliest remaining deadline among
+active frames, including the root. `maxOutputTokens` remains an upper bound:
+native generation can use smaller remaining context headroom. Native responses
+measure context size, remaining tokens and the effective output ceiling; private
+failure evidence distinguishes the requested ceiling from context exhaustion.
+Native generation timeouts preserve available partial response text and counts.
+A response returning after the run deadline is saved as private failure evidence
+before the runtime applies `onLimit`; its prose or calls cannot complete a task.
+Android cooperative holds, weight verification and model loading consume the
+same allowance. An expired allowance prevents starting inference after loading;
+one synchronous native load or decode still cannot be preempted.
 
 Single-call tasks may supply arguments from frame values, structured input or
 literal constants:
@@ -315,6 +340,7 @@ toolArguments:
     fromInput:
       browser: browser
       target: url
+    modelFields: []
     fixed:
       action: open
   e2llm.read_page:
@@ -328,10 +354,14 @@ This optional task field requires `completion: tool-result` and names only
 granted tools. `fromVars` uses dotted frame-variable paths, without expressions
 or filters. `fromInput` reads exact top-level keys from a JSON-object user input;
 it does not interpret dotted paths. `fixed` contains literal typed JSON values,
-without interpolation. A rule must contain at least one binding, and an argument
+without interpolation. A rule must contain at least one binding or `modelFields`, and an argument
 cannot appear in more than one source map. All sources resolve before generation;
 missing values or non-object input for `fromInput` fail the task. Tasks without
 `fromInput` retain support for ordinary text input.
+At an array, a dotted path segment containing only unsigned decimal digits selects
+that index, for example `saved.outputs.tabs.tabs.0.id`. Object keys, including
+numeric keys, retain literal lookup. Missing, out-of-range and overflowing indices
+remain unbound; selected values retain their original JSON types.
 After parsing and checking the tool grant, the executor supplies an omitted bound
 argument, accepts an identical model-supplied value, and rejects a conflicting
 value before schema validation, mutation journaling or dispatch. JSON types are
@@ -342,6 +372,18 @@ URLs or choosing IDs established by earlier tool results. Setup's separate
 semantics are unchanged. Browser starter v5 opts into the new task-level input
 and constant bindings. Earlier runtimes reject those new fields rather than
 silently ignoring them; existing registries using only `fromVars` remain valid.
+
+An optional per-tool `modelFields` list closes the model-owned top-level argument
+names. `modelFields: []` requires `args:{}`; an explicit list permits only those
+names, with required fields taken from known tool/policy requirements rather than
+making every listed field mandatory. Names must be unique identifiers and cannot
+overlap runtime-bound arguments. Missing required unbound fields fail before
+generation. Closed argument generation remains active when discovery is unavailable;
+unknown names, reintroduced bound names and duplicate argument names in model
+output fail before bindings or dispatch. The original tool schema still validates
+the effective arguments after runtime bindings preserve their typed values.
+Omitting `modelFields` preserves existing open-schema and matching-bound-value
+behavior. Explicit null is rejected. This field restricts names, not nested JSON values or site semantics.
 
 ## 5.1 Tool-call fence (the ONLY structured model output)
 
@@ -418,6 +460,13 @@ Rules:
   as `onMiss`.
 - **Pagination**: a cache miss synchronously fetches the bounded result set before
   returning the requested page. `backgroundFetch: all` does not spawn detached work.
+  Pagination may declare `responseCursor: /pagination/cursor` and
+  `responseHasMore: /pagination/hasMore` as RFC 6901 JSON pointers. Without a
+  response cursor pointer, the response's top-level request `param` key supplies
+  continuation as before. An explicit `hasMore: false` ends fetching, even with
+  a stale cursor; `true` requires a non-null cursor. Missing metadata on a bare
+  array ends fetching. Response cursor values pass unchanged to the same request
+  argument; cache argument identity and all existing fetch bounds are preserved.
   Meta becomes `complete: true` after completion; subsequent calls slice the file.
 - **Transport retry**: omitted/empty `retry` and `attempts: 1, backoffS: 0` are
   accepted. Other values are rejected as unsupported before dispatch. Mutations
@@ -526,12 +575,15 @@ or the legacy model sidecar manifests, and are verified separately from the bund
 ### trollm-models
 
 ```rust
-pub enum FinishReason { Stop, Length, GrammarReject }
+pub enum FinishReason { Stop, Length, GrammarReject, Timeout }
 pub struct GenerateRequest { pub prompt: String, pub grammar_gbnf: Option<String>,
                              pub max_tokens: u32, pub stop: Vec<String>,
                              pub max_duration: Option<std::time::Duration> }
+pub struct GenerationCapacity { pub context_tokens: u32, pub context_remaining: u32,
+                                pub effective_max_tokens: u32 }
 pub struct GenerateResponse { pub text: String, pub tokens_in: u32,
-                              pub tokens_out: u32, pub finish: FinishReason }
+                              pub tokens_out: u32, pub finish: FinishReason,
+                              pub capacity: Option<GenerationCapacity> }
 pub trait ModelSlot: Send {
     fn generate(&mut self, req: GenerateRequest) -> anyhow::Result<GenerateResponse>;
 }
@@ -547,9 +599,13 @@ pub struct ToolDescriptor { pub server: String, pub name: String,
 pub struct ToolCall { pub server: String, pub tool: String, pub args: serde_json::Value }
 pub struct ToolResult { pub content_for_model: serde_json::Value,
                         pub artifacts: Vec<PathBuf>, pub provenance: Provenance }
-pub enum Provenance { Live, Cache, ServedFromFile }
+pub enum Provenance { Live, Cache, ServedFromFile, Local }
 pub trait ToolGateway: Send {
     fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>>;
+    // Optional model guidance: local/cached descriptors only, no network or waits.
+    fn available_tools(&self, grants: &[String]) -> Vec<ToolDescriptor>;
+    fn argument_constraints(&self, server: &str, tool: &str) -> Option<serde_json::Value>;
+    fn set_deadline(&mut self, deadline: Option<std::time::Instant>);
     fn tool_class(&self, server: &str, tool: &str) -> ToolClass; // stable effective policy
     fn validate_call(&self, call: &ToolCall) -> anyhow::Result<()>; // before mutation intent
     fn call(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult>; // applies policies
@@ -659,8 +715,17 @@ refine §3–§9 without changing them:
    Gateway artifact bytes and foreach worklist snapshots charge their owning frame
    and the aggregate; parent/sibling bytes do not consume a child's allowance.
    Artifact limits are checked after writing, with `value` and `limit` expressed
-   in bytes in `budget_exhausted` events. Timeout is checked only at task entry:
-   a final long task can exceed it and still succeed. It is not a hard deadline.
+   in bytes in `budget_exhausted` events. The earliest active-frame deadline also
+   bounds model generation, MCP discovery/initialization, live calls and pagination.
+   The runtime rechecks after generation, before dispatch, after recording returned
+   tool outcomes, and before successful transitions/end nodes. A late mutation's
+   existing result artifact and returned journal linkage are retained before
+   `onLimit`; tools without a declared result artifact retain the journal linkage,
+   rather than a new raw payload artifact. A failed late mutation also retains
+   `lastError.mutationOutcome: unknown`, including an authored `respond_partial`
+   outcome; partial completion does not establish the write's real-world result.
+   In-flight native decode operations and
+   schema validation remain cooperative work, rather than hard preemption.
 2. **`maxItems`**: per-dispatch-session window; resets on resume. The foreach cursor is
    absolute and persists. Otherwise `maxItems → paused` could never resume.
 3. **Artifact logical names**: `fromArtifact: tracker.list_issues.latest` maps to gateway
@@ -944,3 +1009,51 @@ fenced by refresh identity so older waiters cannot overwrite newer status.
 They retain no token or serialized SDK state; encrypted credentials remain the
 source of truth after process loss. Real provider sign-in, refresh and matching
 device acceptance remain to be exercised on the compiled APK.
+
+
+Tool response size accounting uses the existing local proxy and core journals; it sends no analytics. Proxy
+`response_size` observations identify server, tool, run-local dispatch number,
+full argument hash, stage and source. `compact_json_utf8_bytes` counts compact
+JSON for the canonical parsed payload, selecting structured content once when
+MCP also echoes it as text. These are UTF-8 bytes, not HTTP wire bytes or tokens.
+`raw_payload`, `raw_page`, `complete_collection` (the whole item array),
+`selected_page` and `gateway_result` describe nonadditive boundaries. Live,
+cache, file-served and local results are measured. Received tool errors retain
+numeric canonical payload size and MCP method origin with diagnostics redacted.
+`failed_result` has null size when no parsed result returns; unavailable,
+partial or malformed responses have no invented zero. Invalid preflight calls
+retain the existing no-dispatch, no-proxy-audit behavior.
+
+Core `tool_call_result.gatewayResultCompactJsonUtf8Bytes` measures the shaped
+payload. `toolResultContextCandidateUtf8Bytes` measures its encoded continuation
+wrapper; cancellation or a limit may prevent appending that candidate. Tool-result
+completion has zero candidate bytes. Runtime `flow.choose` records source
+`runtime_control`, null payload size and zero candidate bytes. On verified node
+exit, `outputBindingSizes` records each artifact binding's source reference,
+`artifactFileBytes`, `viewApplied` and `boundCompactJsonUtf8Bytes`. The last field
+measures the value bound after `fromArtifact.view`; it does not assert that a
+later prompt used it. Numeric size metadata contains no result contents. Raw
+artifacts remain preserved independently.
+
+Generation follows the task completion contract: `tool-result` uses one tool-call
+fence, `flow-route` uses tool calls, and a route-only task uses one call with a
+`route` from that node's declared exits. Ordinary `model-prose` tasks retain prose
+and permitted tool batches. Tool-free reasoners have no tool grammar. Decoding
+constraints guide generation; post-generation checks and the original gateway
+schema remain authoritative. Guidance uses only granted local tools and already
+cached remote descriptors; it never performs network discovery. Before the first
+remote dispatch, explicit task fields and setup requirements still apply, while
+unknown wire shapes use the conservative grammar. Dispatch discovers and validates
+the selected remote tool normally. Runtime-bound fields are omitted from the model's
+argument schema, while required unbound fields and explicit `modelFields` are
+retained. Complex schemas retain conservative fallback and final wire validation.
+
+Failures may save bounded `model-failure-*.json` artifacts containing the prompt,
+grammar and available partial response. They are private diagnostics, not reports
+or successful task output: no truncated or timed-out call is dispatched. Files
+are capped at 256 KiB, charged against the run/frame artifact allowances and
+created with mode 0600 on Unix. Individual text fields are clipped at UTF-8
+boundaries with their original sizes and truncation flags; the event records the
+complete diagnostic artifact's hash. Failure to save diagnostics cannot
+replace the original failure. Run deletion removes these with the other artifacts;
+there is no automatic upload. Sanitize any manually shared run data.

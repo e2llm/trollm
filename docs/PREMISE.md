@@ -36,8 +36,9 @@ prototype.
 A flow is more generally a procedure combining MCP tools, prompts, explicit
 control flow and persistent artifacts. Examples include location → nearby-place
 enrichment → recommendations, sensors → reasoning → database query → action,
-and the batch-processing references below. Moray can produce web flows; direct
-LLM-assisted authoring from the same specification must also work without it.
+and the batch-processing references below. Moray is a separately planned
+flow-authoring integration, not a runtime dependency; direct LLM-assisted
+authoring from the same specification must work without it.
 
 Local inference makes the phone the model runtime and avoids requiring a cloud
 model API for each reasoning step. Remote MCP tools can still transmit data,

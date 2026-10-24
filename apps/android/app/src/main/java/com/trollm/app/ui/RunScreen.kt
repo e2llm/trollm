@@ -2,6 +2,7 @@ package com.trollm.app.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.ClipData
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
@@ -9,10 +10,12 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -20,6 +23,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -43,7 +48,13 @@ import com.trollm.app.FlowSetup
 import com.trollm.app.StructuredInput
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -63,6 +74,7 @@ import uniffi.trollm_uniffi.TrollmRuntime
  * ([renderEvent]); current worker activity supplies the live status label.
  * The foreground service holds the wake lock during active execution.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RunScreen(
     runtime: TrollmRuntime,
@@ -72,6 +84,7 @@ fun RunScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboard.current
     var userInput by rememberSaveable(flow?.sha256) { mutableStateOf("") }
     val valuesSaver = remember { mapSaver<Map<String, String>>(
         save = { it }, restore = { saved -> saved.mapValues { it.value as? String ?: "" } },
@@ -93,6 +106,7 @@ fun RunScreen(
     var pollingError by remember(runId) { mutableStateOf<UiError?>(null) }
     var showTechnicalEvents by remember(runId) { mutableStateOf(false) }
     var presentation by remember(runId) { mutableStateOf<RunPresentation?>(null) }
+    var confirmCancel by remember(runId) { mutableStateOf(false) }
     var requesting by remember(runId) { mutableStateOf(false) }
     var pollingGeneration by remember(runId) { mutableStateOf(0) }
     val notificationPreferences = remember(context) { context.getSharedPreferences("run-notifications", Context.MODE_PRIVATE) }
@@ -164,6 +178,27 @@ fun RunScreen(
 
     LaunchedEffect(showTechnicalEvents, lines.size) {
         if (showTechnicalEvents && lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
+    }
+
+    if (confirmCancel && runId != null) {
+        AlertDialog(
+            onDismissRequest = { confirmCancel = false },
+            title = { Text("Cancel this run?") },
+            text = { Text("The run will stop at its next safe boundary. Remote actions may already have happened. Cancelling does not undo them.") },
+            confirmButton = {
+                TextButton(enabled = !requesting && presentation?.canCancel == true, onClick = {
+                    confirmCancel = false
+                    error = null
+                    requesting = true
+                    scope.launch {
+                        catchingOperation { withContext(Dispatchers.IO) { runtime.cancel(runId) } }
+                            .onFailure { error = operationError(UiOperation.CANCEL_RUN, it) }
+                        requesting = false
+                    }
+                }) { Text("Cancel run") }
+            },
+            dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text("Keep run") } },
+        )
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(inputScroll).padding(16.dp)) {
@@ -256,12 +291,16 @@ fun RunScreen(
                 }
             }) { Text(if (starting) "Starting…" else "Start run") }
         } else if (runId != null) {
-            Text(presentation?.text ?: "Starting…", style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(vertical = 8.dp))
+            Text(presentation?.text ?: "Loading run status…", style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite })
 
             presentation?.details?.let { TechnicalDetails(it) }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Button(enabled = !requesting && presentation?.canPause == true, onClick = {
                     error = null
                     requesting = true
@@ -294,30 +333,37 @@ fun RunScreen(
                     }
                 }) { Text("Resume") }
                 Button(enabled = !requesting && presentation?.canCancel == true, onClick = {
-                    error = null
-                    requesting = true
-                    scope.launch {
-                        catchingOperation { withContext(Dispatchers.IO) { runtime.cancel(runId) } }
-                            .onFailure { error = operationError(UiOperation.CANCEL_RUN, it) }
-                        requesting = false
-                    }
-                }) { Text("Cancel") }
+                    confirmCancel = true
+                }) { Text("Cancel run") }
             }
 
-            Button(onClick = { showTechnicalEvents = !showTechnicalEvents }) {
-                Text(if (showTechnicalEvents) "Hide technical events" else "Show technical events")
-            }
-            if (showTechnicalEvents) LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(vertical = 8.dp),
-            ) {
-                items(lines) { Text(it, fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall) }
-            }
-
-            finalReport?.let {
+            finalReport?.let { report ->
                 Text("Final report", style = MaterialTheme.typography.titleMedium)
-                Text(it, modifier = Modifier.padding(top = 4.dp))
+                SelectionContainer { Text(report, modifier = Modifier.padding(top = 4.dp)) }
+                TextButton(onClick = {
+                    scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Final report", report))) }
+                }) { Text("Copy final report") }
+            }
+
+            Button(
+                onClick = { showTechnicalEvents = !showTechnicalEvents },
+                modifier = Modifier.semantics { stateDescription = if (showTechnicalEvents) "Expanded" else "Collapsed" },
+            ) { Text(if (showTechnicalEvents) "Hide technical events" else "Show technical events") }
+            if (showTechnicalEvents) {
+                TextButton(enabled = lines.isNotEmpty(), onClick = {
+                    val events = lines.joinToString("\n")
+                    scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Technical events", events))) }
+                }) { Text("Copy technical events") }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(vertical = 8.dp),
+                ) {
+                    items(lines) { line ->
+                        SelectionContainer {
+                            Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
             }
         }
 

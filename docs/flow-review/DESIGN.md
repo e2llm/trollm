@@ -18,15 +18,32 @@ part of this delivery.
 
 ## Page and progressive detail
 
+Desktop revision approved 2026-10-24: use the available monitor width and height.
+The page is a three-pane workspace: phase/node navigation on the left, an always
+visible graph canvas in the center, and independently scrolling details on the
+right. Target desktop windows of at least 1180 pixels; a stacked mobile layout is
+outside this scope. Long prompts and expanded details must not move the canvas
+or create a document-length scrolling page.
+
 - Header: package/revision, open/upload, baseline comparison, validation, export
   feedback. Reload mounted packages explicitly; never overwrite an open review.
-- Overview first: authored purpose, input/result descriptions and phase cards.
+- Compact package context: authored purpose and validation stay above the workspace;
+  phase navigation stays beside the graph. The right-hand Package tab contains
+  the full input/result descriptions, setup, budgets and validation/root selection.
   Facts derived from executable sources include roles, tool grants, mutations,
   routes, completion checks and limits. Descriptions are labelled as authored.
-- Graph: auto-layout the current phase/subflow, with overview and fit/zoom/search.
+- Graph: auto-layout the current phase/subflow left to right, with fit/zoom/search.
+  Open the phase containing the entry step when authored phases are available.
+  Begin at readable scale around the selected/entry node; explicit Fit graph
+  provides the full overview, while Read selected node restores readable focus.
+  A minimap and panning make longer paths navigable without microscopic labels.
   One task card represents a model task; its tools are capabilities, not separate
   model-free nodes. Label verified, route, error, iteration, pause and resume
-  edges distinctly. Never omit exceptional edges without a visible indication.
+  edges distinctly, with arrows and separate return/recovery lanes. Adjacent
+  nodes outside the current phase appear as labeled boundary cards; selecting
+  one opens its phase and inspector. Boundary expansion is capped at 40 nodes
+  with an explicit count of omitted connections. Never omit exceptional edges
+  without a visible indication.
   Disclose runtime defaults, such as a task's zero-retry failure policy when
   `onError` is omitted, separately from authored transitions. Renderer IDs must
   not collide with source node IDs or impose additional naming restrictions;
@@ -36,6 +53,9 @@ part of this delivery.
 - Inspector: task definition, base prompt, node supplement, template bindings,
   output/artifact requirements, completion/recovery, permitted tools and arguments.
   Show a static instruction preview with unresolved runtime values identified.
+  Node, Package, Source, Feedback and Changes tabs share the independent right
+  pane. Choosing a node or source opens its relevant tab; comment actions open
+  Feedback. Draft revision/target/excerpt remain pinned until saved or discarded.
 - Limits: distinguish generation limits, task-loop limits and flow-frame budgets.
   Explain omission/defaults and actual timeout enforcement. Reserved inactive
   `input.promptTemplate` must be visibly inactive. Package model/setup defaults
@@ -46,8 +66,8 @@ part of this delivery.
   inspectable with diagnostics. Unknown formats are never claimed as validated.
   Prompt comparisons retain ordinary multiline text, including quotes and
   newlines, rather than showing JSON string escapes.
-- Keyboard-accessible list navigation accompanies the graph; meaning is not
-  carried by color alone. Large graphs expand incrementally.
+- Keyboard-accessible node navigation accompanies the graph in the left pane;
+  meaning is not carried by color alone. Large graphs expand incrementally.
 
 Business groupings come from optional `flow-review.json`, supplied by the
 authoring LLM. Its references are checked against the parsed graph. Every node

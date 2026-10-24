@@ -38,6 +38,12 @@ pub enum BackgroundFetch {
 pub struct PaginatePolicy {
     /// Name of the request arg carrying the pagination cursor.
     pub param: String,
+    /// RFC 6901 pointer to the response cursor; defaults to the top-level param.
+    #[serde(rename = "responseCursor", default)]
+    pub response_cursor: Option<String>,
+    /// Optional RFC 6901 pointer to an explicit boolean continuation flag.
+    #[serde(rename = "responseHasMore", default)]
+    pub response_has_more: Option<String>,
     pub deliver: Deliver,
     #[serde(rename = "backgroundFetch")]
     pub background_fetch: BackgroundFetch,
@@ -159,6 +165,29 @@ impl PolicySet {
                 split_policy_key(&source.fetched_by).is_some_and(|(server, _)| server == "flow")
             }) {
                 bail!("policy '{key}': flow runtime control tools cannot be cache sources");
+            }
+            if let Some(paginate) = &policy.paginate {
+                for pointer in [&paginate.response_cursor, &paginate.response_has_more]
+                    .into_iter()
+                    .flatten()
+                {
+                    let valid = (pointer.is_empty() || pointer.starts_with('/'))
+                        && pointer.len() <= 4096
+                        && {
+                            let mut chars = pointer.chars();
+                            let mut valid = true;
+                            while let Some(ch) = chars.next() {
+                                if ch == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            valid
+                        };
+                    if !valid {
+                        bail!("policy '{key}': pagination response paths must be RFC 6901 JSON pointers");
+                    }
+                }
             }
             if let Some(retry) = &policy.retry {
                 if retry.attempts != 1 || retry.backoff_s != 0 {

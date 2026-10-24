@@ -122,6 +122,45 @@ class OAuthGrantsTest {
         assertEquals(SelectedAuthMode.ANONYMOUS, grants.mode("browser"))
     }
 
+    @Test fun removingManualTokenPreservesActiveOAuthAndOtherConnections() {
+        val memory = Memory()
+        val grants = memory.open()
+        grants.selectManual("browser", "https://example.test/mcp", "retained-token")
+        grants.selectManual("other", "https://other.test/mcp", "other-token")
+        val login = grants.begin("browser", "https://example.test/mcp", "state", "request")
+        assertTrue(grants.update("browser", login.id, login.endpoint, "authorized"))
+        grants.removeManual("browser")
+        assertNull(memory.values["browser"]?.manualToken)
+        assertNull(memory.values["browser"]?.manualEndpoint)
+        assertEquals(SelectedAuthMode.OAUTH, grants.mode("browser"))
+        assertEquals(login.id, memory.open().bind("browser", login.endpoint, login.id)?.grantId)
+        assertEquals("authorized", grants.current("browser")?.state)
+        assertEquals("other-token", grants.manualToken("other", "https://other.test/mcp"))
+    }
+
+    @Test fun removingSelectedBearerMakesOnlyThatConnectionAnonymous() {
+        val memory = Memory()
+        val grants = memory.open()
+        grants.selectManual("browser", "https://example.test/mcp", "token")
+        grants.removeManual("browser")
+        assertEquals(SelectedAuthMode.ANONYMOUS, memory.open().mode("browser"))
+        assertNull(memory.values["browser"]?.manualToken)
+        assertNull(memory.values["browser"]?.manualEndpoint)
+        assertNull(grants.manualToken("browser", "https://example.test/mcp"))
+    }
+
+    @Test fun removingRetainedManualTokenDoesNotReopenLoggedOutOAuth() {
+        val memory = Memory()
+        val grants = memory.open()
+        grants.selectManual("browser", "https://example.test/mcp", "retained-token")
+        val login = grants.begin("browser", "https://example.test/mcp", "state", "request")
+        grants.logout("browser")
+        grants.removeManual("browser")
+        assertEquals(SelectedAuthMode.UNAVAILABLE, memory.open().mode("browser"))
+        assertNull(grants.bind("browser", login.endpoint, login.id))
+        assertNull(memory.values["browser"]?.manualToken)
+    }
+
     @Test fun coldBindingRequiresSavedGrantAndEndpointWithoutChoosingReplacement() {
         val memory = Memory()
         val initial = memory.open()

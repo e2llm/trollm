@@ -9,7 +9,11 @@ For vulnerability reporting and supported versions, see the
 bundles can declare remote endpoints and tool actions that read, transmit or
 change data using granted service access. Bundle hashes do not authenticate
 publishers. Local logs and run history may contain tool arguments and results;
-sanitize them before sharing.
+sanitize them before sharing. Bounded model-failure artifacts can additionally
+contain authored prompts, bound observations and partial model responses. These
+stay in the run's artifact directory (mode 0600 on Unix) and are removed with the
+run. They are not automatically uploaded; manually copying them can disclose
+sensitive data.
 Direct core host APIs read authored prompt paths with the host user's filesystem
 authority; Android bundle imports additionally require verified, contained
 manifest paths. These are different trust boundaries.
@@ -36,7 +40,8 @@ manifest paths. These are different trust boundaries.
 - **Endpoint-bound credentials**: manual secrets are retrieved only for their
   explicitly saved canonical HTTPS endpoint. Legacy name-only secrets require
   re-save; OAuth retains its separate grant/endpoint binding.
-- **No telemetry.** Anywhere. Ever.
+- **No remote telemetry or analytics.** Numeric size/deadline diagnostics stay
+  in the local run journals; no crash-reporting or automatic diagnostic uploads.
 
 ## Deferred (tech debt) — ordered by priority
 

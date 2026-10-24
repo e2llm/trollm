@@ -46,6 +46,97 @@ tasks:
 "#;
 const OPEN: &str = r#"<tool_call>{"server":"t","tool":"open","args":{}}</tool_call>"#;
 
+#[test]
+fn array_index_binding_preserves_integer_and_missing_index_fails_before_generation() {
+    let fixture = Fixture::new();
+    let registry = REGISTRY.replace(
+        "opened.outputs.opened.tabId",
+        "opened.outputs.opened.tabs.0.id",
+    );
+    let (status, _) = fixture.run(&registry, json!({"browser":"fixture"}));
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(
+        fixture.gateway_calls.lock().unwrap()[1].args["tabId"],
+        json!(178)
+    );
+
+    let fixture = Fixture::new();
+    let registry = REGISTRY.replace(
+        "opened.outputs.opened.tabId",
+        "opened.outputs.opened.tabs.1.id",
+    );
+    let (status, _) = fixture.run(&registry, json!({"browser":"fixture"}));
+    assert!(matches!(status, RunStatus::Failed { .. }));
+    assert_eq!(*fixture.model_calls.lock().unwrap(), 1);
+    assert_eq!(fixture.gateway_calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn closed_arguments_reject_unknown_bound_and_duplicate_names_before_dispatch() {
+    let registry = REGISTRY.replace(
+        "fromVars: { tabId:",
+        "modelFields: [browser]\n        fromVars: { tabId:",
+    );
+    for args in [
+        r#"{"browser":"fixture","unknown":1}"#,
+        r#"{"browser":"fixture","tabId":178}"#,
+        r#"{"browser":"fixture","browser":"fixture"}"#,
+        r#"{"browser":"fixture","\u0062rowser":"fixture"}"#,
+    ] {
+        let fixture = Fixture::new();
+        let response = format!(
+            "<tool_call>{{\"server\":\"t\",\"tool\":\"read\",\"args\":{args}}}</tool_call>"
+        );
+        let (status, events) = fixture.run_response(&registry, &response, "");
+        assert!(
+            matches!(status, RunStatus::Failed { reason } if reason.contains("tool-call-parse"))
+        );
+        assert_eq!(fixture.gateway_calls.lock().unwrap().len(), 1);
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "tool_call_intent"));
+    }
+}
+
+#[test]
+fn closed_empty_arguments_preserve_runtime_values_without_catalog_discovery() {
+    let registry = REGISTRY.replace(
+        "fromVars: { tabId:",
+        "modelFields: []\n        fixed: { browser: fixture }\n        fromVars: { tabId:",
+    );
+    let fixture = Fixture::new();
+    let (status, _) = fixture.run(&registry, json!({}));
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(
+        fixture.gateway_calls.lock().unwrap()[1].args,
+        json!({"browser":"fixture","tabId":178})
+    );
+}
+
+#[test]
+fn closed_argument_declarations_require_unique_unbound_identifiers() {
+    let fixture = Fixture::new();
+    for fields in [
+        "[browser, browser]",
+        "[tabId]",
+        "[bad.name]",
+        "null",
+        "{}",
+        "[1]",
+    ] {
+        let registry = REGISTRY.replace(
+            "fromVars: { tabId:",
+            &format!("modelFields: {fields}\n        fromVars: {{ tabId:"),
+        );
+        assert!(TaskRegistry::from_yaml_str(&registry, &fixture.base).is_err());
+    }
+    let registry = REGISTRY.replace(
+        "fromVars: { tabId: opened.outputs.opened.tabId }",
+        "modelFields: []",
+    );
+    assert!(TaskRegistry::from_yaml_str(&registry, &fixture.base).is_ok());
+}
+
 struct RecordingModel {
     inner: MockModel,
     calls: Arc<Mutex<usize>>,
@@ -89,7 +180,7 @@ impl ToolGateway for Gateway {
             let written = artifacts::write_atomic(
                 &self.run.artifacts_dir(),
                 "opened.json",
-                br#"{"tabId":178}"#,
+                br#"{"tabId":178,"tabs":[{"id":178}]}"#,
             )?;
             artifacts::write_meta(
                 &written.path,
@@ -143,6 +234,9 @@ impl Fixture {
             "<tool_call>{}</tool_call>",
             json!({"server":"t","tool":"read","args":args})
         );
+        self.run_response(registry, &response, input)
+    }
+    fn run_response(&self, registry: &str, response: &str, input: &str) -> (RunStatus, Vec<Value>) {
         let mut exec = Executor::new(
             ExecutionPlan::from_yaml_str(PLAN).unwrap(),
             TaskRegistry::from_yaml_str(registry, &self.base).unwrap(),
@@ -150,7 +244,7 @@ impl Fixture {
             SlotMap::new().with(
                 "coder",
                 RecordingModel {
-                    inner: MockModel::scripted([OPEN, &response]),
+                    inner: MockModel::scripted([OPEN, response]),
                     calls: self.model_calls.clone(),
                 },
             ),
@@ -322,7 +416,7 @@ fn combined_validation_rejects_programmatically_invalid_bindings() {
     .unwrap_err();
     assert!(error
         .to_string()
-        .contains("requires at least one fromVars, fromInput or fixed argument"));
+        .contains("requires bindings or modelFields"));
     assert_eq!(*fixture.model_calls.lock().unwrap(), 0);
 }
 

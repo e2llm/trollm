@@ -189,21 +189,65 @@ impl CacheStore {
         hash: &str,
         page: u64,
     ) -> Result<Option<(Vec<Value>, PageIndex, bool)>> {
+        Ok(self
+            .read_page_with_size(server, tool, hash, page)?
+            .map(|(items, index, has_next, _)| (items, index, has_next)))
+    }
+
+    /// Validate the complete JSONL generation while retaining only the requested
+    /// page. Count compact array bytes in this same scan, avoiding a second
+    /// collection read or allocation solely for response telemetry.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn read_page_with_size(
+        &self,
+        server: &str,
+        tool: &str,
+        hash: &str,
+        page: u64,
+    ) -> Result<Option<(Vec<Value>, PageIndex, bool, u64)>> {
         let index = self.read_page_index(server, tool, hash)?;
         let Some(index) = index else { return Ok(None) };
         if page == 0 || page > index.counts.len() as u64 {
             return Ok(None);
         }
-        let start: u64 = index.counts[..(page - 1) as usize].iter().sum();
-        let take = index.counts[(page - 1) as usize];
-        let items = self.read_items(server, tool, hash)?;
-        let slice: Vec<Value> = items
-            .into_iter()
-            .skip(start as usize)
-            .take(take as usize)
-            .collect();
+        let sum = |counts: &[u64]| -> Result<u64> {
+            counts.iter().try_fold(0u64, |sum, count| {
+                sum.checked_add(*count)
+                    .context("cached page item count overflow")
+            })
+        };
+        let start = sum(&index.counts[..(page - 1) as usize])?;
+        let end = start
+            .checked_add(index.counts[(page - 1) as usize])
+            .context("cached page item count overflow")?;
+        let expected = sum(&index.counts)?;
+        let path = self.jsonl_path(server, tool, hash)?;
+        let file = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        let mut selected = Vec::new();
+        let mut count = 0u64;
+        let mut bytes = 2u64; // Opening and closing array brackets, including [].
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&line).context("parsing cached JSONL line")?;
+            let size = crate::json_size::compact_bytes(&value)?;
+            bytes = bytes
+                .checked_add(size)
+                .and_then(|bytes| bytes.checked_add(u64::from(count != 0)))
+                .context("compact collection byte count overflow")?;
+            if count >= start && count < end {
+                selected.push(value);
+            }
+            count = count.checked_add(1).context("cached item count overflow")?;
+        }
+        ensure!(
+            count == expected,
+            "cached collection item count does not match page index"
+        );
         let has_next = page < index.counts.len() as u64;
-        Ok(Some((slice, index, has_next)))
+        Ok(Some((selected, index, has_next, bytes)))
     }
 
     fn read_page_index(&self, server: &str, tool: &str, hash: &str) -> Result<Option<PageIndex>> {

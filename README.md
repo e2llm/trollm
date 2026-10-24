@@ -17,6 +17,12 @@ connected browser may run on a PC while inference runs on the phone. Remote
 tools require their services and network access; local inference does not make
 every flow offline.
 
+A **flow** is an authored procedure: a graph of small model tasks, their prompts,
+allowed tools, saved results and execution limits. The graph defines the possible
+next steps; the coder can choose among declared exits by calling `flow.choose`.
+The reasoner supplies advice in ordinary text. A flow package keeps these files
+together so people and coding agents can inspect and revise the procedure.
+
 The app prepares checksum-pinned models and connections, supports per-flow
 settings, browser OAuth and manual Bearer credentials, and shows persistent run
 history. The coder calls granted built-in or MCP tools; the tool-free reasoner
@@ -53,6 +59,7 @@ ready; source updates do not renew acceptance of different APK bytes.
 
 ## Start here
 
+- [Documentation index](docs/README.md): a reading path by task
 - [Human flow review companion](apps/flow-review/README.md): self-hostable package
   inspection, business phases and feedback for an authoring LLM; its
   [implementation record](docs/flow-review/IMPLEMENTATION.md) tracks acceptance

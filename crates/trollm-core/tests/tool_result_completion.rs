@@ -52,6 +52,7 @@ enum Behavior {
     Success,
     Error,
     CompleteArtifact,
+    LargeArtifact,
     IncompleteArtifact,
 }
 struct Gateway {
@@ -92,6 +93,25 @@ impl ToolGateway for Gateway {
             "scripted gateway error"
         );
         let mut paths = vec![];
+        let model_content = if matches!(self.behavior, Behavior::LargeArtifact) {
+            let content = json!({"content":"raw evidence 🦀 ".repeat(512)});
+            let written = artifacts::write_atomic(
+                &self.run.artifacts_dir(),
+                "page.json",
+                &serde_json::to_vec(&content)?,
+            )?;
+            artifacts::write_meta(
+                &written.path,
+                &ArtifactMeta {
+                    fetched_at: 0,
+                    complete: true,
+                },
+            )?;
+            paths.push(written.path);
+            content
+        } else {
+            json!({"ok":true})
+        };
         if matches!(
             self.behavior,
             Behavior::CompleteArtifact | Behavior::IncompleteArtifact
@@ -111,7 +131,7 @@ impl ToolGateway for Gateway {
             paths.push(written.path);
         }
         Ok(ToolResult {
-            content_for_model: json!({"ok":true}),
+            content_for_model: model_content,
             artifacts: paths,
             provenance: Provenance::Live,
         })
@@ -191,6 +211,33 @@ fn event_count(events: &[Value], kind: &str) -> usize {
 }
 
 #[test]
+fn tool_result_skips_continuation_and_preserves_large_evidence() {
+    let h = Harness::new();
+    let registry = format!("{REGISTRY}\n    outputContract:\n      outputs:\n        page: {{ fromArtifact: page, format: json, type: object }}\n");
+    let (status, state, events) = h.run(&registry, &[CALL], Behavior::LargeArtifact);
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(h.prompts.lock().unwrap().len(), 1);
+    let original = json!({"content":"raw evidence 🦀 ".repeat(512)});
+    let path = h.run.artifacts_dir().join("page.json");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        serde_json::to_vec(&original).unwrap()
+    );
+    assert!(artifacts::is_complete(&path));
+    assert_eq!(state["stack"][0]["nodeOutputs"]["work"]["page"], original);
+    let result = events
+        .iter()
+        .find(|event| event["type"] == "tool_call_result")
+        .unwrap();
+    assert_eq!(result["toolResultContextCandidateUtf8Bytes"], 0);
+    assert_eq!(
+        result["gatewayResultCompactJsonUtf8Bytes"],
+        serde_json::to_vec(&original).unwrap().len()
+    );
+    assert!(result["intentSeq"].as_u64().is_some());
+}
+
+#[test]
 fn one_successful_call_completes_without_second_generation() {
     let h = Harness::new();
     let (status, state, events) = h.run(REGISTRY, &[CALL], Behavior::Success);
@@ -247,6 +294,18 @@ fn gateway_error_cannot_complete_task() {
     assert_eq!(h.calls.lock().unwrap().len(), 1);
     assert_eq!(event_count(&events, "tool_call_intent"), 1);
     assert_eq!(event_count(&events, "tool_call_result"), 0);
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "error")
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "one canonical task error per failed attempt"
+    );
+    assert_eq!(errors[0]["class"], "mcp-error");
+    assert_eq!(errors[0]["node"], "work");
+    assert_eq!(errors[0]["detail"], "t.write: scripted gateway error");
 }
 
 #[test]

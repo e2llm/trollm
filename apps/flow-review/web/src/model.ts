@@ -316,9 +316,11 @@ export interface Comment {
   text: string;
 }
 function fenced(text: string) {
-  const fence = "`".repeat(
-    Math.max(3, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length + 1)),
-  );
+  // A long prompt can contain more matches than a JS call's argument limit.
+  let length = 3;
+  for (const match of text.matchAll(/`+/g))
+    length = Math.max(length, match[0].length + 1);
+  const fence = "`".repeat(length);
   return `${fence}text\n${text}\n${fence}`;
 }
 export function feedback(doc: Inspection, comments: Comment[]) {

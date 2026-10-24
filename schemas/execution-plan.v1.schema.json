@@ -88,7 +88,7 @@
             }
           }
         },
-        "policies": { "type": "object", "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Opaque to this schema." }
+        "policies": { "type": "object", "additionalProperties": { "type": "object", "properties": { "paginate": { "$ref": "#/$defs/paginatePolicy" } } }, "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Pagination metadata pointers are validated here; other policy fields are consumed by the policy engine." }
       }
     },
     "entryStep": { "type": "string", "minLength": 1 },
@@ -99,6 +99,16 @@
     }
   },
   "$defs": {
+    "paginatePolicy": {
+      "type": "object", "required": ["param", "deliver", "backgroundFetch"], "additionalProperties": false,
+      "properties": {
+        "param": { "type": "string" },
+        "deliver": { "const": "first_page" },
+        "backgroundFetch": { "const": "all" },
+        "responseCursor": { "type": "string", "maxLength": 4096, "pattern": "^(?:/(?:[^~]|~[01])*)?$" },
+        "responseHasMore": { "type": "string", "maxLength": 4096, "pattern": "^(?:/(?:[^~]|~[01])*)?$" }
+      }
+    },
     "transition": {
       "description": "§4.2: a node id, or an inline {status, reason}. No expressions, no conditions on model output.",
       "oneOf": [
@@ -148,6 +158,17 @@
         "then": { "$ref": "#/$defs/transition" }
       }
     },
+    "artifactViewFields": {
+      "type": "object", "minProperties": 1,
+      "additionalProperties": { "oneOf": [{ "const": true }, { "$ref": "#/$defs/artifactViewFields" }] }
+    },
+    "artifactView": {
+      "type": "object", "required": ["fields", "maxBytes"], "additionalProperties": false,
+      "properties": {
+        "fields": { "$ref": "#/$defs/artifactViewFields" },
+        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+      }
+    },
     "nodeOutputBinding": {
       "oneOf": [
         {
@@ -156,7 +177,8 @@
           "additionalProperties": false,
           "properties": {
             "fromArtifact": { "type": "string", "minLength": 1 },
-            "format": { "enum": ["jsonl", "json"] }
+            "format": { "enum": ["jsonl", "json"] },
+            "view": { "$ref": "#/$defs/artifactView" }
           }
         },
         {
@@ -208,7 +230,7 @@
                 "then": { "required": ["resumeAt"] }
               }
             },
-            "promptSupplement": { "type": "string", "maxLength": 16384, "description": "Inline task instructions, runtime-capped at 16 KiB UTF-8." }
+            "promptSupplement": { "type": "string", "maxLength": 16384, "description": "Inline task instructions. maxLength counts Unicode characters; the runtime additionally enforces an authoritative 16384-byte UTF-8 limit, which can reject shorter non-ASCII strings." }
           },
           "oneOf": [
             {

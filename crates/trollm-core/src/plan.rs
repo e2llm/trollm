@@ -182,7 +182,7 @@ pub enum Transition {
 }
 
 /// New optional authored fields distinguish omission from explicit null.
-fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,
@@ -234,6 +234,12 @@ pub enum NodeOutputBinding {
     FromArtifact {
         #[serde(rename = "fromArtifact")]
         from_artifact: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::plan::deserialize_present_option"
+        )]
+        view: Option<crate::artifact_view::ArtifactView>,
         format: Option<String>,
     },
     FromModel {

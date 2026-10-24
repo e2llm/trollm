@@ -33,6 +33,27 @@ val rustFeatures = findProperty("trollm.rustFeatures") as String? ?: "llama"
 require(rustFeatures == "stub" || rustFeatures == "llama") {
     "trollm.rustFeatures must be stub or llama"
 }
+val androidTargets = linkedMapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "armeabi-v7a" to "arm-linux-androideabi",
+    "x86_64" to "x86_64-linux-android",
+)
+val androidAbis = (findProperty("trollm.androidAbis") as String?
+    ?: androidTargets.keys.joinToString(","))
+    .split(',').map(String::trim).filter(String::isNotEmpty).distinct()
+require(androidAbis.isNotEmpty() && androidAbis.all(androidTargets::containsKey)) {
+    "trollm.androidAbis contains an unsupported ABI"
+}
+// Cargo metadata resolves config and relative CARGO_TARGET_DIR values from
+// repoDir, exactly as the build/generation commands below do.
+val cargoTargetDir = file(cargoMetadata["target_directory"] as String)
+val hostLibraryName = when {
+    System.getProperty("os.name").startsWith("Windows", ignoreCase = true) ->
+        "trollm_uniffi.dll"
+    System.getProperty("os.name").startsWith("Mac", ignoreCase = true) ->
+        "libtrollm_uniffi.dylib"
+    else -> "libtrollm_uniffi.so"
+}
 val jniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
 val uniffiGenDir = layout.buildDirectory.dir("generated/uniffi")
 
@@ -56,6 +77,9 @@ android {
         targetSdk = 35
         versionCode = androidVersionCode
         versionName = productVersion
+        ndk {
+            abiFilters += androidAbis
+        }
     }
 
     System.getenv("TROLLM_DEBUG_KEYSTORE_PATH")?.let { path ->
@@ -130,33 +154,32 @@ val buildRustHost = tasks.register<Exec>("buildRustHost") {
     commandLine("cargo", "build", "--locked", "-p", "trollm-uniffi")
 }
 
-// Cross-compile for the three supported ABIs. cargo-ndk places
+// Cross-compile for the requested supported ABIs. cargo-ndk places
 // libtrollm_uniffi.so under <jniLibs>/<abi>/.
 val buildRustAndroid = tasks.register<Exec>("buildRustAndroid") {
     workingDir = repoDir
-    commandLine(
-        "cargo", "ndk",
-        "--platform", (android.defaultConfig.minSdk
-            ?: error("Android minSdk is required for the Rust build")).toString(),
-        "-t", "arm64-v8a",
-        "-t", "armeabi-v7a",
-        "-t", "x86_64",
-        "-o", jniLibsDir.asFile.absolutePath,
-        "build", "--locked", "-p", "trollm-uniffi", "--release", "--features", rustFeatures,
-    )
+    commandLine(buildList {
+        addAll(listOf(
+            "cargo", "ndk",
+            "--platform", (android.defaultConfig.minSdk
+                ?: error("Android minSdk is required for the Rust build")).toString(),
+        ))
+        androidAbis.forEach { abi -> addAll(listOf("-t", abi)) }
+        addAll(listOf(
+            "-o", jniLibsDir.asFile.absolutePath,
+            "build", "--locked", "-p", "trollm-uniffi", "--release", "--features", rustFeatures,
+        ))
+    })
     if (rustFeatures == "llama") {
-        environment("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+        environment("CMAKE_BUILD_PARALLEL_LEVEL", System.getenv("CMAKE_BUILD_PARALLEL_LEVEL")?.takeIf(String::isNotBlank) ?: "2")
         doLast {
             val ndk = file(System.getenv("ANDROID_NDK_HOME")
                 ?: error("ANDROID_NDK_HOME is required to package libc++_shared.so"))
             val toolchain = ndk.resolve("toolchains/llvm/prebuilt").listFiles()
                 ?.singleOrNull { it.isDirectory }
                 ?: error("Expected one NDK host toolchain")
-            for ((abi, target) in mapOf(
-                "arm64-v8a" to "aarch64-linux-android",
-                "armeabi-v7a" to "arm-linux-androideabi",
-                "x86_64" to "x86_64-linux-android",
-            )) {
+            for (abi in androidAbis) {
+                val target = androidTargets.getValue(abi)
                 val runtime = toolchain.resolve("sysroot/usr/lib/$target/libc++_shared.so")
                 check(runtime.isFile) { "Missing NDK C++ runtime for $abi" }
                 copy {
@@ -182,7 +205,7 @@ val generateUniFFIBindings = tasks.register<Exec>("generateUniFFIBindings") {
         "--features", "bindgen-cli",
         "--",
         "generate", "--metadata-no-deps", "--no-format",
-        "--library", repoDir.resolve("target/debug/libtrollm_uniffi.so").absolutePath,
+        "--library", cargoTargetDir.resolve("debug/$hostLibraryName").absolutePath,
         "--language", "kotlin",
         "--out-dir", uniffiGenDir.get().asFile.absolutePath,
     )

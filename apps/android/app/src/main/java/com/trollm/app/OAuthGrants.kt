@@ -72,6 +72,14 @@ class OAuthGrants(
             else SelectedAuthMode.BEARER, token, null, canonical))
     }
 
+    /** Remove only the manual secret/binding, preserving OAuth and other connections. */
+    fun removeManual(server: String) = synchronized(lock) {
+        require(ConnectionInput.validServer(server))
+        val stored = selected(server)
+        val mode = if (stored.mode == SelectedAuthMode.BEARER) SelectedAuthMode.ANONYMOUS else stored.mode
+        write(server, StoredConnection(mode, null, stored.grant, null))
+    }
+
     /** Selection, endpoint match and secret read share the connection-edit lock. */
     fun manualToken(server: String, endpoint: String): String? = synchronized(lock) {
         val canonical = ConnectionInput.canonicalEndpoint(endpoint)

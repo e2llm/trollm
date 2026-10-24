@@ -163,7 +163,7 @@ fn multiple_additional_anchors_work_through_both_gateway_constructors() {
         )
         .unwrap();
         let tools = gateway.list_tools().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].server, "local");
         assert_eq!(tools[0].name, "calculate");
         handle.join().unwrap();
