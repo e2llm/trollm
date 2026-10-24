@@ -1,0 +1,35 @@
+# Build from repository root. No Android SDK, inference backend or model files.
+ARG NODE_IMAGE=docker.io/library/node:22.22.2-bookworm-slim
+ARG RUST_IMAGE=docker.io/library/rust:1.90.0-bookworm
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
+FROM ${NODE_IMAGE} AS web
+WORKDIR /src/apps/flow-review/web
+COPY apps/flow-review/web/package*.json ./
+RUN npm ci --no-audit --no-fund --fetch-retries=2 --fetch-timeout=60000
+COPY apps/flow-review/web/ ./
+RUN npm run build
+
+FROM ${RUST_IMAGE} AS server
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY schemas/ schemas/
+COPY apps/flow-review/server/ apps/flow-review/server/
+RUN CARGO_BUILD_JOBS=2 cargo build --locked --release -p trollm-flow-review \
+    && mkdir -p /out/packages
+
+FROM ${RUNTIME_IMAGE}
+WORKDIR /app
+COPY --from=server /out/packages/ /packages/
+COPY --from=server /src/target/release/trollm-flow-review /app/trollm-flow-review
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+COPY --from=web /src/apps/flow-review/web/dist/ /app/web/
+USER 10001:10001
+ENV FLOW_REVIEW_BIND=0.0.0.0:8080 \
+    FLOW_REVIEW_PACKAGES=/packages \
+    FLOW_REVIEW_STATIC=/app/web \
+    FLOW_REVIEW_TEMP=/tmp/trollm-flow-review
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/app/trollm-flow-review", "--healthcheck"]
+ENTRYPOINT ["/app/trollm-flow-review"]

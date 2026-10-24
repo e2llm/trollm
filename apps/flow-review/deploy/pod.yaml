@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trollm-flow-review
+spec:
+  restartPolicy: Always
+  containers:
+    - name: server
+      image: registry.example.invalid/trollm/flow-review:COMMIT_SHA
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+          hostIP: 127.0.0.1
+      env:
+        - name: FLOW_REVIEW_BIND
+          value: 0.0.0.0:8080
+        - name: FLOW_REVIEW_PACKAGES
+          value: /packages
+        - name: FLOW_REVIEW_STATIC
+          value: /app/web
+        - name: FLOW_REVIEW_TEMP
+          value: /tmp/trollm-flow-review
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: '2'
+          memory: 1Gi
+      volumeMounts:
+        - name: packages
+          mountPath: /packages
+          readOnly: true
+        - name: transient
+          mountPath: /tmp
+      livenessProbe:
+        exec:
+          command: [/app/trollm-flow-review, --healthcheck]
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        timeoutSeconds: 10
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        periodSeconds: 5
+        timeoutSeconds: 3
+  volumes:
+    - name: packages
+      hostPath:
+        path: /srv/trollm/packages
+        type: Directory
+    - name: transient
+      emptyDir:
+        medium: Memory
+        # Podman 5.8 ignores this Kubernetes field; container memory is enforced.
+        sizeLimit: 512Mi

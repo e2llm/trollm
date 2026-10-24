@@ -30,3 +30,10 @@ apps/android/app/src/main/jniLibs/
 *.log
 /reviews/
 /review-archive/
+
+# Flow-review dependencies, browser output and transient deployment files.
+apps/flow-review/web/node_modules/
+apps/flow-review/web/dist/
+apps/flow-review/web/test-results/
+apps/flow-review/web/playwright-report/
+apps/flow-review/deploy/generated/

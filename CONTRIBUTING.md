@@ -65,6 +65,12 @@ scripted executor test before introducing MCP-backed flows. Check
   [development guide](apps/android/README.md).
 - `flows`, `schemas`, `scripts`: reference inputs, contracts and portable checks.
 
+The separate [flow review companion](apps/flow-review/README.md) lives in
+`apps/flow-review/` with its own browser package and a Rust workspace server.
+Read its [design and interface](docs/flow-review/README.md) before changing review
+semantics. Use its focused frontend/server checks for viewer-only changes;
+Android/native compilation is not required for those changes.
+
 Keep the Rust workspace and Android app together. Preserve existing user edits
 and generate bindings/build outputs from source instead of hand-editing them.
 

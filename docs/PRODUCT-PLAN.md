@@ -14,6 +14,14 @@ tools remain coder-invoked code. Host unit/integration checks cover this work;
 physical-phone acceptance of the separate Amazon development flow is a distinct
 maintainer activity.
 
+The separate [flow review companion](../apps/flow-review/README.md) presents
+LLM-authored packages as business phases, inspectable graphs and source details.
+Humans export anchored feedback and compare revised packages; authoring stays
+with the external LLM. It runs as a self-hosted Podman pod with a read-only
+package directory and transient uploads. Its [design and delivery
+record](flow-review/README.md) describes the implemented scope and validation
+limits. This companion does not execute flows or change the runtime contract.
+
 A user installs trollm, signs in to E2LLM, chooses a supplied flow, provides input
 and follows progress and results. A browser may run on a PC while inference runs
 on the phone. Android 13/API 33+, S21-class hardware or newer and signed sideloaded

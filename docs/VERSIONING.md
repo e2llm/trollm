@@ -1,7 +1,7 @@
 # Product version and build identity
 
 trollm has one product release version for the Rust workspace and Android app.
-The root `Cargo.toml` `[workspace.package].version` is authoritative; all four
+The root `Cargo.toml` `[workspace.package].version` is authoritative; all workspace
 crates inherit it with `version.workspace = true`. Android uses that value as
 `versionName`. Gradle reads Cargo's resolved metadata with
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
@@ -28,7 +28,8 @@ To prepare a candidate, edit the two root manifest values and refresh the local
 crate entries in `Cargo.lock`, without upgrading dependencies:
 
 ```sh
-cargo update --offline -p trollm-core -p trollm-models -p trollm-mcp -p trollm-uniffi
+cargo update --offline -p trollm-core -p trollm-models -p trollm-mcp \
+  -p trollm-uniffi -p trollm-flow-review
 python3 scripts/release_version.py --check
 ```
 
@@ -40,6 +41,10 @@ actual manifest before recording the build's version.
 Curated source-only updates are identified by their source commit. They do not
 require a release-version bump and do not imply a new APK or renewed device
 acceptance. Preserve the source/build identity associated with each actual APK.
+Flow review container builds use full source-commit tags and content digests;
+publishing one does not by itself require a Rust/Android product version bump.
+Its Rust server inherits the workspace version. The private browser package's
+npm metadata is not an independently published product release.
 Flow/schema compatibility is versioned by its own format identifiers, such as
 `ledger.execution-plan.v1` and `trollm.flow-bundle.v1`. A product version change does not
 change those contracts. Model setup pins upstream model revisions, sizes and

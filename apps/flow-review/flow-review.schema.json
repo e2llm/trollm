@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trollm.example/schemas/flow-presentation.v1.json",
+  "title": "trollm business presentation for a flow package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "title", "purpose", "phases"],
+  "properties": {
+    "format": {"const": "trollm.flow-presentation.v1"},
+    "title": {"$ref": "#/$defs/text"},
+    "purpose": {"$ref": "#/$defs/text"},
+    "inputsDescription": {"$ref": "#/$defs/text"},
+    "resultDescription": {"$ref": "#/$defs/text"},
+    "phases": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "description", "nodes"],
+        "properties": {
+          "id": {"$ref": "#/$defs/text"},
+          "title": {"$ref": "#/$defs/text"},
+          "description": {"$ref": "#/$defs/text"},
+          "nodes": {
+            "type": "array",
+            "maxItems": 10000,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/node"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "\\S"},
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flow", "node"],
+      "properties": {
+        "flow": {"$ref": "#/$defs/text"},
+        "node": {"$ref": "#/$defs/text"}
+      }
+    }
+  },
+  "$comment": "The server also checks UTF-8 byte bounds, unique phase IDs, whole-document reference bounds, unique phase membership and actual graph references. Presentation is descriptive and does not change execution."
+}

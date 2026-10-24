@@ -100,6 +100,7 @@ read [PREMISE.md](docs/PREMISE.md) and the relevant contract:
 | Runtime behavior or formats | [ARCHITECTURE-ANDROID.md](docs/ARCHITECTURE-ANDROID.md), including its later implementation qualifications; relevant `schemas/`, reader and tests |
 | Android | [Android guide](apps/android/README.md) |
 | Security | [SECURITY.md](SECURITY.md) and [enterprise security](docs/SECURITY-ENTERPRISE.md) |
+| Human flow review / self-hosted viewer | [Flow review design and implementation plan](docs/flow-review/README.md); isolated application in `apps/flow-review/` |
 
 If `docs/AMAZON-DEVELOPMENT.md` exists, read it for that branch's Amazon flow,
 host checks and phone-owner handoff. Keep its business logic in the flow.
