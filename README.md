@@ -53,6 +53,9 @@ ready; source updates do not renew acceptance of different APK bytes.
 
 ## Start here
 
+- [Human flow review companion](apps/flow-review/README.md): self-hostable package
+  inspection, business phases and feedback for an authoring LLM; its
+  [implementation record](docs/flow-review/IMPLEMENTATION.md) tracks acceptance
 - [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md): a small current-format example
   and its scripted executor test, with no Android SDK or model weights required
 - [Agent onboarding](AGENTS.md): reading order, runtime path and source map

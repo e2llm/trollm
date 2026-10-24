@@ -1,0 +1,22 @@
+[package]
+name = "trollm-flow-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+rustix = { version = "1", features = ["fs"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tar = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.6", features = ["fs", "timeout", "set-header", "limit"] }
+trollm-core = { path = "../../../crates/trollm-core" }
+trollm-uniffi = { path = "../../../crates/trollm-uniffi", default-features = false }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

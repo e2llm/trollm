@@ -5,6 +5,7 @@ members = [
     "crates/trollm-models",
     "crates/trollm-mcp",
     "crates/trollm-uniffi",
+    "apps/flow-review/server",
 ]
 
 [workspace.package]

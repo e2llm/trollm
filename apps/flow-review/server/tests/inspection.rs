@@ -1,0 +1,497 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+use trollm_flow_review::{
+    import::{self, SourceFile, SourceRequest},
+    inspect::inspect,
+};
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+fn sources(paths: &[&str]) -> Vec<SourceFile> {
+    paths
+        .iter()
+        .map(|p| SourceFile {
+            path: p.to_string(),
+            content: fs::read_to_string(root().join(p)).unwrap(),
+        })
+        .collect()
+}
+fn minimal() -> Vec<SourceFile> {
+    sources(&[
+        "flows/examples/minimal-summary.flow.yaml",
+        "flows/tasks/minimal-summary.tasks.yaml",
+        "flows/tasks/prompts/minimal-summary.md",
+    ])
+}
+fn review(files: Vec<SourceFile>) -> trollm_flow_review::inspect::Inspection {
+    let temp = tempfile::tempdir().unwrap();
+    let result = inspect(
+        SourceRequest {
+            files,
+            ..Default::default()
+        },
+        temp.path(),
+        "Test",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_dir(temp.path()).unwrap().count(),
+        0,
+        "staged files cleaned"
+    );
+    result
+}
+#[test]
+fn real_minimal_summary_and_order_independent_identity() {
+    let mut files = minimal();
+    let first = review(files.clone());
+    assert!(first.valid, "{:?}", first.diagnostics);
+    assert_eq!(first.plans.len(), 1);
+    assert_eq!(
+        first.registry.as_ref().unwrap()["tasks"]["summarize-text"]["model"],
+        "coder"
+    );
+    assert!(first.plans[0]["input"]["promptTemplate"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize"));
+    files.reverse();
+    assert_eq!(first.package_id, review(files).package_id);
+    let serialized = serde_json::to_string(&first).unwrap();
+    assert!(!serialized.contains("sourcePath"));
+    assert!(!serialized.contains("baseDir"));
+    assert!(!serialized.contains("inspection-"));
+}
+#[test]
+fn real_adaptive_routes() {
+    let result = review(sources(&[
+        "flows/examples/adaptive-routing.flow.yaml",
+        "flows/tasks/adaptive-routing.tasks.yaml",
+        "flows/tasks/prompts/adaptive-assess.md",
+        "flows/tasks/prompts/adaptive-choose.md",
+        "flows/tasks/prompts/adaptive-report.md",
+    ]));
+    assert!(result.valid, "{:?}", result.diagnostics);
+    assert!(result.plans[0]["nodes"].as_object().unwrap().len() > 3);
+}
+#[test]
+fn unsafe_paths_duplicates_and_non_text_archives_rejected() {
+    for path in [
+        "../escape",
+        "/absolute",
+        "a/../b",
+        "a//b",
+        "a\\b",
+        "C:bad",
+        "a/./b",
+        "",
+    ] {
+        assert!(
+            import::normalize(vec![SourceFile {
+                path: path.into(),
+                content: "x".into()
+            }])
+            .is_err(),
+            "{path}"
+        );
+    }
+    assert!(import::normalize(vec![
+        SourceFile {
+            path: "a".into(),
+            content: "1".into()
+        },
+        SourceFile {
+            path: "a".into(),
+            content: "2".into()
+        }
+    ])
+    .is_err());
+    for kind in [
+        tar::EntryType::Symlink,
+        tar::EntryType::Link,
+        tar::EntryType::Char,
+    ] {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_ustar();
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_entry_type(kind);
+        h.set_cksum();
+        builder.append_data(&mut h, "bad", &b""[..]).unwrap();
+        let bytes = builder.into_inner().unwrap();
+        assert!(import::archive(&bytes).is_err());
+    }
+}
+#[test]
+fn manifests_and_setup_pins_fail_closed() {
+    let mut files = minimal();
+    let manifest = serde_json::json!({"format":"trollm.flow-bundle.v1","entryFlow":files[0].path,"taskRegistry":files[1].path,"files":files.iter().map(|f| serde_json::json!({"path":f.path,"sha256":trollm_core::plan::hex_sha256(f.content.as_bytes())})).collect::<Vec<_>>()});
+    files.push(SourceFile {
+        path: "manifest.json".into(),
+        content: manifest.to_string(),
+    });
+    assert!(review(files.clone()).valid);
+    files[2].content.push_str("changed");
+    let invalid = review(files);
+    assert!(!invalid.valid);
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "manifest-integrity"));
+    let mut files = minimal();
+    files[0].content.push_str("\nsetup: {path: setup.json, sha256: '0000000000000000000000000000000000000000000000000000000000000000'}\n");
+    files.push(SourceFile {
+        path: "setup.json".into(),
+        content: "{}".into(),
+    });
+    assert!(!review(files).valid);
+}
+#[test]
+fn incomplete_ambiguous_and_escape_remain_inspectable() {
+    let missing = review(vec![minimal()[0].clone()]);
+    assert!(!missing.valid);
+    assert_eq!(missing.files.len(), 1);
+    let mut files = minimal();
+    let mut extra = files[0].clone();
+    extra.path = "other.flow.yaml".into();
+    extra.content = extra.content.replace("id: minimal-summary", "id: other");
+    files.push(extra);
+    let r = review(files);
+    assert!(!r.valid);
+    assert!(r.entry_flow.is_none());
+    assert_eq!(r.plans.len(), 2);
+    let mut files = minimal();
+    files[1].content = files[1]
+        .content
+        .replace("prompts/minimal-summary.md", "../../../../etc/passwd");
+    let r = review(files);
+    assert!(!r.valid);
+    assert!(r.diagnostics.iter().any(|d| d.code == "source-reference"));
+}
+#[test]
+fn presentation_errors_are_separate_and_unassigned_nodes_visible() {
+    let mut files = minimal();
+    files.push(SourceFile {path:"flow-review.json".into(),content:serde_json::json!({"format":"trollm.flow-presentation.v1","title":"Review","purpose":"Explain","phases":[{"id":"p","title":"P","description":"Description","nodes":[{"flow":"minimal-summary","node":"summarize"},{"flow":"minimal-summary","node":"missing"}]}]}).to_string()});
+    let r = review(files);
+    assert!(r.valid);
+    assert!(r
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "presentation-unknown-node"));
+    assert!(r.presentation.is_none());
+    assert_eq!(r.unassigned_nodes.len(), 2);
+}
+#[test]
+fn large_prompt_and_many_cyclic_nodes_are_bounded() {
+    let mut files = minimal();
+    files[2]
+        .content
+        .push_str(&"long source text\n".repeat(20000));
+    let mut plan = trollm_core::ExecutionPlan::from_yaml_str(&files[0].content).unwrap();
+    let node = plan.nodes["summarize"].clone();
+    for n in 0..400 {
+        let mut node = node.clone();
+        node.on_verified = Some(trollm_core::plan::Transition::Node(format!(
+            "task{}",
+            (n + 1) % 400
+        )));
+        plan.nodes.insert(format!("task{n}"), node);
+    }
+    files[0].content = serde_json::to_string(&plan).unwrap();
+    let r = review(files);
+    assert!(r.valid, "{:?}", r.diagnostics);
+    assert!(
+        r.files
+            .iter()
+            .map(|f| f["sizeBytes"].as_u64().unwrap())
+            .sum::<u64>()
+            > 300000
+    );
+    assert_eq!(r.plans[0]["nodes"].as_object().unwrap().len(), 402);
+}
+#[test]
+fn mapped_symlinks_are_rejected() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("secret")).unwrap();
+        assert!(import::directory(dir.path()).is_err());
+    }
+}
+#[test]
+fn unused_files_change_identity() {
+    let mut files = BTreeMap::new();
+    files.insert("a".into(), "b".into());
+    let first = import::identity(&files);
+    files.insert("unused.md".into(), "extra".into());
+    assert_ne!(first, import::identity(&files));
+}
+#[test]
+fn real_foreach_subflows_pause_and_shared_prompts() {
+    let r = review(sources(&[
+        "flows/examples/ticket-triage.flow.yaml",
+        "flows/examples/process-item.flow.yaml",
+        "flows/examples/return-to-list.flow.yaml",
+        "flows/tasks/tickets.tasks.yaml",
+        "flows/tasks/prompts/prepare-worklist.md",
+        "flows/tasks/prompts/enrich-ticket.md",
+        "flows/tasks/prompts/consult-steering.md",
+        "flows/tasks/prompts/execute-decision.md",
+        "flows/tasks/prompts/progress-checkpoint.md",
+        "flows/tasks/prompts/finalize-batch.md",
+        "flows/tasks/prompts/finalize-empty-batch.md",
+    ]));
+    assert!(r.valid, "{:?}", r.diagnostics);
+    assert_eq!(r.plans.len(), 3);
+    assert_eq!(
+        r.entry_flow.as_deref(),
+        Some("flows/examples/ticket-triage.flow.yaml")
+    );
+    let root = r.plans.iter().find(|p| p["id"] == "ticket-triage").unwrap();
+    assert_eq!(root["nodes"]["each"]["body"]["flowRef"], "process-item");
+    assert_eq!(root["nodes"]["each"]["onLimit"]["status"], "paused");
+    let mut files = minimal();
+    let mut reg = trollm_core::TaskRegistry::from_yaml_str(&files[1].content, ".").unwrap();
+    let task = reg.tasks["summarize-text"].clone();
+    reg.tasks.insert("shared".into(), task);
+    files[1].content = serde_json::to_string(&reg).unwrap();
+    let r = review(files);
+    assert!(r.valid);
+    assert_eq!(
+        r.registry.as_ref().unwrap()["tasks"]["shared"]["prompt"],
+        "prompts/minimal-summary.md"
+    );
+}
+#[test]
+fn real_starter_setup_and_tar_roundtrip() {
+    let directory = root().join("flows/starters/check-total");
+    let files = import::directory(&directory).unwrap();
+    let r = review(
+        files
+            .iter()
+            .map(|(path, content)| SourceFile {
+                path: path.clone(),
+                content: content.clone(),
+            })
+            .collect(),
+    );
+    assert!(r.valid, "{:?}", r.diagnostics);
+    assert!(r.setup.is_some());
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, content) in &files {
+        let mut h = tar::Header::new_ustar();
+        h.set_size(content.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        builder
+            .append_data(&mut h, path, content.as_bytes())
+            .unwrap();
+    }
+    let archive = builder.into_inner().unwrap();
+    let decoded = import::archive(&archive).unwrap();
+    assert_eq!(files, decoded);
+}
+#[test]
+fn raw_archive_absolute_duplicate_and_parent_entries_rejected() {
+    fn tar_file(path: &str) -> Vec<u8> {
+        let mut h = tar::Header::new_ustar();
+        h.set_size(1);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+        h.set_cksum();
+        let mut bytes = h.as_bytes().to_vec();
+        bytes.push(b'x');
+        bytes.resize(1024, 0);
+        bytes.resize(2048, 0);
+        bytes
+    }
+    for path in ["/absolute", "../escape", "a//b", "a/./b"] {
+        assert!(import::archive(&tar_file(path)).is_err(), "{path}");
+    }
+    let mut bytes = tar_file("duplicate");
+    bytes.truncate(1024);
+    bytes.extend(tar_file("duplicate"));
+    assert!(import::archive(&bytes).is_err());
+    let mut bytes = tar_file("file");
+    bytes[0] = b'X';
+    assert!(import::archive(&bytes).is_err(), "header checksum");
+}
+#[test]
+fn presentation_unknown_fields_duplicate_membership_and_bounds_are_diagnostics() {
+    for text in [
+        serde_json::json!({"format":"trollm.flow-presentation.v1","title":"T","purpose":"P","phases":[],"executable":true}),
+        serde_json::json!({"format":"trollm.flow-presentation.v1","title":"T","purpose":"P","phases":[{"id":"p","title":"P","description":"D","nodes":[{"flow":"minimal-summary","node":"done"},{"flow":"minimal-summary","node":"done"}]}]}),
+    ] {
+        let mut files = minimal();
+        files.push(SourceFile {
+            path: "flow-review.json".into(),
+            content: text.to_string(),
+        });
+        let r = review(files);
+        assert!(r.valid);
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "presentation-invalid" || d.code == "presentation-duplicate-node"));
+    }
+    let mut files = minimal();
+    let mut extra = files[0].clone();
+    extra.path = "name-mismatch.flow.yaml".into();
+    files[0] = extra;
+    let manifest = serde_json::json!({"format":"trollm.flow-bundle.v1","entryFlow":files[0].path,"taskRegistry":files[1].path,"files":files.iter().map(|f| serde_json::json!({"path":f.path,"sha256":trollm_core::plan::hex_sha256(f.content.as_bytes())})).collect::<Vec<_>>()});
+    files.push(SourceFile {
+        path: "manifest.json".into(),
+        content: manifest.to_string(),
+    });
+    assert!(!review(files).valid);
+}
+#[test]
+fn excessive_depth_and_files_are_rejected_without_loading() {
+    let too_many = (0..1025)
+        .map(|n| SourceFile {
+            path: format!("{n}.md"),
+            content: String::new(),
+        })
+        .collect();
+    assert!(import::normalize(too_many).is_err());
+    let deep = format!("{}file.md", "x/".repeat(33));
+    assert!(import::safe_path(&deep).is_err());
+    let mut files = minimal();
+    let template = files[0].content.clone();
+    for n in 0..34 {
+        let mut plan = trollm_core::ExecutionPlan::from_yaml_str(&template).unwrap();
+        plan.id = format!("flow{n}");
+        let mut node = plan.nodes["summarize"].clone();
+        node.body = Some(trollm_core::plan::FlowRef {
+            flow_ref: format!("flow{}", n + 1),
+            inputs: Default::default(),
+        });
+        plan.nodes.insert("summarize".into(), node);
+        if n == 33 {
+            plan.nodes.get_mut("summarize").unwrap().body = None;
+        }
+        files.push(SourceFile {
+            path: format!("flows/examples/flow{n}.flow.yaml"),
+            content: serde_json::to_string(&plan).unwrap(),
+        });
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let r = inspect(
+        SourceRequest {
+            files,
+            entry_flow: Some("flows/examples/flow0.flow.yaml".into()),
+            ..Default::default()
+        },
+        temp.path(),
+        "Deep",
+    )
+    .unwrap();
+    assert!(!r.valid);
+    assert!(r.diagnostics.iter().any(|d| d.code == "source-reference"));
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn optional_presentation_descriptions_accept_omission_but_reject_null() {
+    for field in ["inputsDescription", "resultDescription"] {
+        let mut value = serde_json::json!({"format":"trollm.flow-presentation.v1","title":"Review","purpose":"Explain","phases":[]});
+        let mut files = minimal();
+        files.push(SourceFile {
+            path: "flow-review.json".into(),
+            content: value.to_string(),
+        });
+        assert!(review(files).presentation.is_some());
+        value[field] = serde_json::Value::Null;
+        let mut files = minimal();
+        files.push(SourceFile {
+            path: "flow-review.json".into(),
+            content: value.to_string(),
+        });
+        let result = review(files);
+        assert!(result.valid);
+        assert!(result.presentation.is_none());
+        assert_eq!(result.unassigned_nodes.len(), 2);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "presentation-invalid"));
+    }
+}
+
+#[test]
+fn unused_supplied_flow_stays_visible_with_explicit_validation_scope() {
+    let mut files = minimal();
+    let mut unused = files[0].clone();
+    unused.path = "flows/examples/unused.flow.yaml".into();
+    unused.content = unused
+        .content
+        .replace("id: minimal-summary", "id: unused")
+        .replace("taskRef: summarize-text", "taskRef: missing-task");
+    files.push(unused);
+    let temp = tempfile::tempdir().unwrap();
+    let result = inspect(
+        SourceRequest {
+            files,
+            entry_flow: Some("flows/examples/minimal-summary.flow.yaml".into()),
+            ..Default::default()
+        },
+        temp.path(),
+        "Scope",
+    )
+    .unwrap();
+    assert!(result.valid, "{:?}", result.diagnostics);
+    assert_eq!(result.plans.len(), 2);
+    assert!(result
+        .unassigned_nodes
+        .iter()
+        .any(|node| node.flow == "unused"));
+    let warnings: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "plan-unselected")
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].path, "flows/examples/unused.flow.yaml");
+}
+
+#[test]
+fn non_flow_entry_selection_cannot_bypass_reference_preflight() {
+    let mut files = minimal();
+    let mut disguised = trollm_core::ExecutionPlan::from_yaml_str(&files[0].content).unwrap();
+    disguised.nodes.get_mut("summarize").unwrap().body = Some(trollm_core::plan::FlowRef {
+        flow_ref: "/outside/package/private".into(),
+        inputs: Default::default(),
+    });
+    files.push(SourceFile {
+        path: "disguised.md".into(),
+        content: serde_json::to_string(&disguised).unwrap(),
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let result = inspect(
+        SourceRequest {
+            files,
+            entry_flow: Some("disguised.md".into()),
+            ..Default::default()
+        },
+        temp.path(),
+        "Disguised",
+    )
+    .unwrap();
+    assert!(!result.valid);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "entry-selection"));
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "execution-validation"),
+        "canonical filesystem loader was never entered"
+    );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}

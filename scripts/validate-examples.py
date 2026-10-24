@@ -82,3 +82,27 @@ for root_flow, registry_file in (
                     pending.append(node[key]["flowRef"])
     print(f"{root_flow} references and prompts OK ({len(seen)} flows)")
 print("procurement: schema-only design skeleton (not an executable bundle)")
+
+# Optional business descriptions are checked against their actual source package.
+# They never become part of execution-plan YAML or runtime control flow.
+presentation_schema = json.loads(
+    (ROOT / "apps/flow-review/flow-review.schema.json").read_text()
+)
+Draft202012Validator.check_schema(presentation_schema)
+presentation_validator = Draft202012Validator(presentation_schema)
+for path in sorted((ROOT / "flows/starters").glob("*/flow-review.json")):
+    presentation = json.loads(path.read_text())
+    presentation_validator.validate(presentation)
+    package_plans = [yaml.safe_load(p.read_text()) for p in path.parent.rglob("*.flow.yaml")]
+    actual_nodes = {(p["id"], node) for p in package_plans for node in p["nodes"]}
+    phase_ids, assigned = set(), set()
+    for phase in presentation["phases"]:
+        if phase["id"] in phase_ids:
+            raise ValueError(f"{path}: duplicate presentation phase {phase['id']}")
+        phase_ids.add(phase["id"])
+        for ref in phase["nodes"]:
+            key = (ref["flow"], ref["node"])
+            if key not in actual_nodes or key in assigned:
+                raise ValueError(f"{path}: unknown or duplicate phase reference {key}")
+            assigned.add(key)
+    print(f"presentation schema and phase references OK: {path.relative_to(ROOT)}")

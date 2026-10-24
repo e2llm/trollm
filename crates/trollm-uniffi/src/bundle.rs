@@ -242,6 +242,18 @@ pub(crate) fn validate_materialized_bundle(
     dir: &Path,
     manifest: &BundleManifest,
 ) -> Result<(ExecutionPlan, TaskRegistry)> {
+    let (plan, registry, _) = inspect_materialized_bundle(dir, manifest)?;
+    Ok((plan, registry))
+}
+
+/// Inspect a staged package using the same integrity and reference boundary as
+/// installation. This does not install, publish pins, load models or run tools.
+/// Callers stage bounded regular files in a private directory and apply core
+/// execution/provenance validation to the returned plan and registry.
+pub fn inspect_materialized_bundle(
+    dir: &Path,
+    manifest: &BundleManifest,
+) -> Result<(ExecutionPlan, TaskRegistry, Option<crate::setup::FlowSetup>)> {
     if manifest.format != BUNDLE_FORMAT {
         bail!("unsupported installed bundle format");
     }
@@ -306,8 +318,8 @@ pub(crate) fn validate_materialized_bundle(
         Ok(())
     }
     verify_flow_tree(&plan, &root, &verified)?;
-    crate::setup::load_flow_setup(&plan, &root, &verified)?;
-    Ok((plan, registry))
+    let setup = crate::setup::load_flow_setup(&plan, &root, &verified)?;
+    Ok((plan, registry, setup))
 }
 
 /// Inspect setup using the same verified boundary as installation and startup.

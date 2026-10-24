@@ -1,5 +1,41 @@
 # Authoring a flow with an LLM
 
+## Human review of LLM-authored packages
+
+The [flow review companion](flow-review/README.md) is the approved human review
+interface. Its [implementation plan](flow-review/IMPLEMENTATION.md) records
+delivery status. Source authoring remains with the LLM: humans inspect the
+procedure, comment on relevant phases or steps, and return exported Markdown
+feedback. The LLM updates the executable files and explanations together.
+
+For each package, also supply `flow-review.json` using the
+[presentation contract](flow-review/INTERFACE.md). Describe the business purpose,
+required inputs, expected result, and a small number of meaningful phases.
+Associate each phase with actual `(flow ID, node ID)` pairs, including recovery
+and terminal nodes. Use the [Check a total example](../flows/starters/check-total/flow-review.json)
+as a template. Keep this optional presentation file outside execution-plan YAML;
+unknown presentation fields must not be inserted into the runtime schema.
+
+Explain decisions and consequences in terms a requester can review. Distinguish
+intent from guarantees: tool grants, routes and budgets come from the executable
+source, while descriptive text explains why those steps were authored. Do not
+describe an action or check that the executable package does not contain. Keep
+model advice distinct from tool evidence and independently verified results.
+
+When responding to feedback, locate the package revision and referenced node,
+task, prompt or field. Preserve stable IDs where their meaning remains the same.
+Update the package, phase references and descriptions; run the applicable
+validators/tests; return the revised package and a short account of changes.
+Feedback on an older revision requires checking the current source before
+applying it. Presentation metadata does not change execution semantics.
+
+The viewer accepts the presentation alongside a source directory. The current
+named Android starter builder does not automatically package extra source files;
+when another bundle producer includes the presentation in a bundle, list and
+hash it in that bundle's existing manifest like every other member.
+
+## Existing runtime and proposed authoring work
+
 For the approved coder-directed routing and node-context extension, start with
 [Coder-directed flows](ADAPTIVE-FLOWS.md). That bounded implementation contract
 is separate from the wider proposed authoring pack below.

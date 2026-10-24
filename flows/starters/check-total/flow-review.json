@@ -1,0 +1,33 @@
+{
+  "format": "trollm.flow-presentation.v1",
+  "title": "Check a total",
+  "purpose": "Check whether the sum of two item amounts is within the supplied budget, and explain the evidence and limitations.",
+  "inputsDescription": "Text describing exactly two item amounts, plus a separate budget expressed as a decimal string.",
+  "resultDescription": "A prose report based on the original text, exact arithmetic and model advice. This flow does not purchase anything. Correct arithmetic does not establish that the model selected the right amounts.",
+  "phases": [
+    {
+      "id": "arithmetic",
+      "title": "Calculate and compare",
+      "description": "The coder selects two amounts and calls the local calculator. A second task compares that saved sum with the user's budget using runtime-bound arguments.",
+      "nodes": [
+        {"flow": "check-total", "node": "sum"},
+        {"flow": "check-total", "node": "compare"}
+      ]
+    },
+    {
+      "id": "assessment",
+      "title": "Review the evidence",
+      "description": "The tool-free reasoner receives the original text and both calculator results and provides advice in prose.",
+      "nodes": [{"flow": "check-total", "node": "advise"}]
+    },
+    {
+      "id": "report",
+      "title": "Explain the result",
+      "description": "The coder prepares the final report. Success means the declared output checks passed; the runtime does not prove the accuracy of the prose.",
+      "nodes": [
+        {"flow": "check-total", "node": "report"},
+        {"flow": "check-total", "node": "done"}
+      ]
+    }
+  ]
+}

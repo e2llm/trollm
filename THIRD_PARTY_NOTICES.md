@@ -12,13 +12,33 @@ A lock file or an SBOM does not establish a byte-reproducible build.
 
 ## Rust application libraries
 
-These are the external direct dependencies of the four workspace crates.
+These are the external direct dependencies of the original runtime crates.
 Links identify the upstream projects and the versioned published source where
 available. The license column records the upstream license family; retain the
 actual license, copyright and any NOTICE files from the exact package when
 preparing a distribution. License identifiers were checked against the cached,
 locked Cargo package manifests.
 Complete transitive-package notice collection is still outstanding.
+
+The separate flow review server additionally uses the locked dependencies below.
+License identifiers were read from their Cargo manifests. They do not enable
+native inference or add dependencies to Android.
+
+| Project | Locked version | Use | License |
+| --- | --- | --- | --- |
+| axum | 0.8.9 | Inspection HTTP API | MIT |
+| Tokio | 1.53.2 | HTTP runtime and bounded work | MIT |
+| tower-http | 0.6.11 | Static assets, limits and headers | MIT |
+| tempfile | 3.27.0 | Transient import staging | MIT OR Apache-2.0 |
+| tar | 0.4.46 | Strict upload archive preflight | MIT OR Apache-2.0 |
+| rustix | 1.1.5 | Descriptor-based mapped-directory reads | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+
+The flow review browser uses React and React DOM 19.3.1, React Flow
+(`@xyflow/react`) 12.12.0 and Dagre (`@dagrejs/dagre`) 1.1.5, all MIT-licensed
+according to the installed locked packages. Its exact dependency tree is in
+`apps/flow-review/web/package-lock.json`. Vite, TypeScript, ESLint, Vitest and
+Playwright are development/build/test tools. Retain upstream notices when
+distributing browser assets or the container image.
 
 | Project | Locked version | Use | Upstream license / source |
 | --- | --- | --- | --- |
