@@ -87,6 +87,34 @@ fn run_inner(
     let state = serde_json::to_value(exec.state()).unwrap();
     let events = common::read_events(dir.path());
     let requests = requests.lock().unwrap().clone();
+    if events
+        .iter()
+        .any(|event| event["type"] == "error" && event["class"] == "tool-call-parse")
+    {
+        let diagnostic = std::fs::read_dir(dir.artifacts_dir())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("model-failure-")
+                    && !path.to_string_lossy().ends_with(".meta.json")
+            })
+            .expect("normal-stop control/parse failures must retain private evidence");
+        let evidence: Value = serde_json::from_slice(&std::fs::read(diagnostic).unwrap()).unwrap();
+        assert_eq!(
+            evidence["response"]["text"]["text"],
+            *responses.last().unwrap()
+        );
+        assert_eq!(evidence["response"]["finishReason"], "stop");
+        assert_eq!(
+            evidence["request"]["grammarGbnf"]["text"],
+            requests.last().unwrap().grammar_gbnf.as_deref().unwrap()
+        );
+        assert!(state["counters"]["artifactBytes"].as_u64().unwrap() > 0);
+    }
     std::fs::remove_dir_all(base).unwrap();
     (status, state, events, requests)
 }
@@ -98,7 +126,13 @@ fn explicit_route_context_and_generation_limits() {
     assert!(events
         .iter()
         .any(|e| e["type"] == "transition" && e["key"] == "routes.finish"));
-    assert!(!events.iter().any(|e| e["type"] == "tool_call_result"));
+    let control = events
+        .iter()
+        .find(|e| e["type"] == "tool_call_result")
+        .unwrap();
+    assert_eq!(control["source"], "runtime_control");
+    assert!(control["gatewayResultCompactJsonUtf8Bytes"].is_null());
+    assert_eq!(control["toolResultContextCandidateUtf8Bytes"], 0);
     assert!(reqs[0].prompt.contains("Choose at choose"));
     assert!(reqs[0].prompt.contains("\"finish\":\"done\""));
     assert_eq!(reqs[0].max_tokens, 80);
@@ -108,13 +142,22 @@ fn explicit_route_context_and_generation_limits() {
     );
 }
 #[test]
-fn malformed_or_mixed_routes_fail_before_any_action() {
+fn malformed_or_mixed_routes_preserve_normal_stop_evidence_before_any_action() {
     for text in [
         format!("{READ}{CHOOSE}"),
         format!("{CHOOSE}{READ}"),
         CHOOSE.replace("finish", "invented"),
         CHOOSE.replace("choose", "unknown"),
         CHOOSE.replace("\"finish\"", "\"finish\",\"extra\":1"),
+        CHOOSE.replace(
+            "\"route\":\"finish\"",
+            "\"route\":\"again\",\"route\":\"finish\"",
+        ),
+        CHOOSE.replace(
+            "\"route\":\"finish\"",
+            "\"route\":\"again\",\"\\u0072oute\":\"finish\"",
+        ),
+        "<tool_call>{invalid".into(),
         "Finished".into(),
     ] {
         let (status, _, events, _) = run(PLAN, REGISTRY, &[&text]);
@@ -336,7 +379,7 @@ fn paused_route_commits_continuation_and_never_repeats_mutation_on_resume() {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| e["type"] == "tool_call_result")
+                .filter(|e| e["type"] == "tool_call_result" && e["source"] != "runtime_control")
                 .count(),
             1
         );
@@ -369,4 +412,18 @@ fn explicit_continuation_validation_and_new_field_nulls_fail_closed() {
     }
     let plan = ExecutionPlan::from_yaml_str(PLAN).unwrap();
     assert!(ExecutionPlan::from_yaml_str(&serde_yaml::to_string(&plan).unwrap()).is_ok());
+}
+
+#[test]
+fn supplement_limit_counts_utf8_bytes_not_unicode_characters() {
+    use trollm_core::validate::validate_plan;
+    for (text, accepted) in [
+        ("a".repeat(16384), true),
+        ("é".repeat(8192), true),
+        ("é".repeat(8193), false),
+    ] {
+        let mut plan = ExecutionPlan::from_yaml_str(PLAN).unwrap();
+        plan.nodes.get_mut("choose").unwrap().prompt_supplement = Some(text);
+        assert_eq!(validate_plan(&plan).is_ok(), accepted);
+    }
 }

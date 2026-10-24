@@ -81,9 +81,11 @@ The plan's `limits` declare budgets for model-generation steps (`maxSteps: 2`), 
 (`timeoutS: 60`) and artifact storage (`artifactMaxMb: 1`). These are run budgets,
 separate from the task's one-generation loop bound. `onLimit: abort` selects the
 terminal run-budget policy. These declarations do not measure summary quality.
-`timeoutS` is currently checked at task entry, not enforced as a hard deadline
-on an in-flight model call. A final generation can exceed it and still succeed;
-see the architecture's implementation qualifications.
+The remaining `timeoutS` budget caps generation and tool-call deadlines, and the
+runtime checks again before accepting a result or successful transition. A late
+final generation cannot succeed. Native operations remain cooperatively bounded;
+one in-flight load/decode cannot be preempted. See the architecture's implementation
+qualifications.
 
 ## Run the existing checks
 

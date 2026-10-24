@@ -5,6 +5,15 @@ Open a package, read its purpose and business phases, inspect the graph and
 instructions, comment, and export feedback for the authoring LLM. Load a revised
 package to compare changes. The application does not execute or edit flows.
 
+The UI targets desktop monitors. It uses the full window: navigation on the left,
+a graph canvas in the center and a separately scrolling inspector on the right.
+Open the phase containing the entry step, or choose another phase or All nodes.
+The default view keeps labels readable; use **Fit graph** for the whole path,
+**Read selected node** to return to readable detail, and the minimap or drag to
+move around. Arrows show branches and recovery; outside-phase cards navigate to
+their actual source nodes. The inspector has Node, Package, Source, Feedback and
+Changes tabs. A window at least 1180 pixels wide is expected.
+
 The [design and implementation record](../../docs/flow-review/README.md) explains
 the contracts and exact validation status. This component is separate from the
 Android app. Its server reuses trollm's Rust readers and validators; it needs no
@@ -51,10 +60,12 @@ not send it to a public renderer or model provider.
 1. Open a mounted package, upload an uncompressed `.tar` bundle, or select source
    files/a folder. Preserve relative prompt/subflow paths. If several roots or
    registries exist, choose the intended pair.
-2. Start from purpose and phases. Unassigned nodes remain visible. Inspect
+2. Use the phase navigation and graph. Unassigned nodes remain available. Inspect
    transitions, tool grants, limits, recovery and prompts where behavior matters.
-   A valid package does not establish accurate model output.
-3. Attach comments to the relevant phase, node, task, file or field. Export
+   Details open on the right without moving the canvas. Package information and
+   validation/root selection live in the Package tab. A valid package does not
+   establish accurate model output.
+3. Attach comments to the relevant phase, node, task, file or field in Feedback. Export
    feedback before closing/reloading the page. Comments retain their original
    revision and target; reloading does not resolve them automatically.
 4. Give that Markdown to the authoring LLM with the package and
@@ -154,3 +165,9 @@ The server is a Rust workspace member. Android and the executor do not depend on
 it. Runtime changes belong in their existing modules; this application adapts
 their contracts for review. Private delivery CI is omitted from curated source;
 the portable checks and deployment files above remain available.
+
+Task details retain `toolArguments.modelFields`, typed binding paths and artifact
+`view` masks when inspecting current packages. The generation panel explains that
+a task deadline is also capped by remaining run time. The companion validates and
+displays these declarations; it does not execute discovery, materialize artifact
+views or predict whether a model will choose the correct arguments.

@@ -15,7 +15,8 @@ schema = json.loads((ROOT / "schemas/execution-plan.v1.schema.json").read_text()
 Draft202012Validator.check_schema(schema)
 validator = Draft202012Validator(schema)
 plans = {}
-for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")):
+starter_plans = sorted((ROOT / "flows/starters").glob("*/*.flow.yaml"))
+for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")) + starter_plans:
     plan = yaml.safe_load(path.read_text())
     errors = sorted(validator.iter_errors(plan), key=lambda error: str(error.path))
     if errors:
@@ -41,16 +42,23 @@ for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")):
                 raise ValueError(f"{path}: unknown transition {edge}")
     print(f"schema and transitions OK: {path.relative_to(ROOT)}")
 
-for root_flow, registry_file in (
+references = [(name, ROOT / "flows/tasks" / registry) for name, registry in (
     ("ticket-triage", "tickets.tasks.yaml"),
     ("minimal-summary", "minimal-summary.tasks.yaml"),
     ("prose-calculation", "prose-calculation.tasks.yaml"),
     ("adaptive-routing", "adaptive-routing.tasks.yaml"),
-):
-    registry_path = ROOT / "flows/tasks" / registry_file
+)]
+references.extend((path.name.removesuffix(".flow.yaml"),
+                   path.with_name(path.name.replace(".flow.yaml", ".tasks.yaml")))
+                  for path in starter_plans)
+for root_flow, registry_path in references:
     registry = yaml.safe_load(registry_path.read_text())
     assert registry["schemaVersion"] == "ledger.task-registry.v1"
     for name, task in registry["tasks"].items():
+        for output in task.get("outputContract", {}).get("outputs", {}).values():
+            if "view" in output:
+                binding = {key: value for key, value in output.items() if key != "type"}
+                Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/nodeOutputBinding"}).validate(binding)
         prompt = (registry_path.parent / task["prompt"]).resolve()
         if not prompt.is_relative_to(registry_path.parent.resolve()) or not prompt.is_file():
             raise ValueError(f"{name}: missing or escaping prompt")

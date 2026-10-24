@@ -51,7 +51,7 @@ fn builtin_discovery_and_dispatch_need_no_remote_configuration() {
     )
     .unwrap();
     let tools = gw.list_tools().unwrap();
-    assert_eq!(tools.len(), 1);
+    assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].server, "local");
     assert_eq!(tools[0].name, "calculate");
     assert_eq!(tools[0].input_schema["type"], "object");

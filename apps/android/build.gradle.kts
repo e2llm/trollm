@@ -4,3 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.1.20" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.20" apply false
 }
+
+// CI and constrained developer machines may keep generated output outside the
+// source checkout (for example on a larger secondary drive).
+providers.gradleProperty("trollm.buildRoot").orNull?.let { root ->
+    subprojects {
+        layout.buildDirectory.set(rootProject.file(root).resolve(name))
+    }
+}

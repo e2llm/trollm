@@ -78,6 +78,55 @@ fn real_adaptive_routes() {
     assert!(result.plans[0]["nodes"].as_object().unwrap().len() > 3);
 }
 #[test]
+fn current_argument_contracts_and_artifact_views_survive_inspection() {
+    let mut files = sources(&[
+        "flows/starters/check-total/check-total.flow.yaml",
+        "flows/starters/check-total/check-total.tasks.yaml",
+        "flows/starters/check-total/setup.json",
+        "flows/starters/check-total/prompts/sum.md",
+        "flows/starters/check-total/prompts/compare.md",
+        "flows/starters/check-total/prompts/advise.md",
+        "flows/starters/check-total/prompts/report.md",
+    ]);
+    // Import the starter as its own package, whose setup path is rooted at the
+    // package directory rather than the containing source checkout.
+    for file in &mut files {
+        file.path = file
+            .path
+            .strip_prefix("flows/starters/check-total/")
+            .unwrap()
+            .to_string();
+    }
+    let mut registry = serde_json::to_value(
+        trollm_core::TaskRegistry::from_yaml_str(&files[1].content, ".").unwrap(),
+    )
+    .unwrap();
+    registry["tasks"]["sum-cart"]["toolArguments"]["local.calculate"]["modelFields"] =
+        serde_json::json!(["left", "right"]);
+    registry["tasks"]["compare-budget"]["toolArguments"]["local.calculate"]["modelFields"] =
+        serde_json::json!([]);
+    registry["tasks"]["sum-cart"]["outputContract"]["outputs"]["compact"] = serde_json::json!({"fromArtifact":"calculation", "format":"json", "type":"object",
+            "view":{"fields":{"operation":true,"result":true},"maxBytes":256}});
+    files[1].content = registry.to_string();
+    let result = review(files.clone());
+    assert!(result.valid, "{:?}", result.diagnostics);
+    let inspected = result.registry.as_ref().unwrap();
+    assert_eq!(
+        inspected["tasks"]["sum-cart"]["toolArguments"]["local.calculate"]["modelFields"],
+        serde_json::json!(["left", "right"])
+    );
+    assert_eq!(
+        inspected["tasks"]["sum-cart"]["outputContract"]["outputs"]["compact"]["view"],
+        registry["tasks"]["sum-cart"]["outputContract"]["outputs"]["compact"]["view"]
+    );
+    // Invalid new contracts must remain visible as errors, not disappear during
+    // the companion's parse/serialize/materialize validation path.
+    registry["tasks"]["sum-cart"]["toolArguments"]["local.calculate"]["modelFields"] =
+        serde_json::Value::Null;
+    files[1].content = registry.to_string();
+    assert!(!review(files).valid);
+}
+#[test]
 fn unsafe_paths_duplicates_and_non_text_archives_rejected() {
     for path in [
         "../escape",
@@ -264,6 +313,81 @@ fn real_foreach_subflows_pause_and_shared_prompts() {
         r.registry.as_ref().unwrap()["tasks"]["shared"]["prompt"],
         "prompts/minimal-summary.md"
     );
+}
+
+#[test]
+fn reject_shared_descendants_before_recursive_loading_but_allow_same_parent_reuse() {
+    use serde_json::json;
+    let each = |child: &str| {
+        json!({
+            "kind":"foreach", "items":{"from":"user_input"}, "itemKey":"id",
+            "bindAs":"item", "enumeration":"snapshot", "ordering":"source",
+            "body":{"flowRef":child},
+            "outputs":{"results":{"collect":"body.outputs","indexBy":"itemKey"}},
+            "onEmpty":"done", "onComplete":"done"
+        })
+    };
+    let done = json!({"kind":"end","outcome":"succeeded"});
+    let plan = |id: &str, nodes: serde_json::Value, entry: &str| {
+        SourceFile {
+        path: format!("{id}.flow.yaml"),
+        content: json!({
+            "schemaVersion":"ledger.execution-plan.v1", "id":id,"version":1,
+            "limits":{"maxSteps":4,"maxReasonerCalls":0,"maxTokensTotal":4096,"timeoutS":60,"artifactMaxMb":1},
+            "onLimit":"abort","models":{"coder":{"ctx":4096}},
+            "entryStep":entry, "nodes":nodes
+        }).to_string(),
+    }
+    };
+    let registry = SourceFile {
+        path: "r.tasks.yaml".into(),
+        content: json!({"schemaVersion":"ledger.task-registry.v1","tasks":{}}).to_string(),
+    };
+    let leaf = plan("leaf", json!({"done":done}), "done");
+    // Core deduplicates references within one parent. These remain valid.
+    let same_parent = review(vec![
+        plan(
+            "root",
+            json!({"first":each("leaf"),"second":each("leaf"),"done":done}),
+            "first",
+        ),
+        leaf.clone(),
+        registry.clone(),
+    ]);
+    assert!(same_parent.valid, "{:?}", same_parent.diagnostics);
+    let shared = review(vec![
+        plan(
+            "root",
+            json!({"left":each("left"),"right":each("right"),"done":done}),
+            "left",
+        ),
+        plan("left", json!({"each":each("leaf"),"done":done}), "each"),
+        plan("right", json!({"each":each("leaf"),"done":done}), "each"),
+        leaf,
+        registry.clone(),
+    ]);
+    assert!(!shared.valid);
+    assert!(shared
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "source-reference" && d.message.contains("multiple parents")));
+    assert!(
+        !shared
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "execution-validation"),
+        "must fail before recursive loader"
+    );
+    let cycle = review(vec![
+        plan("root", json!({"each":each("child"),"done":done}), "each"),
+        plan("child", json!({"each":each("root"),"done":done}), "each"),
+        registry,
+    ]);
+    assert!(!cycle.valid);
+    assert!(cycle
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "source-reference" && d.message.contains("cyclic")));
 }
 #[test]
 fn real_starter_setup_and_tar_roundtrip() {

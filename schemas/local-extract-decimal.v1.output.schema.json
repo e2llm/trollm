@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.extract_decimal v1 result",
+  "type": "object", "additionalProperties": false,
+  "required": ["format", "decimal", "sources"],
+  "properties": {
+    "format": {"const": "trollm.local.extract_decimal.v1"},
+    "decimal": {"$ref": "#/$defs/decimal"},
+    "sources": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/source"}, {"properties": {"role": {"const": "primary"}}}]},
+        {"allOf": [{"$ref": "#/$defs/source"}, {"properties": {"role": {"const": "secondary"}}}]}
+      ]
+    }
+  },
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,11})([.][0-9]{0,5}[1-9])?$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "textSha256", "status", "decimal"],
+      "properties": {
+        "role": {"enum": ["primary", "secondary"]},
+        "textSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"enum": ["matched", "unmatched"]},
+        "decimal": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+      },
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "matched"}}},
+        "then": {"properties": {"decimal": {"$ref": "#/$defs/decimal"}}},
+        "else": {"properties": {"decimal": {"type": "null"}}}
+      }]
+    }
+  }
+}

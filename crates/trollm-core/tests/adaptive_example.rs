@@ -9,6 +9,22 @@ use std::sync::{Arc, Mutex};
 use trollm_core::{ExecutionPlan, Executor, RunDir, RunStatus, SlotMap, TaskRegistry};
 use trollm_models::{GenerateRequest, GenerateResponse, MockModel, ModelSlot};
 
+struct NoGateway;
+impl trollm_mcp::ToolGateway for NoGateway {
+    fn list_tools(&self) -> anyhow::Result<Vec<trollm_mcp::ToolDescriptor>> {
+        panic!("runtime routing must not discover a gateway");
+    }
+    fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+        trollm_mcp::policy::ToolClass::Read
+    }
+    fn validate_call(&self, _: &trollm_mcp::ToolCall) -> anyhow::Result<()> {
+        panic!("runtime routing must not preflight a gateway");
+    }
+    fn call(&mut self, _: &trollm_mcp::ToolCall) -> anyhow::Result<trollm_mcp::ToolResult> {
+        panic!("runtime routing must not dispatch a gateway");
+    }
+}
+
 const INPUT: &str = "The team moved the meeting to Friday and will send an agenda beforehand.";
 const ADVICE: &str = "There is enough detail to summarize the new meeting date and agenda plan.";
 const REPORT: &str = "The meeting is now on Friday. An agenda will arrive beforehand.";
@@ -86,7 +102,7 @@ fn run_sources(coder_responses: &[&str], advice: &[&str]) -> Outcome {
                     requests: reasoner.clone(),
                 },
             ),
-        common::ScriptGateway::new(run.artifacts_dir()),
+        NoGateway,
         run.clone(),
     )
     .unwrap();
@@ -99,10 +115,10 @@ fn run_sources(coder_responses: &[&str], advice: &[&str]) -> Outcome {
         reasoner: reasoner.lock().unwrap().clone(),
     };
     assert!(
-        !outcome.events.iter().any(|event| matches!(
-            event["type"].as_str(),
-            Some("tool_call_intent" | "tool_call_result")
-        )),
+        !outcome.events.iter().any(|event| {
+            event["type"] == "tool_call_intent"
+                || (event["type"] == "tool_call_result" && event["source"] != "runtime_control")
+        }),
         "runtime routing never reaches the gateway"
     );
     drop(executor);

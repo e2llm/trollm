@@ -2,11 +2,13 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::ToolDescriptor;
 
 pub const SERVER: &str = "local";
 pub const TOOL: &str = "calculate";
+pub const EXTRACT_TOOL: &str = "extract_decimal";
 
 const SCALE: i128 = 1_000_000;
 const MAX_SCALED: i128 = 999_999_999_999_999_999;
@@ -24,6 +26,188 @@ pub fn descriptor() -> ToolDescriptor {
         ))
         .expect("the bundled local.calculate input schema must be valid JSON"),
     }
+}
+
+pub fn descriptors() -> Vec<ToolDescriptor> {
+    vec![
+        descriptor(),
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: EXTRACT_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-extract-decimal.v1.input.schema.json"
+            ))
+            .expect("bundled extraction schema"),
+        },
+    ]
+}
+
+pub fn supports(tool: &str) -> bool {
+    matches!(tool, TOOL | EXTRACT_TOOL)
+}
+
+pub fn invoke(tool: &str, args: &Value) -> Result<Value> {
+    match tool {
+        TOOL => calculate(args),
+        EXTRACT_TOOL => extract_decimal(args),
+        _ => bail!("unknown builtin local tool"),
+    }
+}
+
+/// Bounded literal text processing only. All content boundaries, numeric prefix,
+/// fraction width and optional lower bound are authored data, not site rules.
+pub fn extract_decimal(args: &Value) -> Result<Value> {
+    extract_decimal_impl(args, false)
+}
+
+/// Apply byte bounds as well as the catalog's JSON character bounds before dispatch.
+pub(crate) fn validate_extract_arguments(args: &Value) -> Result<()> {
+    extract_decimal_impl(args, true).map(|_| ())
+}
+
+fn extract_decimal_impl(args: &Value, validate_only: bool) -> Result<Value> {
+    const INVALID: &str = "local.extract_decimal: invalid-arguments";
+    let object = args.as_object().ok_or_else(|| anyhow!(INVALID))?;
+    if object.len() != 3 {
+        bail!(INVALID);
+    }
+    let text = |name: &str| -> Result<&str> {
+        let value = object
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!(INVALID))?;
+        if value.len() > 16384 {
+            bail!(INVALID);
+        }
+        Ok(value)
+    };
+    let primary = text("primary")?;
+    let secondary = text("secondary")?;
+    let rules = object
+        .get("rules")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    if rules.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "after" | "before" | "stopBefore" | "prefix" | "fractionDigits" | "minimumExclusive"
+        )
+    }) {
+        bail!(INVALID);
+    }
+    let marker = |name: &str| -> Result<Option<&str>> {
+        rules
+            .get(name)
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.is_empty() && text.len() <= 256)
+                    .ok_or_else(|| anyhow!(INVALID))
+            })
+            .transpose()
+    };
+    let after = marker("after")?;
+    let before = marker("before")?;
+    let prefix = marker("prefix")?.ok_or_else(|| anyhow!(INVALID))?;
+    let fraction = rules
+        .get("fractionDigits")
+        .and_then(Value::as_u64)
+        .filter(|n| (1..=6).contains(n))
+        .ok_or_else(|| anyhow!(INVALID))? as usize;
+    let minimum = marker("minimumExclusive")?
+        .map(parse_decimal)
+        .transpose()
+        .map_err(|_| anyhow!(INVALID))?;
+    let stops = match rules.get("stopBefore") {
+        None => vec![],
+        Some(Value::Array(items)) if items.len() <= 16 => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                    .ok_or_else(|| anyhow!(INVALID))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => bail!(INVALID),
+    };
+    if validate_only {
+        return Ok(Value::Null);
+    }
+    let extract = |original: &str| -> Result<Option<i128>> {
+        let mut window = original;
+        if let Some(marker) = after {
+            let Some((_, tail)) = window.split_once(marker) else {
+                return Ok(None);
+            };
+            window = tail;
+        }
+        if let Some(marker) = before {
+            let Some((head, _)) = window.split_once(marker) else {
+                return Ok(None);
+            };
+            window = head;
+        }
+        let lower = window.to_ascii_lowercase();
+        if let Some(end) = stops
+            .iter()
+            .filter_map(|marker| lower.find(&marker.to_ascii_lowercase()))
+            .min()
+        {
+            window = &window[..end];
+        }
+        let mut values = Vec::new();
+        for (start, _) in window.match_indices(prefix) {
+            let rest = window[start + prefix.len()..].trim_start();
+            let whole_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if whole_len == 0 || whole_len > 12 {
+                continue;
+            }
+            let whole = &rest[..whole_len];
+            let tail = &rest[whole_len..];
+            let fractional = if let Some(tail) = tail.strip_prefix('.') {
+                tail
+            } else if tail.chars().next().is_some_and(char::is_whitespace) {
+                tail.trim_start()
+            } else {
+                continue;
+            };
+            let width = fractional.bytes().take_while(u8::is_ascii_digit).count();
+            if width != fraction {
+                continue;
+            }
+            if fractional.as_bytes().get(width) == Some(&b'.') {
+                continue;
+            }
+            let Ok(value) = parse_decimal(&format!("{whole}.{}", &fractional[..width])) else {
+                continue;
+            };
+            if minimum.is_some_and(|bound| value <= bound) {
+                bail!("local.extract_decimal: outside-authored-bound");
+            }
+            values.push(value);
+            if values.len() > 1 {
+                bail!("local.extract_decimal: ambiguous-source");
+            }
+        }
+        Ok(values.into_iter().next())
+    };
+    let first = extract(primary)?;
+    let second = extract(secondary)?;
+    let decimal = match (first, second) {
+        (Some(a), Some(b)) if a != b => bail!("local.extract_decimal: sources-disagree"),
+        (Some(value), _) | (_, Some(value)) => format_decimal(value),
+        _ => bail!("local.extract_decimal: no-match"),
+    };
+    let source = |role: &str, text: &str, value: Option<i128>| {
+        let hash = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        json!({"role":role,"textSha256":hash,"status":if value.is_some(){"matched"}else{"unmatched"},"decimal":value.map(format_decimal)})
+    };
+    Ok(
+        json!({"format":"trollm.local.extract_decimal.v1","decimal":decimal,"sources":[source("primary",primary,first),source("secondary",secondary,second)]}),
+    )
 }
 
 /// Calculate using exact signed decimals with at most six fractional digits.

@@ -74,6 +74,13 @@ pub enum TaskCompletion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskToolArguments {
+    /// Closed model-owned top-level names; absent retains the tool's openness.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::plan::deserialize_present_option"
+    )]
+    pub model_fields: Option<Vec<String>>,
     #[serde(default)]
     pub from_vars: BTreeMap<String, String>,
     /// Typed values from exact top-level keys in structured user input.
@@ -105,6 +112,14 @@ impl TaskDef {
                 .is_none_or(|n| (1..=600).contains(&n)),
             "generationTimeoutS must be 1 through 600"
         );
+        for output in self.output_contract.outputs.values() {
+            if let OutputSpec::FromArtifact {
+                view: Some(view), ..
+            } = output
+            {
+                view.validate()?;
+            }
+        }
         for tool in &self.tools {
             if tool.starts_with("flow.") {
                 anyhow::ensure!(
@@ -135,8 +150,9 @@ impl TaskDef {
                 anyhow::ensure!(
                     !(rule.from_vars.is_empty()
                         && rule.from_input.is_empty()
-                        && rule.fixed.is_empty()),
-                    "toolArguments requires at least one fromVars, fromInput or fixed argument"
+                        && rule.fixed.is_empty()
+                        && rule.model_fields.is_none()),
+                    "toolArguments requires bindings or modelFields"
                 );
                 let mut arguments = std::collections::BTreeSet::new();
                 for argument in rule
@@ -160,9 +176,21 @@ impl TaskDef {
                 );
                 for (argument, path) in &rule.from_vars {
                     anyhow::ensure!(
-                        identifier(argument) && path.split('.').all(identifier),
-                        "fromVars requires argument names and dotted variable identifiers"
+                        identifier(argument) && path.split('.').all(|part| identifier(part) || (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))),
+                        "fromVars requires argument names and dotted variable identifiers or unsigned array indices"
                     );
+                }
+                if let Some(fields) = &rule.model_fields {
+                    for field in fields {
+                        anyhow::ensure!(
+                            identifier(field),
+                            "modelFields requires argument identifiers"
+                        );
+                        anyhow::ensure!(
+                            arguments.insert(field),
+                            "modelFields has duplicate or bound argument names"
+                        );
+                    }
                 }
             }
         }
@@ -253,6 +281,12 @@ pub enum OutputSpec {
     FromArtifact {
         #[serde(rename = "fromArtifact")]
         from_artifact: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::plan::deserialize_present_option"
+        )]
+        view: Option<crate::artifact_view::ArtifactView>,
         format: ArtifactFormat,
         #[serde(rename = "type")]
         type_: OutputType,

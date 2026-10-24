@@ -193,8 +193,8 @@ this attribution.
 
 | Starter use | Original model author / upstream | Quantized artifact publisher and pinned source |
 | --- | --- | --- |
-| Text-summary coder; browser-summary coder | Qwen team, [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) | Unsloth, [`Qwen3.5-0.8B-Q4_K_M.gguf` at `ed4bdcdbcce9f095bb49e8759176c64e45fa294b`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/tree/ed4bdcdbcce9f095bb49e8759176c64e45fa294b) |
-| Browser-summary reasoner | Google DeepMind, [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Unsloth, [`gemma-4-E2B-it-Q4_K_M.gguf` at `0314792d7f1f7e229411f620751375812bb9faf2`](https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/tree/0314792d7f1f7e229411f620751375812bb9faf2) |
+| Text-summary, browser-summary and check-total coder | Qwen team, [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) | Unsloth, [`Qwen3.5-0.8B-Q4_K_M.gguf` at `ed4bdcdbcce9f095bb49e8759176c64e45fa294b`](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/tree/ed4bdcdbcce9f095bb49e8759176c64e45fa294b) |
+| Browser-summary and check-total reasoner | Google DeepMind, [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Unsloth, [`gemma-4-E2B-it-Q4_K_M.gguf` at `0314792d7f1f7e229411f620751375812bb9faf2`](https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/tree/0314792d7f1f7e229411f620751375812bb9faf2) |
 
 The [pinned Qwen quantization model card](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/blob/ed4bdcdbcce9f095bb49e8759176c64e45fa294b/README.md)
 identifies Qwen/Qwen3.5-0.8B as the base model and Apache-2.0 as the license,

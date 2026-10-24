@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -24,6 +26,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -47,6 +52,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
     var saved by remember { mutableStateOf<Boolean?>(null) }
     var savedForEndpoint by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var removeTokenFor by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var store by remember { mutableStateOf<SecretsStore?>(null) }
     var oauth by remember { mutableStateOf<OAuthConnections?>(null) }
@@ -112,10 +118,10 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         }
     }
 
-    fun update(remove: Boolean) {
+    fun update(remove: Boolean, selectedServer: String = server) {
         if (busy) return
         val secrets = store ?: return
-        if (!ConnectionInput.validServer(server)) {
+        if (!ConnectionInput.validServer(selectedServer)) {
             message = "Enter a connection name without whitespace."
             return
         }
@@ -129,17 +135,19 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             message = "Enter a valid HTTPS MCP endpoint before saving a token."
             return
         }
-        val name = server
+        val name = selectedServer
         val value = if (remove) null else token
         token = ""
         busy = true
         message = null
         scope.launch {
             try {
-                withContext(Dispatchers.IO) { secrets.setToken(name, url, value) }
+                withContext(Dispatchers.IO) {
+                    if (remove) secrets.removeToken(name) else secrets.setToken(name, url, value)
+                }
                 saved = !remove
                 savedForEndpoint = !remove
-                message = if (remove) "Token removed." else "Token saved."
+                message = if (remove) "Manual token removed for $name." else "Token saved."
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -150,6 +158,21 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                 refreshStatus++
             }
         }
+    }
+
+    removeTokenFor?.let { name ->
+        AlertDialog(
+            onDismissRequest = { removeTokenFor = null },
+            title = { Text("Remove manual token?") },
+            text = { Text("Remove the manual Bearer token stored on this device for connection \"$name\" and its saved endpoint binding. OAuth sign-in and other connections stay saved. This does not revoke the token at the remote service.") },
+            confirmButton = {
+                TextButton(enabled = !busy && store != null, onClick = {
+                    removeTokenFor = null
+                    update(true, name)
+                }) { Text("Remove token") }
+            },
+            dismissButton = { TextButton(onClick = { removeTokenFor = null }) { Text("Keep token") } },
+        )
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
@@ -179,7 +202,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
         )
-        Text(oauthStatus)
+        Text(oauthStatus, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         Button(onClick = {
             val client = oauth ?: return@Button
             if (!ConnectionInput.validServer(server)) {
@@ -244,8 +267,8 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Button(onClick = { update(false) }, enabled = !busy && store != null && endpointError == null) { Text("Save token") }
-        Button(onClick = { update(true) }, enabled = !busy && store != null) { Text("Remove token") }
-        message?.let { Text(it) }
+        Button(onClick = { removeTokenFor = server }, enabled = !busy && store != null && ConnectionInput.validServer(server)) { Text("Remove token") }
+        message?.let { Text(it, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
         Button(onClick = { token = ""; onBack() }) { Text("Back") }
     }
 }

@@ -157,19 +157,16 @@ impl RunControl {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
-}
 
-impl ExecutionControl for RunControl {
-    fn checkpoint(&self) -> bool {
-        self.before_boundary().is_err()
-    }
-
-    fn wait_backoff(&self, duration: Duration) -> bool {
+    fn wait_backoff_internal(&self, duration: Duration, deadline: Option<Instant>) -> bool {
         let mut remaining = duration;
         let mut guard = self.gate.lock().unwrap();
         loop {
             if self.cancel.load(Ordering::SeqCst) {
                 return true;
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return false;
             }
             if self.pause_requested.load(Ordering::SeqCst) {
                 *self.status.lock().unwrap() = RunPhase::Paused {
@@ -189,12 +186,88 @@ impl ExecutionControl for RunControl {
             }
             // Bounded chunks avoid `Instant + Duration` overflow for an
             // authored u64::MAX seconds and allow periodic predicate checks.
-            let chunk = remaining.min(Duration::from_secs(60));
+            let mut chunk = remaining.min(Duration::from_secs(60));
+            if let Some(deadline) = deadline {
+                chunk = chunk.min(deadline.saturating_duration_since(Instant::now()));
+            }
             let started = Instant::now();
             let (next, _) = self.gate_cond.wait_timeout(guard, chunk).unwrap();
             guard = next;
             remaining = remaining.saturating_sub(started.elapsed());
         }
+    }
+}
+
+impl ExecutionControl for RunControl {
+    fn checkpoint(&self) -> bool {
+        self.before_boundary().is_err()
+    }
+
+    fn wait_backoff(&self, duration: Duration) -> bool {
+        self.wait_backoff_internal(duration, None)
+    }
+
+    fn wait_backoff_until(&self, duration: Duration, deadline: Option<Instant>) -> bool {
+        self.wait_backoff_internal(duration, deadline)
+    }
+}
+
+/// Relative limits include cooperative holds, verification and loading. Each
+/// wrapper passes only its remaining allowance to the next layer. A single
+/// native load/decode operation remains synchronous and cannot be interrupted.
+struct GenerationBudget {
+    started: Instant,
+    limit: Option<Duration>,
+}
+
+impl GenerationBudget {
+    fn new(limit: Option<Duration>) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+        }
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        self.limit
+            .map(|limit| limit.saturating_sub(self.started.elapsed()))
+    }
+
+    fn expired(&self) -> bool {
+        self.remaining()
+            .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    #[cfg(any(feature = "llama", test))]
+    fn check(&self) -> Result<()> {
+        if self.expired() {
+            return Err(GenerationExpired.into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "llama", test))]
+#[derive(Debug)]
+struct GenerationExpired;
+
+#[cfg(any(feature = "llama", test))]
+impl std::fmt::Display for GenerationExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("model generation deadline exceeded before generation")
+    }
+}
+
+#[cfg(any(feature = "llama", test))]
+impl std::error::Error for GenerationExpired {}
+
+fn generation_timeout() -> GenerateResponse {
+    GenerateResponse {
+        text: String::new(),
+        tokens_in: 0,
+        tokens_out: 0,
+        finish: trollm_models::FinishReason::Timeout,
+        capacity: None,
     }
 }
 
@@ -206,14 +279,24 @@ pub struct ControlledModel {
 }
 
 impl ModelSlot for ControlledModel {
-    fn generate(&mut self, req: GenerateRequest) -> Result<GenerateResponse> {
+    fn generate(&mut self, mut req: GenerateRequest) -> Result<GenerateResponse> {
+        let budget = GenerationBudget::new(req.max_duration);
+        // Own cleanup before a hold can exhaust the budget or cancellation can
+        // return early, including an inherited Starting activity.
+        let _activity = ActivityGuard(self.ctl.clone());
         self.ctl.before_boundary()?;
+        if budget.expired() {
+            return Ok(generation_timeout());
+        }
         self.ctl.set_activity(Some(RunActivityApi::Generating {
             slot: self.slot.clone(),
         }));
-        let _activity = ActivityGuard(self.ctl.clone());
-        let resp = self.inner.generate(req)?;
+        req.max_duration = budget.remaining();
+        let mut resp = self.inner.generate(req)?;
         self.ctl.before_boundary()?;
+        if budget.expired() {
+            resp.finish = trollm_models::FinishReason::Timeout;
+        }
         Ok(resp)
     }
 }
@@ -244,6 +327,16 @@ pub struct ControlledGateway {
 }
 
 impl trollm_mcp::ToolGateway for ControlledGateway {
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.inner.set_deadline(deadline);
+    }
+    fn argument_constraints(&self, server: &str, tool: &str) -> Option<Value> {
+        self.inner.argument_constraints(server, tool)
+    }
+    fn available_tools(&self, grants: &[String]) -> Vec<trollm_mcp::ToolDescriptor> {
+        self.inner.available_tools(grants)
+    }
+
     fn tool_class(&self, server: &str, tool: &str) -> trollm_mcp::policy::ToolClass {
         self.inner.tool_class(server, tool)
     }
@@ -528,7 +621,12 @@ fn build_gateway(
 /// manifest (§8). sha256sum-style lines ("<hex>  <name>") and bare hex are
 /// both accepted.
 #[cfg(any(feature = "llama", test))]
-fn verify_model_weights(base: &Path, slot: &str, ctl: &RunControl) -> Result<PathBuf> {
+fn verify_model_weights(
+    base: &Path,
+    slot: &str,
+    ctl: &RunControl,
+    budget: &GenerationBudget,
+) -> Result<PathBuf> {
     let path = base.join("models").join(format!("{slot}.gguf"));
     let manifest_path = base.join("models").join(format!("{slot}.gguf.sha256"));
     let expected_raw = fs::read_to_string(&manifest_path).with_context(|| {
@@ -542,12 +640,18 @@ fn verify_model_weights(base: &Path, slot: &str, ctl: &RunControl) -> Result<Pat
         .next()
         .unwrap_or("")
         .to_string();
-    verify_weights(&path, &expected, slot, ctl)?;
+    verify_weights(&path, &expected, slot, ctl, budget)?;
     Ok(path)
 }
 
 #[cfg(any(feature = "llama", test))]
-fn verify_weights(path: &Path, expected: &str, slot: &str, ctl: &RunControl) -> Result<()> {
+fn verify_weights(
+    path: &Path,
+    expected: &str,
+    slot: &str,
+    ctl: &RunControl,
+    budget: &GenerationBudget,
+) -> Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("no weights for model slot '{slot}' ({})", path.display()))?;
     use sha2::Digest;
@@ -555,6 +659,7 @@ fn verify_weights(path: &Path, expected: &str, slot: &str, ctl: &RunControl) -> 
     let mut buffer = [0u8; 64 * 1024];
     loop {
         ctl.before_boundary()?;
+        budget.check()?;
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -587,30 +692,46 @@ struct LazyModel {
 
 #[cfg(any(feature = "llama", test))]
 impl ModelSlot for LazyModel {
-    fn generate(&mut self, req: GenerateRequest) -> Result<GenerateResponse> {
+    fn generate(&mut self, mut req: GenerateRequest) -> Result<GenerateResponse> {
+        let budget = GenerationBudget::new(req.max_duration);
         let _activity = ActivityGuard(self.ctl.clone());
         self.ctl.before_boundary()?;
+        if budget.expired() {
+            return Ok(generation_timeout());
+        }
         if self.loaded.is_none() {
             self.ctl.set_activity(Some(RunActivityApi::VerifyingModel {
                 slot: self.slot.clone(),
             }));
-            let path = match &self.weights {
+            let verification = match &self.weights {
                 Some((path, expected)) => {
-                    verify_weights(path, expected, &self.slot, &self.ctl)?;
-                    path.clone()
+                    verify_weights(path, expected, &self.slot, &self.ctl, &budget)
+                        .map(|()| path.clone())
                 }
-                None => verify_model_weights(&self.base, &self.slot, &self.ctl)?,
+                None => verify_model_weights(&self.base, &self.slot, &self.ctl, &budget),
+            };
+            let path = match verification {
+                Ok(path) => path,
+                Err(error) if error.is::<GenerationExpired>() => return Ok(generation_timeout()),
+                Err(error) => return Err(error),
             };
             self.ctl.before_boundary()?;
+            if budget.expired() {
+                return Ok(generation_timeout());
+            }
             self.ctl.set_activity(Some(RunActivityApi::LoadingModel {
                 slot: self.slot.clone(),
             }));
             self.loaded = Some((self.loader)(&path)?);
         }
         self.ctl.before_boundary()?;
+        if budget.expired() {
+            return Ok(generation_timeout());
+        }
         self.ctl.set_activity(Some(RunActivityApi::Generating {
             slot: self.slot.clone(),
         }));
+        req.max_duration = budget.remaining();
         self.loaded.as_mut().unwrap().generate(req)
     }
 }
@@ -728,6 +849,7 @@ impl ModelSlot for StubModel {
             tokens_out: 4,
             text,
             finish: trollm_models::FinishReason::Stop,
+            capacity: None,
         })
     }
 }
@@ -2191,15 +2313,26 @@ mod regression_tests {
         ] {
             fs::write(&manifest, value).unwrap();
             assert_eq!(
-                verify_model_weights(&base, "coder", &handle().0.control).unwrap(),
+                verify_model_weights(
+                    &base,
+                    "coder",
+                    &handle().0.control,
+                    &GenerationBudget::new(None)
+                )
+                .unwrap(),
                 weights
             );
         }
         fs::write(&weights, b"abd").unwrap();
-        assert!(verify_model_weights(&base, "coder", &handle().0.control)
-            .unwrap_err()
-            .to_string()
-            .contains("mismatch"));
+        assert!(verify_model_weights(
+            &base,
+            "coder",
+            &handle().0.control,
+            &GenerationBudget::new(None)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mismatch"));
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -2233,6 +2366,7 @@ mod regression_tests {
                 tokens_in: 1,
                 tokens_out: 1,
                 finish: trollm_models::FinishReason::Stop,
+                capacity: None,
             })
         }
     }
@@ -2270,6 +2404,151 @@ mod regression_tests {
             loaded: None,
             ctl,
         }
+    }
+
+    struct BudgetRecordingModel(Arc<Mutex<Vec<Option<Duration>>>>);
+
+    impl ModelSlot for BudgetRecordingModel {
+        fn generate(&mut self, req: GenerateRequest) -> Result<GenerateResponse> {
+            self.0.lock().unwrap().push(req.max_duration);
+            Ok(GenerateResponse {
+                text: "partial evidence".into(),
+                tokens_in: 1,
+                tokens_out: 1,
+                finish: trollm_models::FinishReason::Stop,
+                capacity: None,
+            })
+        }
+    }
+
+    #[test]
+    fn lazy_loading_consumes_generation_allowance_and_does_not_generate_after_expiry() {
+        let base = TrustTestDir::new("lazy-budget");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"abc").unwrap();
+        let (handle, _) = handle();
+        let mut lazy = lazy_fixture(
+            path,
+            handle.control.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        lazy.loader = Box::new(move |_| {
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(Box::new(BudgetRecordingModel(recorded.clone())))
+        });
+        let mut req = request();
+        req.max_duration = Some(Duration::from_millis(10));
+        let response = lazy.generate(req).unwrap();
+        assert_eq!(response.finish, trollm_models::FinishReason::Timeout);
+        assert!(response.text.is_empty());
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(lazy.loaded.is_some(), "a completed load remains reusable");
+        assert_eq!(handle.control.activity(), None);
+        lazy.generate(request()).unwrap();
+        assert_eq!(*requests.lock().unwrap(), vec![None]);
+    }
+
+    #[test]
+    fn lazy_loading_forwards_only_remaining_duration() {
+        let base = TrustTestDir::new("lazy-budget-remaining");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"abc").unwrap();
+        let (handle, _) = handle();
+        let mut lazy = lazy_fixture(
+            path,
+            handle.control.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        lazy.loader = Box::new(move |_| {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(Box::new(BudgetRecordingModel(recorded.clone())))
+        });
+        let mut req = request();
+        req.max_duration = Some(Duration::from_secs(5));
+        lazy.generate(req).unwrap();
+        let remaining = requests.lock().unwrap()[0].unwrap();
+        assert!(remaining <= Duration::from_millis(4980));
+        assert!(!remaining.is_zero());
+    }
+
+    struct PauseAfterResponse {
+        ctl: Arc<RunControl>,
+        ready: Sender<()>,
+    }
+
+    impl ModelSlot for PauseAfterResponse {
+        fn generate(&mut self, _: GenerateRequest) -> Result<GenerateResponse> {
+            self.ctl.request_pause();
+            self.ready.send(()).unwrap();
+            Ok(GenerateResponse {
+                text: "partial evidence".into(),
+                tokens_in: 3,
+                tokens_out: 2,
+                finish: trollm_models::FinishReason::Stop,
+                capacity: None,
+            })
+        }
+    }
+
+    #[test]
+    fn controlled_model_preserves_response_when_post_generation_pause_exhausts_budget() {
+        let (handle, _) = handle();
+        let (ready, waiting) = channel();
+        let mut model = ControlledModel {
+            slot: "coder".into(),
+            inner: Box::new(PauseAfterResponse {
+                ctl: handle.control.clone(),
+                ready,
+            }),
+            ctl: handle.control.clone(),
+        };
+        let worker = std::thread::spawn(move || {
+            let mut req = request();
+            req.max_duration = Some(Duration::from_millis(10));
+            model.generate(req)
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        handle.control.request_resume();
+        let response = worker.join().unwrap().unwrap();
+        assert_eq!(response.finish, trollm_models::FinishReason::Timeout);
+        assert_eq!(response.text, "partial evidence");
+        assert_eq!((response.tokens_in, response.tokens_out), (3, 2));
+        assert_eq!(handle.control.activity(), None);
+    }
+
+    #[test]
+    fn controlled_model_counts_paused_time_before_dispatch() {
+        let (handle, _) = handle();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut model = ControlledModel {
+            slot: "coder".into(),
+            inner: Box::new(BudgetRecordingModel(requests.clone())),
+            ctl: handle.control.clone(),
+        };
+        handle.control.request_pause();
+        let worker = std::thread::spawn(move || {
+            let mut req = request();
+            req.max_duration = Some(Duration::from_millis(10));
+            model.generate(req)
+        });
+        let wait_started = Instant::now();
+        while !matches!(*handle.status.lock().unwrap(), RunPhase::Paused { .. }) {
+            assert!(wait_started.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        handle.control.request_resume();
+        let response = worker.join().unwrap().unwrap();
+        assert_eq!(response.finish, trollm_models::FinishReason::Timeout);
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(handle.control.activity(), None);
     }
 
     #[test]
@@ -2621,6 +2900,46 @@ mod regression_tests {
             }
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn deadline_backoff_expires_during_pause_without_waiting_again_after_resume() {
+        let (handle, _) = handle();
+        handle.pause();
+        let ctl = handle.control.clone();
+        let (deadline_sender, deadline_receiver) = channel();
+        let (done, result) = channel();
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(200);
+            deadline_sender.send(deadline).unwrap();
+            done.send(ctl.wait_backoff_until(Duration::from_secs(30), Some(deadline)))
+                .unwrap();
+        });
+        let deadline = deadline_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let acknowledged_by = Instant::now() + Duration::from_secs(2);
+        while !matches!(*handle.status.lock().unwrap(), RunPhase::Paused { .. }) {
+            assert!(
+                Instant::now() < acknowledged_by,
+                "backoff did not acknowledge pause"
+            );
+            std::thread::yield_now();
+        }
+        // Expiry does not implicitly release an explicit user hold.
+        assert!(matches!(
+            result.recv_timeout(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(10)
+            ),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        handle.resume();
+        let completion = result.recv_timeout(Duration::from_secs(2));
+        if completion.is_err() {
+            handle.cancel();
+        }
+        worker.join().unwrap();
+        assert!(!completion.expect("expired deadline resumed a fresh backoff wait"));
     }
 
     #[test]

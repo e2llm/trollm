@@ -42,6 +42,66 @@ fn gateway(
 }
 
 #[test]
+fn local_guidance_and_dispatch_ignore_an_irrelevant_failing_server() {
+    let server = MockMcpServer::start_with_tools_response(json!({
+        "error": {"code": -32603, "message": "fixture discovery failure"}
+    }));
+    let dirs = TempDir::new("local-guidance-no-discovery");
+    let mut gw = gateway(&server, &dirs, "{}", None);
+    let tools = gw.available_tools(&[
+        "local.calculate".into(),
+        "tracker.get_issue".into(),
+        "local.calculate_extra".into(),
+    ]);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].server, "local");
+    assert_eq!(tools[0].name, "calculate");
+    assert_eq!(tools[0].input_schema["type"], "object");
+    assert!(gw.available_tools(&[]).is_empty());
+    let result = gw
+        .call(&call(
+            "local",
+            "calculate",
+            json!({"operation":"add", "left":"0.1", "right":"0.2"}),
+        ))
+        .unwrap();
+    assert_eq!(result.content_for_model["result"], "0.3");
+    assert!(server.counts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn remote_guidance_uses_only_catalogs_discovered_by_dispatch() {
+    let schema = integer_id_schema();
+    let server = schema_server("get_issue", schema.clone());
+    let dirs = TempDir::new("cached-guidance");
+    let mut gw = gateway(&server, &dirs, "{}", None);
+    let grants = vec!["tracker.get_issue".into(), "tracker.get_issue_extra".into()];
+    assert!(gw.available_tools(&grants).is_empty());
+    assert!(server.counts.lock().unwrap().is_empty());
+
+    gw.call(&call("tracker", "get_issue", json!({"id":1})))
+        .unwrap();
+    assert_eq!(server.count("list"), 1);
+    assert_eq!(server.count("call:get_issue"), 1);
+    let before = server.counts.lock().unwrap().clone();
+    let tools = gw.available_tools(&grants);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].server, "tracker");
+    assert_eq!(tools[0].name, "get_issue");
+    assert_eq!(tools[0].input_schema, schema);
+    assert!(gw
+        .available_tools(&["tracker.get_issue_extra".into()])
+        .is_empty());
+    assert_eq!(*server.counts.lock().unwrap(), before);
+
+    // Guidance does not replace final wire-schema enforcement.
+    assert!(gw
+        .call(&call("tracker", "get_issue", json!({"id":"1"})))
+        .is_err());
+    assert_eq!(server.count("call:get_issue"), 1);
+}
+
+#[test]
 fn invalid_mutation_is_rejected_before_dispatch_or_intent_and_valid_mutation_calls_once() {
     let server = schema_server("close_issue", integer_id_schema());
     let dirs = TempDir::new("schema-mutation");
@@ -74,7 +134,12 @@ fn invalid_mutation_is_rejected_before_dispatch_or_intent_and_valid_mutation_cal
     assert_eq!(server.count("call:close_issue"), 1);
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["mutation_passthrough", "live_call"]
+        vec![
+            "mutation_passthrough",
+            "response_size",
+            "live_call",
+            "response_size"
+        ]
     );
     assert_eq!(server.count("list"), 1);
 }
@@ -290,7 +355,10 @@ fn paged_catalog_routes_cursor_and_freezes_second_page_tools() {
         None,
     );
     let tools = gw.list_tools().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(
+        tools.iter().filter(|tool| tool.server == "tracker").count(),
+        2
+    );
     assert_eq!(
         tools
             .iter()

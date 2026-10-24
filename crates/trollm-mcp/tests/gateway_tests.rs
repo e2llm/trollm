@@ -286,7 +286,11 @@ fn collecting_sink() -> (Arc<Mutex<Vec<String>>>, EventSink) {
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
     let sink: EventSink = Box::new(move |event| {
-        events_clone.lock().unwrap().push(event.kind().to_string());
+        // These assertions describe lifecycle order; byte telemetry has its own
+        // coverage in response_sizes and may appear between lifecycle events.
+        if event.kind() != "response_size" {
+            events_clone.lock().unwrap().push(event.kind().to_string());
+        }
         Ok(())
     });
     (events, sink)
@@ -1493,6 +1497,10 @@ fn run_argument_constraints_enforce_selection_and_catalog_without_rewriting() {
             ("tracker.act".into(), json!({"type":"object","required":["browser","action","target"],"properties":{"browser":{"const":"chosen"},"action":{"const":"open"},"target":{"const":"https://example.org/page"}},"not":{"anyOf":[{"required":["sessionId"]},{"required":["tabId"]}]}})),
             ("tracker.read_page".into(), json!({"type":"object","required":["browser","tabId"],"properties":{"browser":{"const":"chosen"}},"not":{"required":["sessionId"]}})),
         ])).unwrap();
+    assert_eq!(
+        gw.argument_constraints("tracker", "read_page").unwrap()["required"],
+        json!(["browser", "tabId"])
+    );
     for (tool, args) in [
         ("list_tabs", json!({})),
         ("list_tabs", json!({"browser":"other"})),
@@ -1638,7 +1646,8 @@ fn audit_failure_after_mutation_blocks_every_subsequent_dispatch() {
     gw.set_event_sink(Box::new(|_| Ok(())));
     assert!(gw.call(&mutation).is_err());
     assert_eq!(server.request_auth.lock().unwrap().len(), requests);
-    assert_eq!(*attempts.lock().unwrap(), 2);
+    // Intent, raw payload size, then the rejected live-call event.
+    assert_eq!(*attempts.lock().unwrap(), 3);
 }
 
 #[test]
@@ -1655,4 +1664,66 @@ fn audit_intent_failure_prevents_mutation_dispatch() {
         .call(&call("tracker", "close_issue", json!({"id":1})))
         .is_err());
     assert_eq!(server.count("call:close_issue"), 0);
+}
+
+#[test]
+fn nested_pagination_preserves_string_cursor_and_complete_raw_worklist() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("nested-pagination");
+    let policies = PolicySet::from_yaml_str("tracker.list_issues: {cache: {key: [query], ttlS: 900}, paginate: {param: cursor, deliver: first_page, backgroundFetch: all, responseCursor: /pagination/cursor, responseHasMore: /pagination/hasMore}}").unwrap();
+    let mut gw = gateway(&server, policies, &dirs, None);
+    for (query, expected_calls, expected_items) in [
+        ("nested-two", 2, 2),
+        ("nested-false", 1, 1),
+        ("nested-array", 1, 1),
+    ] {
+        let before = server.count("call:list_issues");
+        let result = gw
+            .call(&call("tracker", "list_issues", json!({"query":query})))
+            .unwrap();
+        assert_eq!(server.count("call:list_issues") - before, expected_calls);
+        let artifact = result
+            .artifacts
+            .iter()
+            .find(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+            .unwrap();
+        let records: Vec<Value> = std::fs::read_to_string(artifact)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), expected_items);
+        if query == "nested-two" {
+            assert_eq!(records[1], json!({"id":2,"raw":"kept"}));
+        }
+    }
+    for query in ["nested-missing", "nested-null"] {
+        let error = gw
+            .call(&call("tracker", "list_issues", json!({"query":query})))
+            .unwrap_err();
+        assert!(error.to_string().contains("cursor is missing or null"));
+    }
+}
+
+#[test]
+fn runtime_deadline_stops_discovery_live_calls_and_pagination_before_dispatch() {
+    for warm_catalog in [false, true] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("runtime-deadline");
+        let mut gw = gateway(&server, fixture_policies(), &dirs, None);
+        if warm_catalog {
+            gw.list_tools().unwrap();
+        }
+        gw.set_deadline(Some(Instant::now() - Duration::from_millis(1)));
+        for tool in ["summarize", "list_issues"] {
+            let error = gw
+                .call(&call("tracker", tool, json!({"query":"open"})))
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("deadline"));
+            assert_eq!(server.count(&format!("call:{tool}")), 0);
+        }
+        if !warm_catalog {
+            assert_eq!(server.count("list"), 0);
+        }
+    }
 }

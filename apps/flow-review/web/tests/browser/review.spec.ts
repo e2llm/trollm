@@ -3,6 +3,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { fixture } from "../fixture";
+test.use({ viewport: { width: 1440, height: 900 } });
+const browserErrors = new WeakMap<import("@playwright/test").Page, string[]>();
+test.beforeEach(async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  browserErrors.set(page, errors);
+});
+test.afterEach(async ({ page }) => {
+  expect(browserErrors.get(page)).toEqual([]);
+});
+async function openNodes(page: import("@playwright/test").Page) {
+  if (
+    !(await page
+      .locator(".node-browser")
+      .evaluate((el) => (el as HTMLDetailsElement).open))
+  )
+    await page.locator(".node-browser > summary").click();
+}
+async function tab(
+  page: import("@playwright/test").Page,
+  name: string | RegExp,
+) {
+  await page
+    .getByRole("tab", { name, exact: typeof name === "string" })
+    .click();
+}
 test("import, inspect shared prompt, comment, export, compare and keep anchors", async ({
   page,
 }) => {
@@ -24,15 +53,17 @@ test("import, inspect shared prompt, comment, export, compare and keep anchors",
   await expect(
     page.getByRole("heading", { name: "Review example", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "start task", exact: false }).click();
+  await openNodes(page);
+  await page.getByRole("button", { name: "start task shared", exact: true }).click();
   await expect(
-    page.getByText("Affected nodes: main/start, main/unreachable"),
+    page.getByText("Shared task used by: main/start, main/unreachable"),
   ).toBeVisible();
   await expect(
     page.getByText("Read {{ user_input }} <script>alert(1)</script>", {
       exact: true,
     }),
   ).toBeVisible();
+  await tab(page, /Feedback/);
   await page
     .getByLabel("Comment", { exact: true })
     .fill("Please clarify the allowed routes.");
@@ -51,17 +82,20 @@ test("import, inspect shared prompt, comment, export, compare and keep anchors",
     mimeType: "text/plain",
     buffer: Buffer.from("revised"),
   });
+  await tab(page, /Feedback/);
   await expect(
     page.getByText("earlier revision; review manually", { exact: false }),
   ).toBeVisible();
+  await tab(page, "Changes");
   await expect(
     page.getByText("Edges / recovery: main/start.routes", { exact: true }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Unassigned nodes", exact: false })
     .click();
+  await openNodes(page);
   await expect(
-    page.getByRole("button", { name: "unreachable task", exact: false }),
+    page.getByRole("button", { name: "unreachable task shared", exact: true }),
   ).toBeVisible();
 });
 test("incomplete packages keep diagnostics, source and explicit root selection", async ({
@@ -94,6 +128,7 @@ test("incomplete packages keep diagnostics, source and explicit root selection",
   await page.getByLabel("Mounted packages").selectOption("mounted");
   await expect(page.getByText("Choose root and registry")).toBeVisible();
   await expect(page.getByLabel("Root flow")).toBeVisible();
+  await tab(page, "Source");
   await page.getByLabel("Source file").selectOption("prompts/shared.md");
   await expect(
     page
@@ -104,7 +139,7 @@ test("incomplete packages keep diagnostics, source and explicit root selection",
   ).toBeVisible();
 });
 
-test("large cyclic package reveals nodes progressively and loads graph on demand", async ({
+test("large cyclic package keeps graph visible and reveals navigation progressively", async ({
   page,
 }) => {
   const doc = fixture();
@@ -131,6 +166,16 @@ test("large cyclic package reveals nodes progressively and loads graph on demand
   );
   await page.goto("/");
   await page.getByLabel("Mounted packages").selectOption("large");
+  await expect(page.locator(".react-flow")).toBeVisible();
+  await expect(page.locator(".react-flow__node.selected")).toContainText("n0");
+  await expect
+    .poll(() =>
+      page
+        .locator(".react-flow__viewport")
+        .evaluate((el) => new DOMMatrix(getComputedStyle(el).transform).a),
+    )
+    .toBeGreaterThanOrEqual(0.8);
+  await openNodes(page);
   await expect(
     page.getByRole("navigation", { name: "Flow nodes" }).getByRole("button"),
   ).toHaveCount(100);
@@ -140,11 +185,7 @@ test("large cyclic package reveals nodes progressively and loads graph on demand
   await expect(
     page.getByRole("navigation", { name: "Flow nodes" }).getByRole("button"),
   ).toHaveCount(200);
-  await page
-    .getByText("Show read-only graph · 200 of 1500 matching nodes", {
-      exact: true,
-    })
-    .click();
+
   await expect(page.locator(".react-flow")).toBeVisible();
   await page
     .getByRole("button", { name: "n0 task shared", exact: true })
@@ -264,9 +305,8 @@ test("default failure notices, authored at-sign graph nodes and multiline compar
   await expect(
     page.getByRole("note", { name: "Effective task failure defaults" }),
   ).toContainText("2 tasks in this view");
-  await page
-    .getByText("Show read-only graph · 6 of 6 matching nodes", { exact: true })
-    .click();
+  await openNodes(page);
+  await page.getByRole("button", { name: "Fit graph", exact: true }).click();
   await expect(page.locator(".react-flow__node")).toHaveCount(8);
   for (const id of [
     "@summarize",
@@ -274,6 +314,7 @@ test("default failure notices, authored at-sign graph nodes and multiline compar
     "constructor",
     "@step:onLimit",
   ]) {
+    await page.getByRole("button", { name: "Fit graph", exact: true }).click();
     await page.locator(".react-flow__node").filter({ hasText: id }).click();
     await expect(
       page.getByRole("heading", { name: `main / ${id}`, exact: true }),
@@ -306,3 +347,105 @@ test("default failure notices, authored at-sign graph nodes and multiline compar
   );
   expect(errors).toEqual([]);
 });
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 2560, height: 1440 },
+]) {
+  test(`desktop ${viewport.width}: graph, cross-phase navigation and independent inspector scrolling`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    const doc = fixture();
+    doc.files[0].content = "Long instruction with preserved evidence.\n".repeat(
+      1000,
+    );
+    doc.presentation!.phases.push({
+      id: "finish",
+      title: "Finish phase",
+      description: "Review the outcome",
+      nodes: [{ flow: "main", node: "done" }],
+    });
+    doc.unassignedNodes = [{ flow: "main", node: "unreachable" }];
+    await page.route("**/api/packages", (route) =>
+      route.fulfill({
+        json: {
+          packages: [{ id: "desktop", name: "Desktop", kind: "source" }],
+        },
+      }),
+    );
+    await page.route("**/api/packages/desktop", (route) =>
+      route.fulfill({ json: doc }),
+    );
+    await page.goto("/");
+    await page.getByLabel("Mounted packages").selectOption("desktop");
+    const canvas = page.locator(".graph-canvas");
+    const inspector = page.getByRole("complementary", { name: "Inspector" });
+    await expect(canvas).toBeVisible();
+    await expect(page.locator(".react-flow__node")).toHaveCount(3);
+    const nodeTab = page.getByRole("tab", { name: "Node", exact: true });
+    await nodeTab.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(
+      page.getByRole("tab", { name: "Package", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(
+      page.getByRole("tab", { name: "Changes", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Home");
+    await expect(nodeTab).toBeFocused();
+    await expect(nodeTab).toHaveAttribute("aria-selected", "true");
+    const canvasBox = (await canvas.boundingBox())!;
+    const inspectorBox = (await inspector.boundingBox())!;
+    const workspaceBox = (await page.locator(".workspace").boundingBox())!;
+    expect(inspectorBox.x).toBeGreaterThanOrEqual(
+      canvasBox.x + canvasBox.width,
+    );
+    expect(workspaceBox.width).toBeGreaterThan(viewport.width * 0.96);
+    expect(canvasBox.height).toBeGreaterThan(viewport.height * 0.45);
+    expect(inspectorBox.x + inspectorBox.width).toBeLessThanOrEqual(
+      viewport.width,
+    );
+    const edges = page.locator(".react-flow__edge-path");
+    expect(await edges.count()).toBeGreaterThanOrEqual(4);
+    for (const edge of await edges.all()) {
+      await expect(edge).toHaveAttribute("marker-end", /url\(/);
+      await expect(edge).toHaveAttribute("d", /[CL]/);
+    }
+    await expect(
+      page.locator(".react-flow__edge-text").filter({ hasText: "again" }),
+    ).toBeVisible();
+    const beforeScroll = await page.evaluate(() => ({
+      x: window.scrollX,
+      y: window.scrollY,
+    }));
+    await page.getByRole("tabpanel").hover();
+    await page.mouse.wheel(0, 700);
+    await expect
+      .poll(() => page.getByRole("tabpanel").evaluate((el) => el.scrollTop))
+      .toBeGreaterThan(0);
+    expect(
+      await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY })),
+    ).toEqual(beforeScroll);
+    expect(await canvas.boundingBox()).toEqual(canvasBox);
+    const outside = page
+      .locator(".react-flow__node")
+      .filter({ hasText: "done" });
+    await expect(outside).toContainText("Outside phase");
+    await outside.click();
+    await expect(
+      page.getByRole("heading", { name: "main / done", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /PHASE 2/ })).toHaveClass(
+      /active/,
+    );
+    await expect(page.locator(".react-flow__node.selected")).toContainText(
+      "done",
+    );
+    await expect(
+      page.locator(".react-flow__node").filter({ hasText: "start" }),
+    ).toContainText("Outside phase");
+    await expect(canvas).toBeVisible();
+  });
+}

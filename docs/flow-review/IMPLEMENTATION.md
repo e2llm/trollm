@@ -71,3 +71,33 @@ The service has no accounts, shared review database or multi-tenant boundary.
 Use a trusted host and external TLS/access control when exposing it over a
 network. Validation covers the selected entry flow and referenced subflows;
 unused supplied flows stay visible with warnings.
+
+## Source hardening follow-up, 2026-10-24
+
+Inspection now rejects cyclic/shared-descendant subflow imports before recursive
+core loading can duplicate large child plans. Repeated references within one
+parent remain supported. Feedback fences handle many short backtick runs without
+exceeding JavaScript argument limits. Unsaved feedback drafts retain their
+original revision, target and excerpt across reloads and navigation; discard is
+explicit. Focused regression checks cover these cases.
+
+The updated source passed the full host Rust workspace, bridge stub checks and
+strict Clippy, plus 20 frontend logic/component tests, type/lint/build and five
+Chromium fixture workflows. These source checks do not renew the earlier
+container-image acceptance or imply physical-device/real-model validation.
+
+## Desktop workspace revision
+
+The UI uses the full desktop window with phase/node navigation, a persistent
+graph canvas and an independently scrolling right inspector. Node, Package,
+Source, Feedback and Changes tabs retain the review workflow. The graph displays
+labeled arrows, recovery/return lanes and navigable outside-phase boundaries,
+with readable focus, a whole-graph fit control and minimap. Desktop windows of at
+least 1180 pixels are expected. Runtime and package contracts are unchanged.
+
+Validation includes type/lint/build, 29 frontend/component/layout/viewport tests,
+seven Chromium fixture checks and an integration against the real Rust HTTP API.
+Browser checks cover 1440x900 and 2560x1440, independent inspector scrolling,
+keyboard tabs, graph selection, boundary navigation, branches/loops and large
+graphs. Local pod checks used rebuilt browser assets with the unchanged backend;
+they do not identify a newly distributed image or establish model/device acceptance.

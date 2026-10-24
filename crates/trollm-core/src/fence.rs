@@ -12,7 +12,14 @@ pub struct FenceError(pub String);
 /// Pull every fence out of a generation. Returns (fences, had_fence).
 /// Any malformed fence is a `tool-call-parse` error (§5.1, §4.5 error classes).
 pub fn extract_tool_calls(text: &str) -> Result<Vec<ToolCall>, FenceError> {
-    trollm_models::fence::extract_tool_calls(text)
+    extract_tool_calls_with_closed_arguments(text, &std::collections::BTreeMap::new())
+}
+
+pub fn extract_tool_calls_with_closed_arguments(
+    text: &str,
+    closed_arguments: &std::collections::BTreeMap<(String, String), Vec<String>>,
+) -> Result<Vec<ToolCall>, FenceError> {
+    trollm_models::fence::extract_tool_calls_with_closed_arguments(text, closed_arguments)
         .into_iter()
         .map(|parsed| {
             parsed

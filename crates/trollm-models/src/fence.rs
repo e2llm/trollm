@@ -16,6 +16,7 @@
 //!   is prose and ignored; multiple fences per generation are returned in order.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Opening tag of the tool-call fence.
@@ -83,6 +84,15 @@ impl std::error::Error for FenceParseError {}
 /// a malformed fence does not abort the scan of the remaining text. Text with no
 /// fences yields an empty vec.
 pub fn extract_tool_calls(text: &str) -> Vec<Result<ParsedFence, FenceParseError>> {
+    extract_tool_calls_with_closed_arguments(text, &BTreeMap::new())
+}
+
+/// Enforce authored top-level argument names before JSON maps discard duplicates.
+/// Tools absent from `closed_arguments` retain ordinary parsing behavior.
+pub fn extract_tool_calls_with_closed_arguments(
+    text: &str,
+    closed_arguments: &BTreeMap<(String, String), Vec<String>>,
+) -> Vec<Result<ParsedFence, FenceParseError>> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while let Some(rel) = text[cursor..].find(FENCE_OPEN) {
@@ -91,7 +101,20 @@ pub fn extract_tool_calls(text: &str) -> Vec<Result<ParsedFence, FenceParseError
         match find_fence_close(&text[content_start..]) {
             Some(rel_close) => {
                 let content_end = content_start + rel_close;
-                out.push(parse_fence(open, &text[content_start..content_end]));
+                let raw = &text[content_start..content_end];
+                out.push(parse_fence(open, raw).and_then(|call| {
+                    if let Some(allowed) =
+                        closed_arguments.get(&(call.server.clone(), call.tool.clone()))
+                    {
+                        validate_closed_arguments(raw, allowed).map_err(|message| {
+                            FenceParseError::InvalidShape {
+                                offset: open,
+                                message,
+                            }
+                        })?;
+                    }
+                    Ok(call)
+                }));
                 cursor = content_end + FENCE_CLOSE.len();
             }
             None => {
@@ -101,6 +124,51 @@ pub fn extract_tool_calls(text: &str) -> Vec<Result<ParsedFence, FenceParseError
         }
     }
     out
+}
+
+fn validate_closed_arguments(raw: &str, allowed: &[String]) -> Result<(), String> {
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+    use serde::{Deserialize, Deserializer};
+    struct Names(Vec<String>);
+    impl<'de> Deserialize<'de> for Names {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct NamesVisitor;
+            impl<'de> Visitor<'de> for NamesVisitor {
+                type Value = Names;
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("an argument object")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Names, A::Error> {
+                    let mut names = Vec::new();
+                    while let Some(name) = map.next_key::<String>()? {
+                        names.push(name);
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                    Ok(Names(names))
+                }
+            }
+            deserializer.deserialize_map(NamesVisitor)
+        }
+    }
+    #[derive(Deserialize)]
+    struct CallNames {
+        #[serde(rename = "server")]
+        _server: String,
+        #[serde(rename = "tool")]
+        _tool: String,
+        args: Names,
+    }
+    let names: CallNames = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names.args.0 {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate model argument '{name}'"));
+        }
+        if !allowed.contains(&name) {
+            return Err(format!("model argument '{name}' is not in modelFields"));
+        }
+    }
+    Ok(())
 }
 
 // Framing only: serde_json still validates the complete payload. A delimiter
@@ -193,6 +261,25 @@ fn parse_fence(offset: usize, raw: &str) -> Result<ParsedFence, FenceParseError>
 /// fall back to arbitrary JSON strings (there are no legal tool calls anyway;
 /// the ledger should not be asking for one).
 pub fn tool_call_grammar(servers_tools: &[(String, String)]) -> String {
+    tool_call_grammar_with_mode(servers_tools, ToolCallGrammarMode::ProseOrToolCalls)
+}
+
+/// Allowed response shapes at the tool-call boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallGrammarMode {
+    /// Preserve the ordinary coder response: prose or one or more calls.
+    ProseOrToolCalls,
+    /// Require exactly one call, as required by tool-result completion.
+    SingleToolCall,
+    /// Require one or more calls, without a prose alternative.
+    ToolCallsOnly,
+}
+
+/// Build the same granted-tool/JSON grammar with an explicit response shape.
+pub fn tool_call_grammar_with_mode(
+    servers_tools: &[(String, String)],
+    mode: ToolCallGrammarMode,
+) -> String {
     // Group tools by server, preserving first-appearance order.
     let mut servers: Vec<(&str, Vec<&str>)> = Vec::new();
     for (server, tool) in servers_tools {
@@ -209,7 +296,11 @@ pub fn tool_call_grammar(servers_tools: &[(String, String)]) -> String {
     let mut g = String::new();
     g.push_str("# Tool-call fence grammar (docs/ARCHITECTURE-ANDROID.md §5.1).\n");
     g.push_str("# Generated by trollm_models::fence::tool_call_grammar.\n");
-    g.push_str("root ::= ws (fence (ws fence)* | prose) ws\n");
+    g.push_str(match mode {
+        ToolCallGrammarMode::ProseOrToolCalls => "root ::= ws (fence (ws fence)* | prose) ws\n",
+        ToolCallGrammarMode::SingleToolCall => "root ::= ws fence ws\n",
+        ToolCallGrammarMode::ToolCallsOnly => "root ::= ws fence (ws fence)* ws\n",
+    });
     g.push_str(&format!(
         "fence ::= \"{}\" ws call ws \"{}\"\n",
         gbnf_escape(FENCE_OPEN),
@@ -275,6 +366,133 @@ pub fn tool_call_grammar(servers_tools: &[(String, String)]) -> String {
         g.push('\n');
     }
     g
+}
+
+/// Restrict model-owned top-level arguments for tools with a projected schema.
+/// Primitive fields use their JSON type; the complete wire is validated by
+/// the gateway after ledger-owned arguments have been supplied. Other tools
+/// and the prose/fence boundary retain the ordinary grammar.
+pub fn tool_call_grammar_with_argument_schemas(
+    servers_tools: &[(String, String)],
+    model_schemas: &BTreeMap<(String, String), Value>,
+    mode: ToolCallGrammarMode,
+) -> String {
+    if model_schemas.is_empty() || servers_tools.is_empty() {
+        return tool_call_grammar_with_mode(servers_tools, mode);
+    }
+    let mut grammar = tool_call_grammar_with_mode(servers_tools, mode)
+        .lines()
+        .filter(|line| {
+            !line.starts_with("call ::=")
+                && !line.starts_with("call-s")
+                && !line.starts_with("tool-s")
+        })
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    let mut pairs = Vec::new();
+    for pair in servers_tools {
+        if !pairs.contains(pair) {
+            pairs.push(pair.clone());
+        }
+    }
+    grammar.push_str(&format!(
+        "call ::= {}\n",
+        (0..pairs.len())
+            .map(|index| format!("call-a{index}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    for (index, (server, tool)) in pairs.iter().enumerate() {
+        grammar.push_str(&format!(
+            "call-a{index} ::= \"{{\" ws \"\\\"server\\\"\" ws \":\" ws \"{}\" ws \",\" ws \"\\\"tool\\\"\" ws \":\" ws \"{}\" ws \",\" ws \"\\\"args\\\"\" ws \":\" ws args-a{index} \"}}\" ws\n",
+            gbnf_escape(&serde_json::to_string(server).expect("JSON string")),
+            gbnf_escape(&serde_json::to_string(tool).expect("JSON string")),
+        ));
+        let Some(schema) = model_schemas
+            .get(&(server.clone(), tool.clone()))
+            .filter(|schema| schema.get("properties").is_some_and(Value::is_object))
+        else {
+            grammar.push_str(&format!("args-a{index} ::= object\n"));
+            continue;
+        };
+        let fields = schema["properties"]
+            .as_object()
+            .expect("projected object schema");
+        let required = schema["required"].as_array();
+        grammar.push_str(&format!(
+            "args-a{index} ::= \"{{\" ws first-a{index}-0 \"}}\" ws\n"
+        ));
+        // Two suffix states encode optional subsets in canonical key order
+        // without exponential alternatives: first has no preceding comma,
+        // tail follows an already emitted field. Nested objects remain free.
+        for (field_index, name) in fields.keys().enumerate() {
+            let next = field_index + 1;
+            let key = gbnf_escape(&serde_json::to_string(name).expect("JSON key"));
+            let mandatory = required.is_some_and(|names| names.iter().any(|value| value == name));
+            // Resolve one local reference only for primitive type selection;
+            // patterns, ranges and full schema semantics stay with the gateway.
+            let field_schema = fields[name]
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix('#'))
+                .and_then(|pointer| schema.pointer(pointer))
+                .unwrap_or(&fields[name]);
+            let primitive_rule = match field_schema.get("type").and_then(Value::as_str) {
+                Some("string") => "string",
+                Some("integer") => "argument-integer",
+                Some("number") => "number",
+                Some("boolean") => "argument-boolean",
+                Some("null") => "argument-null",
+                Some("array") => "array",
+                Some("object") => "object",
+                _ => "value",
+            };
+            let value_rule = if let Some(values) = field_schema
+                .get("enum")
+                .and_then(Value::as_array)
+                .filter(|values| {
+                    !values.is_empty()
+                        && values.iter().all(Value::is_string)
+                        && field_schema.get("type").and_then(Value::as_str) == Some("string")
+                }) {
+                let rule = format!("enum-a{index}-{field_index}");
+                let alternatives = values
+                    .iter()
+                    .map(|value| {
+                        format!(
+                            "\"{}\" ws",
+                            gbnf_escape(&serde_json::to_string(value).expect("JSON string enum"))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                grammar.push_str(&format!("{rule} ::= {alternatives}\n"));
+                rule
+            } else {
+                primitive_rule.to_string()
+            };
+            for (state, comma) in [("first", ""), ("tail", "\",\" ws ")] {
+                grammar.push_str(&format!(
+                    "{state}-a{index}-{field_index} ::= {comma}\"{key}\" ws \":\" ws {value_rule} tail-a{index}-{next}{}\n",
+                    if mandatory { String::new() } else { format!(" | {state}-a{index}-{next}") },
+                ));
+            }
+        }
+        let end = fields.len();
+        if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+            grammar.push_str(&format!(
+                "first-a{index}-{end} ::= \"\"\ntail-a{index}-{end} ::= \"\"\n"
+            ));
+        } else {
+            // Required known keys precede an unrestricted JSON-member suffix.
+            // Open schemas keep arbitrary additional argument names and values.
+            grammar.push_str(&format!(
+                "first-a{index}-{end} ::= (member (\",\" ws member)*)?\ntail-a{index}-{end} ::= (\",\" ws member)*\n"
+            ));
+        }
+    }
+    grammar.push_str("argument-integer ::= \"-\"? (\"0\" | [1-9] [0-9]*) ws\nargument-boolean ::= (\"true\" | \"false\") ws\nargument-null ::= \"null\" ws\n");
+    grammar
 }
 
 /// Escape a string for inclusion as a GBNF double-quoted literal.
@@ -667,6 +885,126 @@ mod tests {
             assert_eq!(parsed.server, server);
             assert_eq!(parsed.tool, tool);
             assert_eq!(parsed.args["nested"]["id"], 7);
+        }
+    }
+}
+
+#[cfg(test)]
+mod argument_schema_grammar_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn string_enum_values_are_json_and_gbnf_escaped_and_have_no_free_string_branch() {
+        let values = ["finish", "quote\"slash\\line\n", "שלום"];
+        let schemas = BTreeMap::from([(
+            ("flow".into(), "choose".into()),
+            json!({"type":"object", "properties":{"route":{"type":"string","enum":values}}, "required":["route"],"additionalProperties":false}),
+        )]);
+        let grammar = tool_call_grammar_with_argument_schemas(
+            &[("flow".into(), "choose".into())],
+            &schemas,
+            ToolCallGrammarMode::SingleToolCall,
+        );
+        let rule = grammar
+            .lines()
+            .find(|line| line.starts_with("enum-a0-0 ::="))
+            .unwrap();
+        for value in values {
+            assert!(rule.contains(&gbnf_escape(&serde_json::to_string(value).unwrap())));
+        }
+        assert!(!rule.contains(" | string"));
+        assert!(grammar.contains("ws enum-a0-0 tail-a0-1"));
+    }
+
+    #[test]
+    fn closed_arguments_reject_raw_duplicates_while_open_calls_remain_compatible() {
+        let closed = BTreeMap::from([(("t".into(), "read".into()), vec!["value".into()])]);
+        for raw in [
+            r#"{"server":"t","tool":"read","args":{"value":1,"value":2}}"#,
+            r#"{"server":"t","tool":"read","args":{"value":1,"\u0076alue":2}}"#,
+            r#"{"server":"t","server":"t","tool":"read","args":{}}"#,
+            r#"{"server":"t","tool":"read","tool":"read","args":{}}"#,
+            r#"{"server":"t","tool":"read","args":{"unknown":1}}"#,
+        ] {
+            let text = format!("{FENCE_OPEN}{raw}{FENCE_CLOSE}");
+            assert!(extract_tool_calls_with_closed_arguments(&text, &closed)[0].is_err());
+            assert!(extract_tool_calls(&text)[0].is_ok());
+        }
+        let text =
+            r#"<tool_call>{"server":"t","tool":"read","args":{"value":{"nested":1}}}</tool_call>"#;
+        assert!(extract_tool_calls_with_closed_arguments(text, &closed)[0].is_ok());
+    }
+
+    #[test]
+    fn closed_argument_validation_is_scoped_and_keeps_scanning_after_errors() {
+        let closed = BTreeMap::from([(("t".into(), "closed".into()), vec!["value".into()])]);
+        let text = concat!(
+            r#"<tool_call>{"server":"t","tool":"closed","args":{},"args":{"value":1}}</tool_call>"#,
+            r#"<tool_call>{"server":"t","tool":"open","args":{"unknown":1,"unknown":2}}</tool_call>"#,
+            r#"<tool_call>{"server":"t","tool":"closed","args":{"\u0076alue":{"nested":1,"nested":2}}}</tool_call>"#,
+        );
+        let calls = extract_tool_calls_with_closed_arguments(text, &closed);
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls[0].is_err(),
+            "duplicate args envelopes must be rejected"
+        );
+        assert_eq!(calls[1].as_ref().unwrap().args["unknown"], 2);
+        assert_eq!(calls[2].as_ref().unwrap().args["value"]["nested"], 2);
+    }
+
+    #[test]
+    fn closed_optional_fields_have_no_generic_member_fallback() {
+        let pairs = vec![("t".into(), "read".into())];
+        let schemas = BTreeMap::from([(
+            ("t".into(), "read".into()),
+            json!({"type":"object","properties":{"cursor":{"type":"string"}},"additionalProperties":false}),
+        )]);
+        let grammar = tool_call_grammar_with_argument_schemas(
+            &pairs,
+            &schemas,
+            ToolCallGrammarMode::SingleToolCall,
+        );
+        assert!(grammar.contains("first-a0-1 ::= \"\"\ntail-a0-1 ::= \"\""));
+        assert!(!grammar
+            .lines()
+            .filter(|line| line.starts_with("first-a0-") || line.starts_with("tail-a0-"))
+            .any(|line| line.contains("member")));
+    }
+
+    #[test]
+    fn required_keys_use_typed_rules_and_bound_empty_object_remains_legal() {
+        for field in ["nodeId", "text", "left", "route"] {
+            let pairs = vec![("generic".into(), "operation".into())];
+            let schemas = BTreeMap::from([(
+                ("generic".into(), "operation".into()),
+                json!({
+                    "type":"object", "properties":{field:{"type":"string"}}, "required":[field], "additionalProperties":false
+                }),
+            )]);
+            let grammar = tool_call_grammar_with_argument_schemas(
+                &pairs,
+                &schemas,
+                ToolCallGrammarMode::SingleToolCall,
+            );
+            let field_rule = grammar
+                .lines()
+                .find(|line| line.starts_with("first-a0-0 ::="))
+                .unwrap();
+            assert!(field_rule.contains("ws string tail-a0-1"));
+            assert!(!field_rule.contains(" | "));
+            assert!(!field_rule.contains("node_id"));
+            let empty = BTreeMap::from([(
+                ("generic".into(), "operation".into()),
+                json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+            )]);
+            let grammar = tool_call_grammar_with_argument_schemas(
+                &pairs,
+                &empty,
+                ToolCallGrammarMode::SingleToolCall,
+            );
+            assert!(grammar.contains("first-a0-0 ::= \"\""));
         }
     }
 }

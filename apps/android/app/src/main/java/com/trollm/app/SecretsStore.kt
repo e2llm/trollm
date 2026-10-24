@@ -30,6 +30,8 @@ class SecretsStore(context: Context) {
         oauthGrants.selectManual(server, endpoint, token)
     }
 
+    fun removeToken(server: String) = oauthGrants.removeManual(server)
+
     fun token(server: String, endpoint: String): String? = oauthGrants.manualToken(server, endpoint)
 
     fun hasToken(server: String): Boolean = prefs.contains(key(server))

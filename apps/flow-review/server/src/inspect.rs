@@ -123,6 +123,7 @@ fn preflight(
         path: &str,
         graph: &BTreeMap<String, Vec<String>>,
         active: &mut BTreeSet<String>,
+        loaded: &mut BTreeSet<String>,
         count: usize,
         remaining: &mut usize,
     ) -> Result<()> {
@@ -134,11 +135,17 @@ fn preflight(
         }
         *remaining -= 1;
         if !active.insert(path.into()) {
-            return Ok(());
+            bail!("cyclic subflow reference");
+        }
+        // Core rejects duplicate plan IDs, but its file loader first retains a
+        // copy per parent. Reject shared descendants before that amplification.
+        // References repeated within one parent are deduplicated below, as in core.
+        if !loaded.insert(path.into()) {
+            bail!("subflow is referenced by multiple parents: {path}");
         }
         if let Some(children) = graph.get(path) {
             for child in children {
-                depth(child, graph, active, count + 1, remaining)?;
+                depth(child, graph, active, loaded, count + 1, remaining)?;
             }
         }
         active.remove(path);
@@ -150,7 +157,14 @@ fn preflight(
     }
     let mut remaining = 50000;
     for path in graph.keys() {
-        depth(path, &graph, &mut BTreeSet::new(), 0, &mut remaining)?;
+        depth(
+            path,
+            &graph,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            0,
+            &mut remaining,
+        )?;
     }
     if let Some(path) = registry_path {
         let registry =

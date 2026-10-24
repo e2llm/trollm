@@ -163,6 +163,19 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
                         at(name)
                     ));
                 }
+                if let Some(NodeOutputs::Task(outputs)) = &node.outputs {
+                    for (output_name, output) in outputs {
+                        if let NodeOutputBinding::FromArtifact {
+                            view: Some(view), ..
+                        } = output
+                        {
+                            if let Err(error) = view.validate() {
+                                problems
+                                    .push(format!("{}: output '{output_name}': {error}", at(name)));
+                            }
+                        }
+                    }
+                }
                 if let Some(o) = &node.outputs {
                     if !matches!(o, NodeOutputs::Task(_)) {
                         problems.push(format!(

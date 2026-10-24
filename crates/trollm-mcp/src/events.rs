@@ -8,6 +8,18 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProxyEvent {
+    /// Compact JSON UTF-8 sizes, never HTTP wire bytes. Stages describe the
+    /// same data at different boundaries and must not be summed together.
+    ResponseSize {
+        server: String,
+        tool: String,
+        args_hash: String,
+        dispatch_id: u64,
+        stage: String,
+        source: String,
+        compact_json_utf8_bytes: Option<u64>,
+        page: Option<u64>,
+    },
     CacheHit {
         server: String,
         tool: String,
@@ -72,6 +84,7 @@ pub enum ProxyEvent {
 impl ProxyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ResponseSize { .. } => "response_size",
             Self::CacheHit { .. } => "cache_hit",
             Self::CacheMiss { .. } => "cache_miss",
             Self::FetchStarted { .. } => "fetch_started",

@@ -40,6 +40,40 @@ pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<Wri
     })
 }
 
+/// Private diagnostic write: restrict access from creation on Unix hosts.
+/// Other hosts rely on the enclosing app-private run storage.
+pub(crate) fn write_private_atomic(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<WrittenArtifact> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    let result = file.write_all(bytes).and_then(|()| {
+        drop(file);
+        std::fs::rename(&tmp, &path)
+    });
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(WrittenArtifact {
+        path,
+        bytes: bytes.len() as u64,
+        sha256: hex_sha256(bytes),
+    })
+}
+
 /// Write the `<file>.meta.json` sidecar next to an artifact.
 pub fn write_meta(path: &Path, meta: &ArtifactMeta) -> std::io::Result<()> {
     let sidecar = meta_path(path);

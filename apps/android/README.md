@@ -98,6 +98,12 @@ Notifications open their run UUID. Existing runs can be viewed even if their
 original flow is no longer installed. On process restart, Resume invokes the
 runtime's cold-recovery API for that UUID and reattaches foreground ownership;
 Pause/Cancel need a live runtime handle and expose FFI errors in the UI.
+Cancel asks for confirmation and explains that remote effects are not rolled back.
+Run controls wrap at narrow widths; the main status is a polite accessibility
+announcement. Flow/history loading and empty states are explicit. The final
+report is selectable and can be copied; technical events remain opt-in and can
+be copied only by an explicit action. Manual-token removal has its own confirmation
+and preserves active OAuth sign-in and other saved connections.
 
 Pause/Cancel also interrupt retry delays. Resume continues the remaining delay;
 cancellation skips authored retries and persists a cancelled outcome for cold
@@ -154,6 +160,26 @@ workspace's bindgen shim, and cross-compiles Rust for arm64-v8a, armeabi-v7a and
 x86_64. Generated bindings live in `app/build/generated/uniffi`; native outputs
 live in `app/src/main/jniLibs`. The debug APK is under
 `app/build/outputs/apk/debug/`. Keep generated files out of source control.
+For a smaller development build, select supported ABIs explicitly:
+
+```sh
+./gradlew --no-daemon --max-workers=2 -Ptrollm.rustFeatures=llama \
+  -Ptrollm.androidAbis=arm64-v8a :app:assembleDebug
+python3 ../../scripts/check-android-apk.py app/build/outputs/apk/debug/app-debug.apk \
+  --backend llama --abi arm64-v8a
+```
+
+Omitting `trollm.androidAbis` retains all three ABIs; the APK checker also defaults
+to all three. Repeat `--abi` to validate a selected subset. The packaged ABI set
+must match, including each bridge and the native C++ runtime when using llama.
+Set `-Ptrollm.buildRoot=/path/to/builds` to place Gradle outputs elsewhere (a
+relative path is resolved from `apps/android/`); the app outputs then live under
+`<buildRoot>/app/`. Cargo's resolved `target_directory` controls both the host
+build and bindings lookup, including relative `CARGO_TARGET_DIR` values from the
+repository root. Native CMake concurrency defaults to two and respects an
+explicit `CMAKE_BUILD_PARALLEL_LEVEL`. These controls do not change CPU instruction
+requirements or establish device acceptance.
+
 Local debug builds use the developer’s Android debug signing key.
 Release builds require all four explicit signing inputs below. The legacy
 `TROLLM_DEBUG_KEYSTORE_PATH` affects debug builds only. Create your own private

@@ -48,7 +48,14 @@ pub fn render(template: &str, vars: &Value, user_input: &str) -> Result<String, 
 pub(crate) fn lookup<'a>(path: &str, vars: &'a Value) -> Option<&'a Value> {
     let mut cur = vars;
     for part in path.split('.') {
-        cur = cur.get(part)?;
+        cur = match cur {
+            Value::Array(items)
+                if !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                items.get(part.parse::<usize>().ok()?)?
+            }
+            _ => cur.get(part)?,
+        };
     }
     Some(cur)
 }
@@ -57,6 +64,24 @@ pub(crate) fn lookup<'a>(path: &str, vars: &'a Value) -> Option<&'a Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn array_indices_preserve_types_and_numeric_object_keys() {
+        let vars = json!({"tabs":[{"id":2},null], "object":{"0":{"id":7},"01":9}});
+        assert_eq!(lookup("tabs.0.id", &vars), Some(&json!(2)));
+        assert_eq!(lookup("object.0.id", &vars), Some(&json!(7)));
+        assert_eq!(lookup("object.01", &vars), Some(&json!(9)));
+        assert_eq!(lookup("tabs.1", &vars), Some(&Value::Null));
+        for path in [
+            "tabs.1.id",
+            "tabs.-1.id",
+            "tabs.+0.id",
+            "tabs..id",
+            "tabs.999999999999999999999999999999.id",
+        ] {
+            assert!(lookup(path, &vars).is_none(), "{path}");
+        }
+    }
 
     #[test]
     fn dotted_paths_and_user_input() {

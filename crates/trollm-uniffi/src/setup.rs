@@ -138,7 +138,7 @@ impl SetupInput {
             let Some((server, name)) = tool.split_once('.') else {
                 bail!("toolArguments keys must be server.tool");
             };
-            let builtin = server == trollm_mcp::local::SERVER && name == trollm_mcp::local::TOOL;
+            let builtin = server == trollm_mcp::local::SERVER && trollm_mcp::local::supports(name);
             let declared_remote = server != trollm_mcp::local::SERVER
                 && server != "flow"
                 && servers.contains_key(server);
@@ -568,6 +568,24 @@ nodes: { done: { kind: end, outcome: succeeded } }
             .unwrap_err()
             .to_string()
             .contains("reserved"));
+    }
+
+    #[test]
+    fn structured_input_can_constrain_decimal_extraction_without_a_connection() {
+        let setup = setup_with_input(json!({
+            "fields": [{"key": "text", "label": "Evidence", "required": true}],
+            "toolArguments": {"local.extract_decimal": {
+                "fromInput": {"primary": "text"},
+                "fixed": {"secondary": "", "rules": {"prefix": "$", "fractionDigits": 2}}
+            }}
+        }));
+        setup.validate(&plan()).unwrap();
+        let resolved = setup.input.unwrap().resolve(r#"{"text":"$2.90"}"#).unwrap();
+        assert_eq!(
+            resolved.argument_constraints["local.extract_decimal"]["properties"]["primary"]
+                ["const"],
+            "$2.90"
+        );
     }
 
     #[test]

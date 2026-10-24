@@ -23,6 +23,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -55,6 +60,9 @@ fun FlowListScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var flowsLoading by remember { mutableStateOf(true) }
+    var flowsLoaded by remember { mutableStateOf(false) }
+    var historyLoading by remember(runIds) { mutableStateOf(true) }
     var flows by remember { mutableStateOf<List<FlowInfo>>(emptyList()) }
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var summaries by remember { mutableStateOf<Map<String, RunSummaryInfo>>(emptyMap()) }
@@ -75,6 +83,7 @@ fun FlowListScreen(
                     flow to title
                 }
             }
+            flowsLoaded = true
             flows = listed.map { it.first }
             titles = listed.associate { it.first.sha256 to it.second }
         }.exceptionOrNull()
@@ -83,6 +92,7 @@ fun FlowListScreen(
             listingError?.let { operationError(UiOperation.LOAD_FLOWS, it) },
             *setupErrors.toTypedArray(),
         )
+        flowsLoading = false
     }
 
     suspend fun readSummaries(ids: Collection<String>): Map<String, RunSummaryInfo> {
@@ -105,6 +115,7 @@ fun FlowListScreen(
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             // A screen return or foreground transition refreshes every saved row.
             summaries = readSummaries(runIds)
+            historyLoading = false
             // While a worker remains live, refresh only its rows. The observer
             // stops with the screen and never tails an event log.
             while (true) {
@@ -131,13 +142,20 @@ fun FlowListScreen(
             combineUiErrors(*historyErrors.values.toTypedArray())?.let { diagnostic ->
                 item { OperationError(diagnostic) }
             }
-            item { Text("Installed flows", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Installed flows", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
+            if (flowsLoading) {
+                item { Text("Loading flows…", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+            } else if (flowsLoaded && flows.isEmpty()) {
+                item { Text("No installed flows. Install a flow bundle to begin.") }
+            } else if (!flowsLoaded) {
+                item { Text("Flows could not be loaded.") }
+            }
             items(flows) { flow ->
                 Card(
                     Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
-                        .clickable { onRunFlow(flow) },
+                        .clickable(role = Role.Button, onClickLabel = "Open flow") { onRunFlow(flow) },
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Text(titles[flow.sha256] ?: flow.id, style = MaterialTheme.typography.titleMedium)
@@ -149,10 +167,15 @@ fun FlowListScreen(
                     }
                 }
             }
+            item { Text("Run history", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
+            if (historyLoading) {
+                item { Text("Loading run history…", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+            } else if (history.isEmpty()) {
+                item { Text("No runs yet. Choose a flow to start one.") }
+            }
             if (history.isNotEmpty()) {
-                item { Text("Run history", style = MaterialTheme.typography.titleMedium) }
                 items(history, key = { it.id }) { entry ->
-                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpenRun(entry.id) }) {
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(role = Role.Button, onClickLabel = "Open run") { onOpenRun(entry.id) }) {
                         Column(Modifier.padding(12.dp)) {
                             Text(entry.flowTitle, style = MaterialTheme.typography.titleMedium)
                             entry.flowId?.takeIf { it != entry.flowTitle }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }

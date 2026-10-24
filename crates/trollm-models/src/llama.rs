@@ -200,12 +200,27 @@ impl ModelSlot for LlamaCppSlot {
         samplers.push(LlamaSampler::dist(self.options.seed));
         let mut sampler = LlamaSampler::chain(samplers, true);
 
+        let capacity = crate::GenerationCapacity {
+            context_tokens: self.ctx_size,
+            context_remaining: self.ctx_size - prompt_tokens.len() as u32,
+            effective_max_tokens: req
+                .max_tokens
+                .min(self.ctx_size - prompt_tokens.len() as u32),
+        };
         let batch_size = NonZeroU32::new(ctx.n_batch())
             .context("llama context has zero batch capacity")?
             .get() as usize;
         let mut batch = LlamaBatch::new(batch_size, 1);
         for (chunk_index, chunk) in prompt_tokens.chunks(batch_size).enumerate() {
-            deadline.check()?;
+            if deadline.check().is_err() {
+                return Ok(GenerateResponse {
+                    text: String::new(),
+                    tokens_in: prompt_tokens.len() as u32,
+                    tokens_out: 0,
+                    finish: FinishReason::Timeout,
+                    capacity: Some(capacity),
+                });
+            }
             batch.clear();
             let start = chunk_index * batch_size;
             for (offset, token) in chunk.iter().enumerate() {
@@ -215,7 +230,15 @@ impl ModelSlot for LlamaCppSlot {
             }
             ctx.decode(&mut batch)
                 .context("llama prompt prefill failed")?;
-            deadline.check()?;
+            if deadline.check().is_err() {
+                return Ok(GenerateResponse {
+                    text: String::new(),
+                    tokens_in: prompt_tokens.len() as u32,
+                    tokens_out: 0,
+                    finish: FinishReason::Timeout,
+                    capacity: Some(capacity),
+                });
+            }
         }
 
         let tokens_in = prompt_tokens.len() as u32;
@@ -226,20 +249,31 @@ impl ModelSlot for LlamaCppSlot {
         let finish;
 
         loop {
-            deadline.check()?;
+            if deadline.check().is_err() {
+                finish = FinishReason::Timeout;
+                break;
+            }
             if tokens_out >= max_out {
                 finish = FinishReason::Length;
                 break;
             }
             // sample() also accepts the token, advancing grammar/sampler state.
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
-            deadline.check()?;
+            let timed_out = deadline.check().is_err();
             if vocab.is_eog(token) {
-                finish = FinishReason::Stop;
+                finish = if timed_out {
+                    FinishReason::Timeout
+                } else {
+                    FinishReason::Stop
+                };
                 break;
             }
             text_bytes.extend_from_slice(&vocab.token_to_piece(token, false, None));
             tokens_out += 1;
+            if timed_out {
+                finish = FinishReason::Timeout;
+                break;
+            }
 
             // Stop-string check on the accumulated text (stop strings may span
             // token boundaries). Truncate at the earliest stop string.
@@ -258,7 +292,10 @@ impl ModelSlot for LlamaCppSlot {
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
             n_cur += 1;
-            deadline.check()?;
+            if deadline.check().is_err() {
+                finish = FinishReason::Timeout;
+                break;
+            }
             ctx.decode(&mut batch).context("llama decode failed")?;
         }
 
@@ -267,6 +304,7 @@ impl ModelSlot for LlamaCppSlot {
             tokens_in,
             tokens_out,
             finish,
+            capacity: Some(capacity),
         })
     }
 }
@@ -383,6 +421,10 @@ mod tests {
     /// no model tensors, inference context, or generated response is involved.
     #[test]
     fn grammar_semantics_with_fixture_vocabulary() {
+        use crate::fence::{
+            tool_call_grammar_with_argument_schemas, tool_call_grammar_with_mode,
+            ToolCallGrammarMode,
+        };
         use llama_cpp_2::token::data::LlamaTokenData;
         use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
@@ -405,8 +447,16 @@ mod tests {
             ("files".to_string(), "read".to_string()),
             ("we\"ird\\שרת".to_string(), "t\t工具".to_string()),
             ("local".to_string(), "calculate".to_string()),
+            ("generic".to_string(), "operation".to_string()),
+            ("generic".to_string(), "bound".to_string()),
+            ("generic".to_string(), "optional".to_string()),
+            ("generic".to_string(), "open".to_string()),
+            ("flow".to_string(), "choose".to_string()),
         ];
-        let grammar = crate::fence::tool_call_grammar(&pairs);
+        assert_eq!(
+            crate::fence::tool_call_grammar(&pairs),
+            tool_call_grammar_with_mode(&pairs, ToolCallGrammarMode::ProseOrToolCalls)
+        );
         let fence = |server: &str, tool: &str, args: serde_json::Value| {
             // Preserve the grammar's field order, independently of map ordering.
             format!(
@@ -454,10 +504,178 @@ mod tests {
             (first.trim_end_matches("</tool_call>").to_string(), false),
         ];
         cases.push((first.replace("\"id\":7", "\"id\":7,"), false));
-        for (text, expected) in cases {
+        let mut cases: Vec<_> = cases
+            .into_iter()
+            .map(|(text, expected)| (ToolCallGrammarMode::ProseOrToolCalls, text, expected))
+            .collect();
+        let second = fence("files", "read", serde_json::json!({}));
+        for (mode, text, expected) in [
+            (ToolCallGrammarMode::SingleToolCall, first.clone(), true),
+            (
+                ToolCallGrammarMode::SingleToolCall,
+                format!("{first}\n{second}"),
+                false,
+            ),
+            (
+                ToolCallGrammarMode::SingleToolCall,
+                "Finished without tools.".to_string(),
+                false,
+            ),
+            (
+                ToolCallGrammarMode::SingleToolCall,
+                fence("unknown", "get_issue", serde_json::json!({})),
+                false,
+            ),
+            (
+                ToolCallGrammarMode::SingleToolCall,
+                fence("tracker", "read", serde_json::json!({})),
+                false,
+            ),
+            (
+                ToolCallGrammarMode::SingleToolCall,
+                "<tool_call>{bad}</tool_call>".to_string(),
+                false,
+            ),
+            (ToolCallGrammarMode::SingleToolCall, String::new(), false),
+            (ToolCallGrammarMode::ToolCallsOnly, first.clone(), true),
+            (
+                ToolCallGrammarMode::ToolCallsOnly,
+                format!("{first}\n{second}"),
+                true,
+            ),
+            (
+                ToolCallGrammarMode::ToolCallsOnly,
+                "Finished without tools.".to_string(),
+                false,
+            ),
+            (
+                ToolCallGrammarMode::ToolCallsOnly,
+                fence("tracker", "read", serde_json::json!({})),
+                false,
+            ),
+            (ToolCallGrammarMode::ToolCallsOnly, String::new(), false),
+        ] {
+            cases.push((mode, text, expected));
+        }
+        let argument_schemas = std::collections::BTreeMap::from([
+            (
+                ("flow".into(), "choose".into()),
+                serde_json::json!({"type":"object", "properties":{"route":{"type":"string","enum":["finish", "quote\"slash\\", "line\nשלום"]}}, "required":["route"],"additionalProperties":false}),
+            ),
+            (
+                ("generic".into(), "operation".into()),
+                serde_json::json!({
+                    "type":"object", "properties":{"left":{"type":"number"}, "nodeId":{"type":"string"}},
+                    "required":["left","nodeId"], "additionalProperties":false
+                }),
+            ),
+            (
+                ("generic".into(), "bound".into()),
+                serde_json::json!({
+                    "type":"object", "properties":{}, "additionalProperties":false
+                }),
+            ),
+            (
+                ("generic".into(), "optional".into()),
+                serde_json::json!({
+                    "type":"object", "properties":{
+                        "a":{"type":"string"},
+                        "b":{"$ref":"#/$defs/count"},
+                        "c":{"type":"boolean"}
+                    },
+                    "$defs":{"count":{"type":"integer"}},
+                    "required":["b"], "additionalProperties":false
+                }),
+            ),
+            (
+                ("generic".into(), "open".into()),
+                serde_json::json!({
+                    "type":"object", "properties":{"a":{"type":"string"}},
+                    "required":["a"]
+                }),
+            ),
+        ]);
+        for (args, expected) in [
+            (serde_json::json!({"left":39.99,"nodeId":"node-1"}), true),
+            (serde_json::json!({}), false),
+            (serde_json::json!({"left":39.99}), false),
+            (serde_json::json!({"left":"39.99","nodeId":"node-1"}), false),
+            (serde_json::json!({"left":39.99,"node_id":"node-1"}), false),
+            (serde_json::json!({"left":39.99,"nodeId":7}), false),
+        ] {
+            cases.push((
+                ToolCallGrammarMode::SingleToolCall,
+                fence("generic", "operation", args),
+                expected,
+            ));
+        }
+        for (args, expected) in [
+            (serde_json::json!({"b":1}), true),
+            (serde_json::json!({"a":"start","b":1}), true),
+            (serde_json::json!({"b":1,"c":false}), true),
+            (serde_json::json!({"a":"start","b":1,"c":true}), true),
+            (serde_json::json!({}), false),
+            (serde_json::json!({"a":"start","c":true}), false),
+            (serde_json::json!({"b":1.5}), false),
+            (serde_json::json!({"b":"1"}), false),
+            (serde_json::json!({"b":1,"unknown":2}), false),
+        ] {
+            cases.push((
+                ToolCallGrammarMode::SingleToolCall,
+                fence("generic", "optional", args),
+                expected,
+            ));
+        }
+        for (args, expected) in [
+            (serde_json::json!({"a":"start"}), true),
+            (
+                serde_json::json!({"a":"start","extra":[true,null,{}]}),
+                true,
+            ),
+            (serde_json::json!({"extra":1}), false),
+        ] {
+            cases.push((
+                ToolCallGrammarMode::SingleToolCall,
+                fence("generic", "open", args),
+                expected,
+            ));
+        }
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            fence("generic", "bound", serde_json::json!({})),
+            true,
+        ));
+        for (route, expected) in [
+            ("finish", true),
+            ("quote\"slash\\", true),
+            ("line\nשלום", true),
+            ("invented", false),
+            ("", false),
+        ] {
+            cases.push((
+                ToolCallGrammarMode::SingleToolCall,
+                fence("flow", "choose", serde_json::json!({"route":route})),
+                expected,
+            ));
+        }
+        let choice = fence("flow", "choose", serde_json::json!({"route":"finish"}));
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            format!("{choice}{choice}"),
+            false,
+        ));
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            choice.replace(
+                "\"route\":\"finish\"",
+                "\"route\":\"finish\",\"route\":\"finish\"",
+            ),
+            false,
+        ));
+        for (mode, text, expected) in cases {
+            let grammar = tool_call_grammar_with_argument_schemas(&pairs, &argument_schemas, mode);
             let mut sampler = LlamaSampler::grammar(&model, &grammar, "root").unwrap();
             let tokens = vocab.tokenize(text.as_bytes(), false, false);
-            assert!(!tokens.is_empty(), "fixture failed to tokenize {text:?}");
             let decoded: Vec<u8> = tokens
                 .iter()
                 .flat_map(|&token| vocab.token_to_piece(token, false, None))
@@ -479,7 +697,10 @@ mod tests {
                 // Never accept rejected tokens: llama.cpp assumes admissibility.
                 sampler.accept(token);
             }
-            assert_eq!(accepted, expected, "native grammar acceptance for {text:?}");
+            assert_eq!(
+                accepted, expected,
+                "native grammar acceptance for {mode:?}: {text:?}"
+            );
         }
     }
 }

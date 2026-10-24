@@ -254,4 +254,27 @@ describe("inspection view logic", () => {
     expect(edgesOf(doc.plans[0])).toHaveLength(1500);
     expect(compare(doc, doc)).toHaveLength(0);
   });
+  it("exports large excerpts with many backtick runs without losing comments", () => {
+    const excerpt = "`x".repeat(150000) + "\n````\n";
+    const markdown = feedback(fixture(), [
+      {
+        id: "1",
+        revision: "original",
+        target: "prompt",
+        excerpt,
+        text: "Keep this comment",
+      },
+      {
+        id: "2",
+        revision: "earlier",
+        target: "limits",
+        excerpt: "20",
+        text: "And this one",
+      },
+    ]);
+    expect(markdown).toContain("`````text\n" + excerpt + "\n`````");
+    expect(markdown).toContain("Keep this comment");
+    expect(markdown).toContain("Original revision: earlier");
+    expect(markdown).toContain("And this one");
+  });
 });

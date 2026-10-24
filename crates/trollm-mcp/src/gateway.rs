@@ -101,7 +101,7 @@ impl ServerEntry {
     }
     /// Freeze descriptors and validators together for this gateway's captured
     /// credential context. A failed discovery never publishes a partial catalog.
-    fn catalog(&self) -> Result<Arc<ToolCatalog>> {
+    fn catalog(&self, deadline: Option<Instant>) -> Result<Arc<ToolCatalog>> {
         self.require_credentials()?;
         let mut stored = self
             .catalog
@@ -123,6 +123,16 @@ impl ServerEntry {
                 .checked_sub(started.elapsed())
                 .filter(|remaining| !remaining.is_zero())
                 .context("MCP tool discovery exceeded time limit")?;
+            let timeout = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        bail!("run deadline exceeded during MCP tool discovery");
+                    }
+                    timeout.min(remaining)
+                }
+                None => timeout,
+            };
             let page = self
                 .with_client(|client| client.list_tools_page(cursor.as_deref(), Some(timeout)))
                 .with_context(|| format!("MCP tool discovery failed for '{}'", self.config.name))?;
@@ -224,11 +234,15 @@ impl ServerEntry {
 }
 
 pub struct McpGateway {
+    dispatch_id: u64,
+    dispatch_args_hash: String,
+    deadline: Option<std::time::Instant>,
     servers: HashMap<String, ServerEntry>,
-    local_calculator: CatalogTool,
+    local_tools: HashMap<String, CatalogTool>,
     policies: PolicySet,
     result_validators: HashMap<String, ToolSchema>,
     argument_constraints: HashMap<String, ToolSchema>,
+    argument_constraint_schemas: std::collections::BTreeMap<String, Value>,
     cache: CacheStore,
     artifact_dir: PathBuf,
     sink: Option<Arc<Mutex<EventSink>>>,
@@ -247,7 +261,7 @@ impl McpGateway {
         for (key, policy) in &policies.policies {
             if let Some((server, tool)) = split_policy_key(key) {
                 if server == local::SERVER {
-                    if tool != local::TOOL {
+                    if !local::supports(tool) {
                         bail!("unknown builtin local tool in policy '{key}'");
                     }
                     if policy.class != ToolClass::Read
@@ -320,17 +334,26 @@ impl McpGateway {
             })
             .collect();
         Ok(Self {
+            dispatch_id: 0,
+            dispatch_args_hash: String::new(),
+            deadline: None,
             servers,
-            local_calculator: {
-                let descriptor = local::descriptor();
-                CatalogTool {
-                    schema: ToolSchema::compile(&descriptor.input_schema)?,
-                    descriptor,
-                }
-            },
+            local_tools: local::descriptors()
+                .into_iter()
+                .map(|descriptor| {
+                    Ok((
+                        descriptor.name.clone(),
+                        CatalogTool {
+                            schema: ToolSchema::compile(&descriptor.input_schema)?,
+                            descriptor,
+                        },
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
             policies,
             result_validators,
             argument_constraints: HashMap::new(),
+            argument_constraint_schemas: Default::default(),
             cache: CacheStore::new(cache_root),
             artifact_dir,
             sink: sink.map(|s| Arc::new(Mutex::new(s))),
@@ -346,6 +369,7 @@ impl McpGateway {
         if constraints.len() > 16 {
             bail!("at most 16 tool argument constraints are supported");
         }
+        let argument_constraint_schemas = constraints.clone();
         let compiled = constraints
             .into_iter()
             .map(|(key, schema)| {
@@ -361,6 +385,7 @@ impl McpGateway {
             })
             .collect::<Result<HashMap<_, _>>>()?;
         self.argument_constraints = compiled;
+        self.argument_constraint_schemas = argument_constraint_schemas;
         Ok(self)
     }
 
@@ -407,6 +432,19 @@ impl McpGateway {
         self.server(server)?.require_credentials()
     }
 
+    fn bounded_timeout(&self, timeout: Duration) -> Result<Duration> {
+        match self.deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    bail!("run deadline exceeded before MCP dispatch");
+                }
+                Ok(timeout.min(remaining))
+            }
+            None => Ok(timeout),
+        }
+    }
+
     fn call_live(
         &self,
         server: &str,
@@ -416,11 +454,20 @@ impl McpGateway {
     ) -> Result<Value> {
         self.require_audit()?;
         self.validate_arguments(server, tool, args)?;
-        let timeout = timeout_s.map(Duration::from_secs);
+        let timeout = Some(self.bounded_timeout(Duration::from_secs(timeout_s.unwrap_or(30)))?);
         let result = self
             .server(server)?
             .with_client(|client| client.call_tool(tool, args, timeout))?;
-        Ok(extract_tool_payload(&result))
+        let payload = extract_tool_payload(&result);
+        self.response_size(
+            server,
+            tool,
+            "raw_payload",
+            "live",
+            Some(crate::json_size::compact_bytes(&payload)?),
+            None,
+        )?;
+        Ok(payload)
     }
 
     fn validate_argument_constraints(&self, server: &str, tool: &str, args: &Value) -> Result<()> {
@@ -436,12 +483,20 @@ impl McpGateway {
         }
         self.validate_argument_constraints(server, tool, args)?;
         if server == local::SERVER {
-            if tool != local::TOOL {
+            if !local::supports(tool) {
                 bail!("unknown builtin local tool");
             }
-            return self.local_calculator.schema.validate(args);
+            let entry = self
+                .local_tools
+                .get(tool)
+                .context("unknown builtin local tool")?;
+            entry.schema.validate(args)?;
+            if tool == local::EXTRACT_TOOL {
+                local::validate_extract_arguments(args)?;
+            }
+            return Ok(());
         }
-        let catalog = self.server(server)?.catalog()?;
+        let catalog = self.server(server)?.catalog(self.deadline)?;
         let entry = catalog
             .get(tool)
             .context("unknown tool in MCP server catalog")?;
@@ -450,6 +505,15 @@ impl McpGateway {
 }
 
 impl ToolGateway for McpGateway {
+    fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+    }
+    fn argument_constraints(&self, server: &str, tool: &str) -> Option<Value> {
+        self.argument_constraint_schemas
+            .get(&format!("{server}.{tool}"))
+            .cloned()
+    }
+
     fn tool_class(&self, server: &str, tool: &str) -> ToolClass {
         self.policies
             .get(server, tool)
@@ -458,17 +522,51 @@ impl ToolGateway for McpGateway {
 
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         self.require_audit()?;
-        let mut out = vec![self.local_calculator.descriptor.clone()];
+        let mut out: Vec<_> = self
+            .local_tools
+            .values()
+            .map(|entry| entry.descriptor.clone())
+            .collect();
         for entry in self.servers.values() {
             out.extend(
                 entry
-                    .catalog()?
+                    .catalog(self.deadline)?
                     .values()
                     .map(|tool| tool.descriptor.clone()),
             );
         }
         out.sort_by(|a, b| (&a.server, &a.name).cmp(&(&b.server, &b.name)));
         Ok(out)
+    }
+
+    fn available_tools(&self, grants: &[String]) -> Vec<ToolDescriptor> {
+        let granted = |descriptor: &ToolDescriptor| {
+            let key = format!("{}.{}", descriptor.server, descriptor.name);
+            grants.contains(&key)
+        };
+        let mut out: Vec<_> = self
+            .local_tools
+            .values()
+            .filter(|entry| granted(&entry.descriptor))
+            .map(|entry| entry.descriptor.clone())
+            .collect();
+        for entry in self.servers.values() {
+            // Discovery may hold this lock during network I/O. Guidance must
+            // neither wait for it nor initialize a catalog or credentials.
+            let Ok(stored) = entry.catalog.try_lock() else {
+                continue;
+            };
+            if let Some(catalog) = stored.as_ref() {
+                out.extend(
+                    catalog
+                        .values()
+                        .filter(|entry| granted(&entry.descriptor))
+                        .map(|entry| entry.descriptor.clone()),
+                );
+            }
+        }
+        out.sort_by(|a, b| (&a.server, &a.name).cmp(&(&b.server, &b.name)));
+        out
     }
 
     fn validate_call(&self, call: &ToolCall) -> Result<()> {
@@ -499,7 +597,74 @@ impl ToolGateway for McpGateway {
     }
 
     fn call(&mut self, call: &ToolCall) -> Result<ToolResult> {
+        // Invalid calls never cross the dispatch/audit boundary.
         self.validate_call(call)?;
+        self.dispatch_id += 1;
+        self.dispatch_args_hash = CacheStore::hash_args(&call.args, None, None);
+        let result = self.dispatch(call);
+        // Preserve the original audit I/O failure; the sink is already closed.
+        if self.audit_failed.load(Ordering::SeqCst) {
+            return result;
+        }
+        match &result {
+            Ok(result) => self.response_size(
+                &call.server,
+                &call.tool,
+                "gateway_result",
+                provenance_source(result.provenance),
+                Some(crate::json_size::compact_bytes(&result.content_for_model)?),
+                None,
+            )?,
+            Err(error) => {
+                if let Some(received) =
+                    error.downcast_ref::<crate::transport::ReceivedResponseError>()
+                {
+                    self.response_size(
+                        &call.server,
+                        &call.tool,
+                        "raw_error_payload",
+                        &format!("live:{}", received.origin),
+                        Some(received.compact_json_utf8_bytes),
+                        None,
+                    )?;
+                }
+                self.response_size(
+                    &call.server,
+                    &call.tool,
+                    "failed_result",
+                    "unknown",
+                    None,
+                    None,
+                )?;
+            }
+        }
+        result
+    }
+}
+
+impl McpGateway {
+    fn response_size(
+        &self,
+        server: &str,
+        tool: &str,
+        stage: &str,
+        source: &str,
+        bytes: Option<u64>,
+        page: Option<u64>,
+    ) -> Result<()> {
+        self.emit(ProxyEvent::ResponseSize {
+            server: server.to_string(),
+            tool: tool.to_string(),
+            args_hash: self.dispatch_args_hash.clone(),
+            dispatch_id: self.dispatch_id,
+            stage: stage.to_string(),
+            source: source.to_string(),
+            compact_json_utf8_bytes: bytes,
+            page,
+        })
+    }
+
+    fn dispatch(&mut self, call: &ToolCall) -> Result<ToolResult> {
         let policy = self.policies.get(&call.server, &call.tool).cloned();
         match &policy {
             Some(p) if p.class == ToolClass::Mutation => self.call_mutation(call, p),
@@ -515,7 +680,7 @@ impl ToolGateway for McpGateway {
                         tool: call.tool.clone(),
                         args_hash,
                     })?;
-                    let payload = local::calculate(&call.args)?;
+                    let payload = local::invoke(&call.tool, &call.args)?;
                     return self.finish_result(call, policy.as_ref(), payload, Provenance::Local);
                 }
                 let payload = self.call_live(
@@ -654,13 +819,23 @@ impl McpGateway {
                 {
                     bail!("pagination exceeded page or time limit");
                 }
-                let remaining = Duration::from_secs(120).saturating_sub(started.elapsed());
-                let timeout = Duration::from_secs(policy.timeout_s.unwrap_or(30)).min(remaining);
                 self.validate_arguments(&call.server, &call.tool, &args)?;
+                let remaining = Duration::from_secs(120).saturating_sub(started.elapsed());
+                let timeout = self.bounded_timeout(
+                    Duration::from_secs(policy.timeout_s.unwrap_or(30)).min(remaining),
+                )?;
                 let result = self
                     .server(&call.server)?
                     .with_client(|client| client.call_tool(&call.tool, &args, Some(timeout)))?;
                 let payload = extract_tool_payload(&result);
+                self.response_size(
+                    &call.server,
+                    &call.tool,
+                    "raw_page",
+                    "live",
+                    Some(crate::json_size::compact_bytes(&payload)?),
+                    Some(pages.len() as u64 + 1),
+                )?;
                 if pages.is_empty() {
                     self.emit(ProxyEvent::LiveCall {
                         server: call.server.clone(),
@@ -683,7 +858,7 @@ impl McpGateway {
                     field = Some(page_field);
                 }
                 count += items.len();
-                bytes += serde_json::to_vec(&items)?.len();
+                bytes += crate::json_size::compact_bytes(&items)? as usize;
                 if count > MAX_ITEMS || bytes > MAX_BYTES {
                     bail!("pagination exceeded item or byte limit");
                 }
@@ -695,7 +870,27 @@ impl McpGateway {
                     pages: pages.len() as u32,
                     items: count as u64,
                 })?;
-                match payload.get(param).filter(|v| !v.is_null()) {
+                let has_more = match paginate
+                    .response_has_more
+                    .as_deref()
+                    .and_then(|pointer| payload.pointer(pointer))
+                {
+                    None => None,
+                    Some(Value::Bool(value)) => Some(*value),
+                    Some(_) => bail!("pagination responseHasMore must point to a boolean"),
+                };
+                if has_more == Some(false) {
+                    break;
+                }
+                let cursor = match paginate.response_cursor.as_deref() {
+                    Some(pointer) => payload.pointer(pointer),
+                    None => payload.get(param),
+                }
+                .filter(|value| !value.is_null());
+                if has_more == Some(true) && cursor.is_none() {
+                    bail!("pagination hasMore is true but response cursor is missing or null");
+                }
+                match cursor {
                     None => break,
                     Some(cursor) => {
                         let key = serde_json::to_string(cursor)?;
@@ -744,9 +939,9 @@ impl McpGateway {
                 args_hash: hash.clone(),
             })?;
         }
-        let (items, index, has_next) = self
+        let (items, index, has_next, collection_bytes) = self
             .cache
-            .read_page(&call.server, &call.tool, &hash, requested_page)?
+            .read_page_with_size(&call.server, &call.tool, &hash, requested_page)?
             .context("requested pagination page is outside the completed dataset")?;
         let mut payload = json!({ index.field: items });
         payload[param] = if has_next {
@@ -754,6 +949,25 @@ impl McpGateway {
         } else {
             Value::Null
         };
+        // Whole completed item array, distinct from upstream page envelopes and
+        // the caller's selected page. Report this on cache hits as well.
+        let source = if cached { "cache" } else { "live" };
+        self.response_size(
+            &call.server,
+            &call.tool,
+            "complete_collection",
+            source,
+            Some(collection_bytes),
+            None,
+        )?;
+        self.response_size(
+            &call.server,
+            &call.tool,
+            "selected_page",
+            source,
+            Some(crate::json_size::compact_bytes(&payload)?),
+            Some(requested_page),
+        )?;
         let mut artifacts = vec![self.publish_worklist(call, &hash)?];
         let content = match &policy.shape {
             Some(shape) => {
@@ -885,6 +1099,16 @@ impl McpGateway {
         payload: Value,
         provenance: Provenance,
     ) -> Result<ToolResult> {
+        if provenance != Provenance::Live {
+            self.response_size(
+                &call.server,
+                &call.tool,
+                "raw_payload",
+                provenance_source(provenance),
+                Some(crate::json_size::compact_bytes(&payload)?),
+                None,
+            )?;
+        }
         let mut artifacts = Vec::new();
         let result_path = self.prepare_result(call, policy, &payload)?;
         if let Some(path) = &result_path {
@@ -997,7 +1221,7 @@ impl McpGateway {
 }
 
 fn is_local_tool(server: &str, tool: &str) -> bool {
-    server == local::SERVER && tool == local::TOOL
+    server == local::SERVER && local::supports(tool)
 }
 
 fn preview_of(value: &Value) -> String {
@@ -1007,4 +1231,13 @@ fn preview_of(value: &Value) -> String {
         other => serde_json::to_string(other).unwrap_or_default(),
     };
     raw.chars().take(PREVIEW_LEN).collect()
+}
+
+fn provenance_source(provenance: Provenance) -> &'static str {
+    match provenance {
+        Provenance::Live => "live",
+        Provenance::Cache => "cache",
+        Provenance::ServedFromFile => "served_from_file",
+        Provenance::Local => "local",
+    }
 }

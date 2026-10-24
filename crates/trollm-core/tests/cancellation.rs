@@ -112,6 +112,7 @@ impl ModelSlot for CountingModel {
             tokens_in: 1,
             tokens_out: 1,
             finish: FinishReason::Stop,
+            capacity: None,
         })
     }
 }

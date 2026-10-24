@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub mod cache;
 pub mod events;
 pub mod gateway;
+mod json_size;
 pub mod local;
 pub mod policy;
 mod schema;
@@ -49,7 +50,21 @@ pub struct ToolResult {
 }
 
 pub trait ToolGateway: Send {
+    /// Absolute cooperative deadline for the next dispatch, including pagination.
+    fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>>;
+    /// Optional model guidance for exact `server.tool` grants. Must be
+    /// nonblocking and network-free: return only locally available descriptors,
+    /// skipping unavailable or locked catalogs. An empty result is valid;
+    /// final dispatch must still validate credentials and the full wire schema.
+    fn available_tools(&self, _grants: &[String]) -> Vec<ToolDescriptor> {
+        Vec::new()
+    }
+    /// Existing run-local argument restrictions, for model guidance only.
+    /// Dispatch must still validate both these restrictions and the wire schema.
+    fn argument_constraints(&self, _server: &str, _tool: &str) -> Option<serde_json::Value> {
+        None
+    }
     /// Effective policy classification for this gateway. Must be stable for
     /// the run and must not dispatch tools. Adapters must forward it so core
     /// can enforce mutation journaling even when plan and gateway differ.

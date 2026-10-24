@@ -52,12 +52,23 @@ def validate_release(apk, aapt, apksigner, expected_signer):
             'debuggable': False, 'certificateSha256': signers[0].lower()}
 
 
-def validate(apk, backend='stub'):
+def validate(apk, backend='stub', abis=None):
     if backend not in ('stub', 'llama'):
         raise ValueError('Android backend must be stub or llama')
+    selected = tuple(ABIS if abis is None else abis)
+    if not selected or any(abi not in ABIS for abi in selected):
+        raise ValueError('Select at least one supported Android ABI')
+    if len(set(selected)) != len(selected):
+        raise ValueError('Android ABI selections must not contain duplicates')
+    selected = tuple(abi for abi in ABIS if abi in selected)
     libraries = LIBRARIES + (('libc++_shared.so',) if backend == 'llama' else ())
     with ZipFile(apk) as archive:
-        for abi in ABIS:
+        packaged = {parts[1] for name in archive.namelist()
+                    if len(parts := name.split('/')) >= 3 and parts[0] == 'lib'}
+        if packaged != set(selected):
+            raise ValueError(f'APK ABI set mismatch: expected {list(selected)}, '
+                             f'found {sorted(packaged)}')
+        for abi in selected:
             for library in libraries:
                 name = f'lib/{abi}/{library}'
                 if archive.getinfo(name).file_size == 0:
@@ -71,12 +82,15 @@ def validate(apk, backend='stub'):
                         or header[4] != elf_class or header[5:7] != b'\x01\x01'
                         or int.from_bytes(header[18:20], 'little') != machine):
                     raise ValueError(f'Invalid ELF architecture for {abi}: {name}')
+    return selected
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('apk', type=Path)
     parser.add_argument('--build-info', type=Path)
+    parser.add_argument('--abi', action='append', choices=ABIS,
+                        help='Expected APK ABI; repeat for a subset (default: all three)')
     parser.add_argument('--backend', choices=('stub', 'llama'), default='stub')
     parser.add_argument('--build-type', choices=('debug', 'release'), default='debug')
     parser.add_argument('--aapt', type=Path)
@@ -90,7 +104,7 @@ if __name__ == '__main__':
     checksum.unlink(missing_ok=True)
     if args.build_type == 'release' and args.backend != 'llama':
         raise ValueError('Release APK must use the llama backend')
-    validate(args.apk, args.backend)
+    validated_abis = validate(args.apk, args.backend, args.abi)
     release = (validate_release(args.apk, args.aapt, args.apksigner, args.expected_signer_sha256)
                if args.build_type == 'release' else {})
     if args.build_info:
@@ -102,9 +116,9 @@ if __name__ == '__main__':
         info = {'schemaVersion': 1, 'sourceCommit': commit, 'backend': args.backend,
                 'buildType': args.build_type,
                 'apkSha256': digest.hexdigest(), 'minSdk': 33,
-                'supportedAbis': list(ABIS),
+                'supportedAbis': list(validated_abis),
                 'pipelineId': os.environ.get('CI_PIPELINE_ID'),
                 'jobId': os.environ.get('CI_JOB_ID'), **release}
         args.build_info.write_text(json.dumps(info, indent=2) + '\n')
         checksum.write_text(f'{digest.hexdigest()}  {args.apk.name}\n')
-    print(f'APK ELF packaging valid for {args.backend} on all three supported ABIs')
+    print(f'APK ELF packaging valid for {args.backend} on {", ".join(validated_abis)}')

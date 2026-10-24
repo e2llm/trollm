@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Inspection } from "../../src/model";
+test.use({ viewport: { width: 1600, height: 1100 } });
 const realURL = process.env.FLOW_REVIEW_REAL_API_URL;
 test("real API mounted starter, graph, feedback, prompt revision and tar inspection", async ({
   page,
@@ -40,14 +41,17 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
     page.getByRole("heading", { name: "Check a total", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByText("Execution validation passed", { exact: true }),
+    page.getByRole("button", { name: /Execution validation passed/ }),
   ).toBeVisible();
+  await page.getByRole("button", { name: /All nodes/ }).click();
   await expect(
     page.getByRole("note", { name: "Effective task failure defaults" }),
   ).toContainText("4 tasks in this view");
   await expect(
     page.getByRole("button", { name: /Calculate and compare/ }),
   ).toBeVisible();
+  if ((await page.locator(".node-browser").getAttribute("open")) === null)
+    await page.locator(".node-browser > summary").click();
   await page
     .getByRole("button", { name: "sum task sum-cart", exact: true })
     .click();
@@ -62,10 +66,9 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
   await expect(
     page.getByRole("button", { name: promptPath, exact: true }),
   ).toBeVisible();
-  await page
-    .getByText("Show read-only graph · 5 of 5 matching nodes", { exact: true })
-    .click();
+
   await expect(page.locator(".react-flow")).toBeVisible();
+  await page.getByRole("button", { name: "Fit graph", exact: true }).click();
   await expect(page.locator(".react-flow__edge")).toHaveCount(4);
   await expect(
     page.locator(".react-flow__node").filter({ hasText: "model: coder" }),
@@ -73,6 +76,7 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
   await expect(
     page.locator(".react-flow__node").filter({ hasText: "model: reasoner" }),
   ).toHaveCount(1);
+  await page.getByRole("tab", { name: /Feedback/ }).click();
   await page
     .getByLabel("Comment", { exact: true })
     .fill("Clarify how the two amounts are selected.");
@@ -113,11 +117,12 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
   await expect(
     page.getByText(`Source text: ${promptPath}`, { exact: true }),
   ).toBeVisible();
+  await page.getByRole("tab", { name: /Feedback/ }).click();
   await expect(
     page.getByText(/earlier revision; review manually/),
   ).toBeVisible();
   await expect(
-    page.getByText("Execution validation passed", { exact: true }),
+    page.getByRole("button", { name: /Execution validation passed/ }),
   ).toBeVisible();
   await page
     .getByLabel("Open files or tar")
@@ -126,6 +131,8 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
         "../../../apps/android/app/src/main/assets/flows/check-total.tar",
       ),
     );
+  await expect(page.locator("main")).toHaveAttribute("aria-busy", "false");
+  await page.getByRole("tab", { name: "Package", exact: true }).click();
   await expect(
     page.getByText(
       "No authored business description. Inspect the executable sources below.",
@@ -133,8 +140,10 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
     ),
   ).toBeVisible();
   await expect(
-    page.getByText("Execution validation passed", { exact: true }),
+    page.getByRole("button", { name: /Execution validation passed/ }),
   ).toBeVisible();
+  if ((await page.locator(".node-browser").getAttribute("open")) === null)
+    await page.locator(".node-browser > summary").click();
   await expect(
     page.getByRole("button", { name: "sum task sum-cart", exact: true }),
   ).toBeVisible();

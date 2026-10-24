@@ -19,6 +19,7 @@ pub enum FinishReason {
     Stop,
     Length,
     GrammarReject,
+    Timeout,
 }
 
 #[derive(Debug, Clone)]
@@ -31,12 +32,22 @@ pub struct GenerateRequest {
     pub stop: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationCapacity {
+    pub context_tokens: u32,
+    pub context_remaining: u32,
+    pub effective_max_tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerateResponse {
     pub text: String,
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub finish: FinishReason,
+    /// Native tokenized context/output capacity; absent for models without this measurement.
+    pub capacity: Option<GenerationCapacity>,
 }
 
 pub trait ModelSlot: Send {
@@ -89,6 +100,7 @@ impl ModelSlot for MockModel {
             tokens_in,
             tokens_out,
             finish: FinishReason::Stop,
+            capacity: None,
         })
     }
 }

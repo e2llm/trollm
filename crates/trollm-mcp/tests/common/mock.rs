@@ -266,6 +266,30 @@ fn tool_payload(name: &str, args: &Value) -> Value {
     match name {
         // 3 pages x 2 items; cursor is a 1-based page number.
         "list_issues" | "list_issues_alt" => {
+            if args["query"]
+                .as_str()
+                .is_some_and(|q| q.starts_with("nested-"))
+            {
+                let second = args.get("cursor").is_some();
+                if second {
+                    assert_eq!(args["cursor"], "28");
+                }
+                let mut pagination = json!({"hasMore": !second, "cursor": "28"});
+                if args["query"] == "nested-false" {
+                    pagination["hasMore"] = json!(false);
+                }
+                if args["query"] == "nested-missing" {
+                    pagination.as_object_mut().unwrap().remove("cursor");
+                }
+                if args["query"] == "nested-null" {
+                    pagination["cursor"] = Value::Null;
+                }
+                if args["query"] == "nested-array" {
+                    return json!([{"id":1}]);
+                }
+                return json!({"data":[{"id":if second {2} else {1},"raw":"kept"}],"pagination":pagination,"sessionId":"fixture"});
+            }
+
             let page = args.get("cursor").and_then(Value::as_u64).unwrap_or(1);
             let items: Vec<Value> = (1..=2)
                 .map(|i| {
