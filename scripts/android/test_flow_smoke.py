@@ -186,13 +186,101 @@ class FlowSmokeGuards(unittest.TestCase):
         root[1][0].set("text", "android-smoke")
         self.assertIs(flow_node(root, "android-smoke", "a" * 64), root[1])
 
+    def test_polished_fixture_candidate_still_requires_full_sha_after_open(self):
+        root = self.fixture_ui(visible=True)
+        root[-1][-1].set("text", "Version 1")
+        details = ET.fromstring("""<hierarchy><node package="com.trollm.app"
+            text="Technical details" enabled="true" clickable="true" bounds="[20,300][200,340]" /></hierarchy>""")
+        verified = ET.Element("hierarchy")
+        ET.SubElement(verified, "node", package=flow_smoke.PACKAGE,
+                      text="Flow ID: android-smoke\nBundle SHA-256: " + "a" * 64)
+        events, open_card = self.open_fixture([root, details, verified])
+        open_card()
+        self.assertEqual([event for event in events if isinstance(event, tuple)],
+                         [("shell", "input", "tap", "120", "230"),
+                          ("shell", "input", "tap", "110", "320")])
+        ambiguous = self.fixture_ui(visible=True)
+        ambiguous[-1][-1].set("text", "Version 1")
+        ambiguous.append(ambiguous[-1])
+        events, open_card = self.open_fixture([ambiguous])
+        with self.assertRaisesRegex(FlowSmokeError, "ambiguous"):
+            open_card()
+        self.assertEqual(events, ["capture"])
+
+    def test_polished_identity_disclosure_can_be_below_fold(self):
+        empty = self.fixture_ui()
+        details = self.fixture_ui()
+        ET.SubElement(details, "node", package=flow_smoke.PACKAGE, text="Technical details",
+                      enabled="true", clickable="true", bounds="[20,300][200,340]")
+        verified = self.fixture_ui()
+        ET.SubElement(verified, "node", package=flow_smoke.PACKAGE, text="Run ID: exact-target")
+        frames = iter([empty, details, verified])
+        calls = []
+        flow_smoke.verify_identity(lambda *args: calls.append(args), lambda: next(frames), "Run ID: exact-target")
+        self.assertEqual(calls, [("shell", "input", "swipe", "120", "400", "120", "200", "350"),
+                                 ("shell", "input", "tap", "110", "320")])
+
+    def test_hidden_history_disclosure_search_is_bounded_and_never_guesses_title(self):
+        target = "12345678-1234-1234-1234-123456789abc"
+        root = self.fixture_ui()
+        card = ET.SubElement(root, "node", package=flow_smoke.PACKAGE, clickable="true",
+                             enabled="true", bounds="[20,200][200,400]")
+        ET.SubElement(card, "node", text="Same title and date")
+        ET.SubElement(card, "node", package=flow_smoke.PACKAGE, text="Technical details",
+                      enabled="true", clickable="true", bounds="[20,300][200,340]")
+        calls = []
+        captures = []
+        def capture():
+            captures.append(True)
+            return root
+        with self.assertRaisesRegex(FlowSmokeError, "disclosures"):
+            open_history_card(lambda *args: calls.append(args), capture, target)
+        self.assertEqual(len(captures), flow_smoke.MAX_DETAILS_PER_PAGE + 1)
+        self.assertEqual(len(calls), flow_smoke.MAX_DETAILS_PER_PAGE)
+        self.assertTrue(all(call[-2:] == ("110", "320") for call in calls))
+
+
+    def test_control_labels_require_clickable_parent_and_ignore_install_heading(self):
+        root = ET.fromstring("""<hierarchy>
+          <node package="com.trollm.app" text="Install flow" enabled="true" />
+          <node package="com.trollm.app" enabled="true" clickable="true" bounds="[0,0][200,80]">
+            <node package="com.trollm.app" text="‹ Back" enabled="true" />
+          </node>
+        </hierarchy>""")
+        self.assertIsNone(flow_smoke.matching_control(root, "Install flow"))
+        self.assertIs(flow_smoke.matching_control(root, "‹ Back"), root[1])
+
+    def test_control_search_uses_both_directions_and_rejects_ambiguous_scrollers(self):
+        middle = self.fixture_ui()
+        top = self.fixture_ui()
+        ET.SubElement(top, "node", package=flow_smoke.PACKAGE, text="At top")
+        bottom = self.fixture_ui()
+        expected = ET.SubElement(bottom, "node", package=flow_smoke.PACKAGE, text="Start run",
+                                 clickable="true", enabled="true", bounds="[40,300][200,350]")
+        frames = iter([middle, top, top, bottom])
+        calls = []
+        result = flow_smoke.scroll_find(lambda *args: calls.append(args), lambda: next(frames),
+                                       lambda root: flow_smoke.matching_control(root, "Start run"))
+        self.assertIs(result, expected)
+        self.assertEqual(calls[0], ("shell", "input", "swipe", "120", "200", "120", "400", "350"))
+        self.assertEqual(calls[-1], ("shell", "input", "swipe", "120", "400", "120", "200", "350"))
+        ambiguous = self.fixture_ui()
+        ambiguous.append(ambiguous[0])
+        calls.clear()
+        with self.assertRaisesRegex(FlowSmokeError, "unique"):
+            flow_smoke.scroll_find(lambda *args: calls.append(args), lambda: ambiguous, lambda root: None)
+        self.assertEqual(calls, [])
+
 
 class FakeFlowDevice:
     """Small UI/ADB journey with persisted events independent of visible status."""
     completed_id = "11111111-1111-1111-1111-111111111111"
     paused_id = "22222222-2222-2222-2222-222222222222"
 
-    def __init__(self, fault=None):
+    def __init__(self, fault=None, polished=False):
+        self.polished = polished
+        self.disclosed = set()
+        self.confirmations = 0
         self.fault = fault
         self.screen = "list"
         self.installed = []
@@ -208,10 +296,10 @@ class FakeFlowDevice:
         root = ET.Element("hierarchy")
         self.targets = {}
 
-        def node(text, action=None, package=flow_smoke.PACKAGE, enabled=True):
+        def node(text, action=None, package=flow_smoke.PACKAGE, enabled=True, parent=None):
             y = 20 + len(self.targets) * 40
             bounds = f"[0,{y}][200,{y + 30}]"
-            result = ET.SubElement(root, "node", package=package, text=text,
+            result = ET.SubElement(root if parent is None else parent, "node", package=package, text=text,
                                    enabled=str(enabled).lower(), bounds=bounds)
             if action is not None:
                 result.set("clickable", "true")
@@ -219,16 +307,25 @@ class FakeFlowDevice:
             return result
 
         if self.screen == "list":
-            node("Install bundle", "install")
+            node("Install flow" if self.polished else "Install bundle", "install")
             for name in self.installed:
                 card = node("", ("flow", name))
                 ET.SubElement(card, "node", text=name)
                 paused = name == flow_smoke.fixture.PAUSED_FLOW_ID
                 digest = hashlib.sha256(flow_smoke.fixture.fixture_files(paused=paused)[f"{name}.flow.yaml"]).hexdigest()
-                ET.SubElement(card, "node", text=f"v1 · sha256 {digest[:12]}…")
+                ET.SubElement(card, "node", text="Version 1" if self.polished else f"v1 · sha256 {digest[:12]}…")
             if self.completed_id in self.runs:
-                card = node("", "history")
-                ET.SubElement(card, "node", text=self.completed_id)
+                if self.polished:
+                    for run_id in ("33333333-3333-3333-3333-333333333333", self.completed_id):
+                        card = node("", "history" if run_id == self.completed_id else "wrong-history")
+                        ET.SubElement(card, "node", text="Same title and date")
+                        if run_id in self.disclosed:
+                            node(f"Run ID: {run_id}\nFlow ID: android-smoke", parent=card)
+                        else:
+                            node("Technical details", ("disclose", run_id), parent=card)
+                else:
+                    card = node("", "history")
+                    ET.SubElement(card, "node", text=self.completed_id)
         elif self.screen == "install":
             node("Choose file", "choose")
         elif self.screen == "picker":
@@ -236,14 +333,32 @@ class FakeFlowDevice:
                 node(Path(remote).name, ("file", remote), flow_smoke.DOCUMENTS[0])
         elif self.screen == "installed":
             node(self.install_result)
-            node("Back", "back")
+            node("‹ Back" if self.polished else "Back", "back")
         elif self.screen == "setup":
             node("Start run", "start")
+            if self.polished:
+                if "setup" not in self.disclosed:
+                    node("Technical details", ("disclose", "setup"))
+                else:
+                    node("Hide technical details", ("hide", "setup"))
+                    paused = self.selected == flow_smoke.fixture.PAUSED_FLOW_ID
+                    digest = hashlib.sha256(flow_smoke.fixture.fixture_files(paused=paused)[f"{self.selected}.flow.yaml"]).hexdigest()
+                    if self.fault == "wrong-flow-sha":
+                        digest = "0" * 64
+                    node(f"Flow ID: {self.selected}\nBundle SHA-256: {digest}")
         else:
             paused = self.selected == flow_smoke.fixture.PAUSED_FLOW_ID
-            node(self.paused_id if paused else self.completed_id)
+            if self.polished:
+                if "run" in self.disclosed:
+                    node("Hide technical details", ("hide", "run"))
+                    identity = self.paused_id if paused else self.completed_id
+                    node(f"Run ID: {identity}")
+                else:
+                    node("Technical details", ("disclose", "run"))
+            else:
+                node(self.paused_id if paused else self.completed_id)
             if self.screen == "complete":
-                node("succeeded" if self.fault == "wrong-success-status" else "Succeeded")
+                node("succeeded" if self.fault == "wrong-success-status" else "Completed" if self.polished else "Succeeded")
                 node(flow_smoke.fixture.EXPECTED_REPORT)
             elif self.screen == "paused":
                 node("Paused: needs-attention")
@@ -255,8 +370,12 @@ class FakeFlowDevice:
             if self.screen in ("paused", "interrupted"):
                 if self.fault != "hidden-resume":
                     node("Resume", "resume", enabled=self.fault != "disabled-resume")
-                node("Cancel", "cancel")
-            node("Back", "back")
+                node("Cancel run" if self.polished else "Cancel", "cancel")
+            elif self.screen == "confirm-cancel":
+                node("Cancel this run?")
+                node("Cancel run", "confirm-cancel")
+                node("Keep run", "keep-run")
+            node("‹ Back" if self.polished else "Back", "back")
         return '<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode")
 
     def adb(self, *args, **kwargs):
@@ -278,12 +397,18 @@ class FakeFlowDevice:
                 else:
                     name = name.removesuffix(".tar")
                     self.installed.append(name)
-                    self.install_result = f"Installed: {name}"
+                    self.install_result = f"{name} · Version 1\n2 files verified against the bundle manifest." if self.polished else f"Installed: {name} v1\nsha256: test\nfiles verified: 2\nsignatures: unsigned"
                 self.screen = "installed"
             elif isinstance(action, tuple) and action[0] == "flow":
                 self.selected = action[1]
+                self.disclosed.discard("setup")
                 self.screen = "setup"
+            elif isinstance(action, tuple) and action[0] == "disclose":
+                self.disclosed.add(action[1])
+            elif isinstance(action, tuple) and action[0] == "hide":
+                self.disclosed.discard(action[1])
             elif action == "start":
+                self.disclosed.discard("run")
                 paused = self.selected == flow_smoke.fixture.PAUSED_FLOW_ID
                 self.runs.add(self.paused_id if paused else self.completed_id)
                 self.screen = "paused" if paused else "complete"
@@ -291,6 +416,7 @@ class FakeFlowDevice:
                     self.types = []
             elif action == "history":
                 self.selected = flow_smoke.fixture.FLOW_ID
+                self.disclosed.discard("run")
                 self.screen = "complete"
             elif action == "back":
                 self.screen = "list"
@@ -302,13 +428,18 @@ class FakeFlowDevice:
                         self.types += ["model_call"]
                     self.types += ["paused"]
                 self.screen = "paused"
-            elif action == "cancel":
+            elif action == "cancel" and self.polished:
+                self.screen = "confirm-cancel"
+            elif action in ("cancel", "confirm-cancel"):
+                if action == "confirm-cancel":
+                    self.confirmations += 1
                 if self.fault != "missing-terminal-event":
                     self.types += ["run_ended"]
                 self.screen = "cancelled"
             else:
                 raise AssertionError(f"Unexpected tap: {action}")
         elif args[:3] == ("shell", "am", "force-stop"):
+            self.disclosed.discard("run")
             if self.screen == "paused":
                 self.screen = "interrupted"
                 if self.fault == "auto-resumed-on-cold-open":
@@ -325,6 +456,59 @@ class FakeFlowDevice:
         return ""
 
 
+class ScrollingFlowDevice(FakeFlowDevice):
+    """Two simulated viewports: controls above disclosed identities/reports."""
+    def __init__(self):
+        super().__init__(polished=True)
+        self.screen = "install"  # Restored Install title must not count as home.
+        self.page = 1
+        self.page_screen = self.screen
+        self.dialog_delay = 0
+        self.scroll_directions = set()
+
+    def ui(self):
+        if self.dialog_delay:
+            self.dialog_delay -= 1
+            self.screen = "paused"
+            output = super().ui()
+            self.screen = "confirm-cancel"
+            return output
+        if self.page_screen != self.screen:
+            self.page = 0
+            self.page_screen = self.screen
+        root = flow_smoke.parse_ui(super().ui())
+        if self.screen not in ("install", "installed", "setup", "complete", "paused", "interrupted", "cancelled"):
+            return '<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode")
+        if self.screen == "install":
+            ET.SubElement(root, "node", package=flow_smoke.PACKAGE, text="Install flow", enabled="true")
+            back = ET.SubElement(root, "node", package=flow_smoke.PACKAGE, text="‹ Back",
+                                 clickable="true", enabled="true", bounds="[220,20][420,50]")
+            self.targets[flow_smoke.center(back)] = "back"
+        for node in list(root):
+            text = node.get("text", "")
+            is_top = text in ("Install flow", "‹ Back", "Start run", "Resume", "Cancel run", "Completed", "Cancelled") or text.startswith(("Paused:", "Interrupted"))
+            if is_top != (self.page == 0):
+                root.remove(node)
+        ET.SubElement(root, "node", package=flow_smoke.PACKAGE, enabled="true",
+                      scrollable="true", bounds="[20,100][420,700]")
+        if self.page == 1 and "run" in self.disclosed:
+            ET.SubElement(root, "node", package=flow_smoke.PACKAGE, enabled="true",
+                          scrollable="true", bounds="[20,400][420,650]")
+        return '<?xml version="1.0"?>' + ET.tostring(root, encoding="unicode")
+
+    def adb(self, *args, **kwargs):
+        if args[:3] == ("shell", "input", "swipe"):
+            self.calls.append(args)
+            self.page = 1 if int(args[4]) > int(args[6]) else 0
+            self.scroll_directions.add("up" if self.page else "down")
+            return ""
+        action = self.targets.get(args[3:5]) if args[:3] == ("shell", "input", "tap") else None
+        result = super().adb(*args, **kwargs)
+        if action == "cancel":
+            self.dialog_delay = 1
+        return result
+
+
 class FlowSmokeJourney(unittest.TestCase):
     def exercise(self, device):
         with patch.object(flow_smoke.fixture, "main"), patch.object(flow_smoke.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
@@ -339,6 +523,36 @@ class FlowSmokeJourney(unittest.TestCase):
         self.assertIn("cancel-paused-run", checks)
         self.assertEqual(device.resume_taps, 1)
         self.assertEqual(device.runs, {"old-preserved-run", device.completed_id, device.paused_id})
+        pushed = [call[2] for call in device.calls if call[0] == "push"]
+        removed = [call[-1] for call in device.calls if call[:3] == ("shell", "rm", "-f")]
+        self.assertEqual(removed, pushed)
+
+    def test_polished_ui_verifies_hidden_identities_and_confirms_cancel(self):
+        device = FakeFlowDevice(polished=True)
+        checks = self.exercise(device)
+        self.assertIn("history-reopen", checks)
+        self.assertIn("completed-run-cold-recovery", checks)
+        self.assertIn("cancel-paused-run", checks)
+        self.assertEqual(device.confirmations, 1)
+        self.assertIn("33333333-3333-3333-3333-333333333333", device.disclosed)
+        self.assertIn(device.completed_id, device.disclosed)
+        self.assertEqual(device.runs, {"old-preserved-run", device.completed_id, device.paused_id})
+
+    def test_scrolled_polished_journey_restores_install_and_reaches_top_controls(self):
+        device = ScrollingFlowDevice()
+        checks = self.exercise(device)
+        self.assertIn("completed-run-cold-recovery", checks)
+        self.assertIn("cancel-paused-run", checks)
+        self.assertEqual(device.confirmations, 1)
+        self.assertEqual(device.scroll_directions, {"up", "down"})
+        self.assertEqual(device.runs, {"old-preserved-run", device.completed_id, device.paused_id})
+
+    def test_polished_wrong_full_flow_sha_stops_before_start_and_preserves_runs(self):
+        device = FakeFlowDevice("wrong-flow-sha", polished=True)
+        with self.assertRaisesRegex(FlowSmokeError, "identity"):
+            self.exercise(device)
+        self.assertEqual(device.runs, {"old-preserved-run"})
+        self.assertEqual(device.resume_taps, 0)
         pushed = [call[2] for call in device.calls if call[0] == "push"]
         removed = [call[-1] for call in device.calls if call[:3] == ("shell", "rm", "-f")]
         self.assertEqual(removed, pushed)

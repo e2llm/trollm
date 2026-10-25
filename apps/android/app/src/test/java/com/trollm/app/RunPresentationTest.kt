@@ -105,4 +105,25 @@ class RunPresentationTest {
             assertFalse(view.keepPolling)
         }
     }
+    @Test fun visualToneAndLabelFollowTypedPhaseDespiteMisleadingProse() {
+        val cases = listOf(
+            Triple(RunPhaseApi.Succeeded, "Completed", StatusTone.SUCCESS),
+            Triple(RunPhaseApi.Failed("cancelled"), "Cancelled", StatusTone.NEUTRAL),
+            Triple(RunPhaseApi.Failed("Completed successfully"), "Failed", StatusTone.ERROR),
+            Triple(RunPhaseApi.Paused("Failed! Completed!"), "Paused", StatusTone.WARNING),
+            Triple(RunPhaseApi.Running, "In progress", StatusTone.INFO),
+        )
+        for ((phase, label, tone) in cases) {
+            val view = presentRun(phase, true, RunActivityApi.Generating("Failed"))
+            assertEquals(label, view.label)
+            assertEquals(tone, view.tone)
+        }
+        val interrupted = presentRun(RunPhaseApi.Running, false, RunActivityApi.Starting)
+        assertEquals("Interrupted", interrupted.label)
+        assertEquals(StatusTone.WARNING, interrupted.tone)
+        assertTrue(interrupted.canResume)
+        assertFalse(interrupted.canPause)
+        assertFalse(interrupted.canCancel)
+    }
+
 }

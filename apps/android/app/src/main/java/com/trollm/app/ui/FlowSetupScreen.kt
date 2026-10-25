@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,7 +13,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -32,6 +38,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.trollm.app.ModelRequirement
+import com.trollm.app.StatusTone
+import com.trollm.app.modelByteSize
+import com.trollm.app.modelDownloadFraction
+import com.trollm.app.modelDownloadPercent
+import com.trollm.app.modelDownloadTotal
 import com.trollm.app.FlowSetup
 import com.trollm.app.flowSetupOverrideStore
 import com.trollm.app.modelDisplayLabel
@@ -74,6 +86,7 @@ fun FlowSetupScreen(
     var batchSlot by remember(flowSha) { mutableStateOf<String?>(null) }
     var allowMetered by remember(flowSha) { mutableStateOf(false) }
     var busy by remember(flowSha) { mutableStateOf(false) }
+    var cancelTarget by remember(flowSha) { mutableStateOf<Pair<String, ModelRequirement>?>(null) }
     var refresh by remember(flowSha) { mutableStateOf(0) }
 
     LaunchedEffect(runtime, flowSha) {
@@ -120,7 +133,7 @@ fun FlowSetupScreen(
                 try {
                     inspecting = true
                     states = coordinator.inspect(descriptor) { slot ->
-                        withContext(Dispatchers.Main) { checking = defaults?.let { descriptor.modelDisplayLabel(slot, it) } ?: "Model" }
+                        withContext(Dispatchers.Main) { checking = slot }
                     }
                     checking = null
                     error = null
@@ -179,71 +192,107 @@ fun FlowSetupScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        Text(setup?.title ?: "Prepare flow", style = MaterialTheme.typography.headlineSmall)
-        setup?.description?.let { Text(it) }
-        Text("Downloads continue in the background. Additional free space is needed to finish setup.")
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        ScreenHeader("Prepare models", onBack, setup?.title)
+        setup?.description?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Text("Download the models this flow uses. They stay saved on your device.")
         val downloadsIdle = !busy && !preparing && !inspecting && checking == null && states.values.none { it.downloading }
-        Row {
-            Checkbox(checked = allowMetered, onCheckedChange = { allowMetered = it }, enabled = downloadsIdle)
-            Text("Allow metered data for downloads from this screen")
+        ContentCard {
+            SectionHeading(if (allowMetered) "Metered downloads allowed" else "Unmetered network only")
+            Text("Downloads continue in the background. Keep this screen open to start the next model in a batch.", style = MaterialTheme.typography.bodyMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = allowMetered, onCheckedChange = { allowMetered = it }, enabled = downloadsIdle)
+                Text("Allow metered data for downloads from this screen", style = MaterialTheme.typography.bodyMedium)
+            }
+            Text(ModelDownloadPolicy(allowMetered).description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Additional free space is needed to finish setup.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(ModelDownloadPolicy(allowMetered).description)
         val remaining = setup?.let { descriptor ->
             remainingModelDownloads(descriptor.models, states.filterValues { it.path != null }.keys)
         }.orEmpty()
+        SectionHeading("Models", "${states.values.count { it.path != null }} of ${setup?.models?.size ?: 0} ready")
+        setup?.models?.forEach { (slot, model) ->
+            val state = states[slot]
+            val label = defaults?.let { pinned -> setup?.modelDisplayLabel(slot, pinned) } ?: slot
+            val verifying = checking == slot
+            ContentCard {
+                Text(label, style = MaterialTheme.typography.titleMedium)
+                StatusBadge(
+                    when {
+                        verifying -> "Verifying"
+                        state?.path != null -> "Ready"
+                        state?.downloading == true -> "Downloading"
+                        state?.message != null -> "Needs attention"
+                        else -> "Not downloaded"
+                    },
+                    when {
+                        verifying -> StatusTone.INFO
+                        state?.path != null -> StatusTone.SUCCESS
+                        state?.message != null && !state.downloading -> StatusTone.WARNING
+                        else -> StatusTone.NEUTRAL
+                    },
+                )
+                Text(modelByteSize(model.sizeBytes), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    verifying -> {
+                        Text("Checking the downloaded file before use.", style = MaterialTheme.typography.bodyMedium)
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    state?.path != null -> Unit
+                    state?.downloading == true -> {
+                        val fraction = modelDownloadFraction(state.downloaded, state.total)
+                        val percent = modelDownloadPercent(state.downloaded, state.total)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            percent?.let { Text("$it%", style = MaterialTheme.typography.titleSmall) }
+                            Text(
+                                if (state.total > 0) "${modelByteSize(state.downloaded)} / ${modelByteSize(state.total)}"
+                                else "${modelByteSize(state.downloaded)} downloaded",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        if (fraction == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        TextButton(colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error), enabled = !busy && checking == null, onClick = { cancelTarget = slot to model }) { Text("Cancel download") }
+                    }
+                    else -> {
+                        state?.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                        Button(shape = MaterialTheme.shapes.medium, enabled = settingsValid && downloadsIdle, onClick = {
+                            scope.launch {
+                                busy = true
+                                try {
+                                    coordinator.download(model.copy(label = label), ModelDownloadPolicy(allowMetered))
+                                    states = states + (slot to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
+                                    refresh += 1
+                                }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (failure: ModelPreparationException) { error = failure.message ?: "Could not start download." }
+                                catch (_: Exception) { error = "Could not start download." }
+                                finally { busy = false }
+                            }
+                        }) { Text(if (state?.message != null) "Retry download" else "Download model") }
+                    }
+                }
+            }
+        }
         if (remaining.isNotEmpty()) {
-            Text("${remaining.size} remaining models · ${remaining.values.sumOf { it.sizeBytes } / (1024 * 1024)} MiB")
-            Button(enabled = settingsValid && downloadsIdle && states.keys == setup?.models?.keys, onClick = {
+            Text("${remaining.size} remaining models · ${modelByteSize(modelDownloadTotal(remaining.values.map { it.sizeBytes }))}", style = MaterialTheme.typography.bodyMedium)
+            OutlinedButton(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = settingsValid && downloadsIdle && states.keys == setup?.models?.keys, onClick = {
                 pendingSlots = remaining.keys.toList()
                 batchSlot = null
                 preparing = true
                 error = null
             }) { Text("Download remaining models") }
         }
-        checking?.let { Text("Verifying $it…") }
-        setup?.models?.forEach { (slot, model) ->
-            val state = states[slot]
-            val label = defaults?.let { pinned -> setup?.modelDisplayLabel(slot, pinned) } ?: slot
-            Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-            Text("${model.sizeBytes / (1024 * 1024)} MiB · context ${model.ctx}")
-            when {
-                state?.path != null -> Text("Ready")
-                state?.downloading == true -> {
-                    Text("${state.downloaded / (1024 * 1024)} / ${state.total / (1024 * 1024)} MiB · ${state.message ?: "Downloading"}")
-                    LinearProgressIndicator(progress = { (state.downloaded.toFloat() / state.total.coerceAtLeast(1)).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                    Button(enabled = !busy && checking == null, onClick = {
-                        preparing = false
-                        pendingSlots = emptyList()
-                        scope.launch {
-                            busy = true
-                            try { coordinator.cancel(model); refresh += 1 }
-                            catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { error = "Could not cancel the download." }
-                            finally { busy = false }
-                        }
-                    }) { Text("Cancel download") }
-                }
-                else -> {
-                    Text(state?.message ?: "Not downloaded")
-                    Button(enabled = settingsValid && downloadsIdle, onClick = {
-                        scope.launch {
-                            busy = true
-                            try {
-                                coordinator.download(model.copy(label = label), ModelDownloadPolicy(allowMetered))
-                                states = states + (slot to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
-                                refresh += 1
-                            }
-                            catch (cancelled: CancellationException) { throw cancelled }
-                            catch (failure: ModelPreparationException) { error = failure.message ?: "Could not start download." }
-                            catch (_: Exception) { error = "Could not start download." }
-                            finally { busy = false }
-                        }
-                    }) { Text(if (state?.message != null) "Retry download" else "Download model") }
-                }
+        setup?.connections?.takeIf { it.isNotEmpty() }?.let { connections ->
+            ContentCard {
+                SectionHeading("Connections")
+                connections.forEach { (name, connection) -> Text("$name · ${connection.auth}", style = MaterialTheme.typography.bodyMedium) }
             }
         }
-        setup?.connections?.forEach { (name, connection) -> Text("Connection: $name (${connection.auth})") }
         val pinned = defaults
         val effective = setup
         if (pinned != null && effective != null) {
@@ -289,13 +338,50 @@ fun FlowSetupScreen(
                 },
             )
         }
-        settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        settingsError?.let { StatusPanel("Check advanced settings", it, StatusTone.ERROR) }
+        error?.let { StatusPanel("Model preparation", it, StatusTone.ERROR) }
         val descriptor = setup
         val ready = settingsValid && descriptor != null && states.keys == descriptor.models.keys && states.values.all { it.path != null }
-        Button(enabled = ready && !busy && !inspecting && checking == null, onClick = {
+        Button(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = ready && !busy && !inspecting && checking == null, onClick = {
             descriptor?.let { onReady(it.configuration(states.mapValues { entry -> requireNotNull(entry.value.path) })) }
         }) { Text("Continue") }
-        Button(onClick = onBack) { Text("Back") }
+        if (!ready) Text("Finish downloading and verifying all models to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+
+    cancelTarget?.let { (slot, model) ->
+        val descriptor = setup
+        val current = states[slot]
+        val canCancel = !busy && !inspecting && checking == null && descriptor?.models?.get(slot) == model && current?.downloading == true && current.path == null
+        AlertDialog(
+            onDismissRequest = { cancelTarget = null },
+            title = { Text("Cancel this download?") },
+            text = { Text("Downloaded progress for this model will be discarded. Ready models stay saved. Any remaining models in this batch will stop queuing.") },
+            dismissButton = { TextButton(onClick = { cancelTarget = null }) { Text("Keep downloading") } },
+            confirmButton = {
+                TextButton(colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error), enabled = canCancel, onClick = {
+                    // Claim before suspension, then refresh Android state: a dialog can
+                    // remain open while a transfer finishes or its model changes.
+                    if (canCancel && descriptor != null) {
+                        busy = true
+                        cancelTarget = null
+                        scope.launch {
+                            try {
+                                val latest = coordinator.inspect(descriptor) { checkingSlot -> withContext(Dispatchers.Main) { checking = checkingSlot } }
+                                states = latest
+                                checking = null
+                                if (setup == descriptor && setup?.models?.get(slot) == model && latest[slot]?.downloading == true && latest[slot]?.path == null) {
+                                    preparing = false
+                                    pendingSlots = emptyList()
+                                    coordinator.cancel(model)
+                                    refresh += 1
+                                }
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { error = "Could not cancel the download." }
+                            finally { checking = null; busy = false }
+                        }
+                    }
+                }) { Text("Cancel download") }
+            },
+        )
     }
 }

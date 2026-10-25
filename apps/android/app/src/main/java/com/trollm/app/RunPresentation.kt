@@ -12,6 +12,8 @@ data class RunPresentation(
     val observeInBackground: Boolean,
     val keepPolling: Boolean,
     val details: String? = null,
+    val label: String = "Run status",
+    val tone: StatusTone = StatusTone.NEUTRAL,
 )
 
 fun presentRun(phase: RunPhaseApi, workerActive: Boolean, activity: RunActivityApi?, requesting: Boolean = false): RunPresentation {
@@ -21,7 +23,7 @@ fun presentRun(phase: RunPhaseApi, workerActive: Boolean, activity: RunActivityA
     val failure = (phase as? RunPhaseApi.Failed)?.let { presentFailure(it.reason) }
     val text = when {
         interrupted -> "Interrupted — tap Resume to restore saved progress. Models load when needed."
-        phase is RunPhaseApi.Succeeded -> "Succeeded"
+        phase is RunPhaseApi.Succeeded -> "Completed"
         phase is RunPhaseApi.Failed -> requireNotNull(failure).summary
         paused -> "Paused: ${(phase as RunPhaseApi.Paused).reason}"
         else -> when (activity) {
@@ -40,6 +42,19 @@ fun presentRun(phase: RunPhaseApi, workerActive: Boolean, activity: RunActivityA
         observeInBackground = workerActive && running,
         keepPolling = workerActive && (running || paused),
         details = failure?.details,
+        label = when {
+            interrupted -> "Interrupted"
+            phase is RunPhaseApi.Succeeded -> "Completed"
+            phase is RunPhaseApi.Failed -> if (phase.reason == "cancelled") "Cancelled" else "Failed"
+            paused -> "Paused"
+            else -> "In progress"
+        },
+        tone = when {
+            interrupted || paused -> StatusTone.WARNING
+            phase is RunPhaseApi.Succeeded -> StatusTone.SUCCESS
+            phase is RunPhaseApi.Failed -> if (phase.reason == "cancelled") StatusTone.NEUTRAL else StatusTone.ERROR
+            else -> StatusTone.INFO
+        },
     )
 }
 

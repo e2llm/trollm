@@ -22,6 +22,20 @@ queues the remaining distinct assets and shows their combined size. The active
 Android transfer survives leaving the screen; admitting the rest of a batch
 requires that screen to remain open. Old active transfers retain their original
 policy and display Cancel/Retry guidance. Verified models are preserved.
+Model cards show readable sizes and transfer percentages using Android's received
+bytes and the pinned expected size; unknown totals remain indeterminate. File
+verification has its own status and does not imply that a model is loaded.
+Cancelling a download asks for
+confirmation before discarding that model's partial transfer and stopping the
+remaining batch queue. Ready models stay saved.
+
+The existing screens share a light/dark Material theme, following the device
+setting. Flow cards include their setup description; run states have labelled
+badges, and the final report has a selectable card with an explicit copy action.
+Hashes and run IDs remain accessible through **Technical details**. Server setup
+separates browser sign-in from manual tokens, and installation keeps its author
+verification warning visible. This is presentation work; it does not change
+navigation, runtime contracts or the device acceptance scope below.
 
 The browser starter asks for a browser name/ID, a page URL and an optional
 question. Runtime argument checks keep calls on that browser and bind the open
@@ -89,8 +103,8 @@ installed from the file picker after `adb push`.
 
 The flow list discovers durable run UUIDs from app preferences and the runtime's
 `trollm/runs` directories. Rows show the available flow title/id, start time and
-outcome, newest first, with the UUID underneath. Missing or corrupt metadata
-keeps the row accessible with unknown fields. Lightweight snapshot summaries
+outcome, newest first, with the UUID under **Technical details**. Missing or
+corrupt metadata keeps the row accessible with unknown fields. Lightweight snapshot summaries
 avoid scanning event logs; active rows refresh while the screen is visible.
 Back keeps history; selection/input survives
 activity recreation, and launching the app restores the last selected run.
@@ -119,6 +133,17 @@ device navigation/restart and real FFI checks provide separate integration valid
 Bindings generation uses `--metadata-no-deps --no-format`: exported bridge
 types all belong to the workspace crate, so resolving optional/platform-only
 dependencies and invoking an external Kotlin formatter are unnecessary.
+
+## UI presentation
+
+`ui/TrollmTheme.kt` owns colours, typography, shapes and system/keyboard insets.
+`ui/UiComponents.kt` provides the shared headers, cards and labelled status
+surfaces. Use these in the existing screens without moving runtime ownership
+into UI components. Run colours come from typed phase/worker state in
+`RunPresentation.kt` and `RunHistoryEntries.kt`, never from model prose.
+`ModelDownloadPresentation.kt` formats byte counts and progress without changing
+download or readiness decisions. JVM tests cover these presentation decisions;
+rendering, large-font layout and TalkBack still require checks on the built app.
 
 ## Local prerequisites
 

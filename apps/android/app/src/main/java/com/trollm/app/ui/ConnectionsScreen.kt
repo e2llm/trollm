@@ -1,5 +1,6 @@
 package com.trollm.app.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,6 +10,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -34,6 +36,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.trollm.app.OAuthProblemException
 import com.trollm.app.ConnectionInput
+import com.trollm.app.StatusTone
 import com.trollm.app.SecretsStore
 import com.trollm.app.OAuthConnections
 import kotlinx.coroutines.Dispatchers
@@ -91,7 +94,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             return@LaunchedEffect
         }
         if (endpointError != null) {
-            oauthStatus = "Enter a valid HTTPS MCP endpoint to check this connection."
+            oauthStatus = "Enter a valid HTTPS server address to check this connection."
             return@LaunchedEffect
         }
         oauthStatus = if (busy) "Updating connection…" else "Opening connection storage…"
@@ -113,7 +116,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
                 oauthStatus = failure.problem.message
             } catch (_: Exception) {
                 message = "Could not read connection status."
-                oauthStatus = "Check the HTTPS MCP endpoint and connection storage."
+                oauthStatus = "Check the HTTPS server address and connection storage."
             }
         }
     }
@@ -132,7 +135,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         val url = if (remove) null else try {
             ConnectionInput.canonicalEndpoint(endpoint)
         } catch (_: IllegalArgumentException) {
-            message = "Enter a valid HTTPS MCP endpoint before saving a token."
+            message = "Enter a valid HTTPS server address before saving a token."
             return
         }
         val name = selectedServer
@@ -166,7 +169,7 @@ fun ConnectionsScreen(onBack: () -> Unit) {
             title = { Text("Remove manual token?") },
             text = { Text("Remove the manual Bearer token stored on this device for connection \"$name\" and its saved endpoint binding. OAuth sign-in and other connections stay saved. This does not revoke the token at the remote service.") },
             confirmButton = {
-                TextButton(enabled = !busy && store != null, onClick = {
+                TextButton(enabled = !busy && store != null, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error), onClick = {
                     removeTokenFor = null
                     update(true, name)
                 }) { Text("Remove token") }
@@ -175,100 +178,118 @@ fun ConnectionsScreen(onBack: () -> Unit) {
         )
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        Text("Connections", style = MaterialTheme.typography.headlineSmall)
-        Text("Use the connection name from your flow.")
-        OutlinedTextField(
-            value = server,
-            onValueChange = {
-                server = it; token = ""; message = null
-                saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
-            },
-            label = { Text("Connection name") },
-            singleLine = true,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        ScreenHeader(
+            title = "Connections",
+            onBack = { token = ""; onBack() },
+            subtitle = "Connect to the services your flows use.",
         )
-        OutlinedTextField(
-            value = endpoint,
-            onValueChange = {
-                endpoint = it; message = null
-                saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
-            },
-            label = { Text("MCP HTTPS endpoint") },
-            isError = endpointError != null,
-            supportingText = { endpointError?.let { Text(it) } },
-            singleLine = true,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(oauthStatus, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-        Button(onClick = {
-            val client = oauth ?: return@Button
-            if (!ConnectionInput.validServer(server)) {
-                message = "Enter a connection name without whitespace."
-                return@Button
-            }
-            val name = server
-            val url = endpoint
-            busy = true
-            message = null
-            scope.launch {
-                try {
-                    client.signIn(name, url)
-                } catch (error: kotlinx.coroutines.CancellationException) {
-                    throw error
-                } catch (failure: OAuthProblemException) {
-                    message = failure.problem.message
-                } catch (_: Exception) {
-                    message = "Could not start sign-in. Check the endpoint, trust configuration and browser."
-                } finally {
-                    busy = false
-                    refreshStatus++
+        ContentCard {
+            SectionHeading("Server")
+            Text("Use the connection name from your flow.", style = MaterialTheme.typography.bodyMedium)
+            OutlinedTextField(
+                value = server,
+                onValueChange = {
+                    server = it; token = ""; message = null
+                    saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
+                },
+                label = { Text("Connection name") },
+                singleLine = true,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = endpoint,
+                onValueChange = {
+                    endpoint = it; message = null
+                    saved = null; savedForEndpoint = false; oauthStatus = "Checking connection input…"
+                },
+                label = { Text("Server address") },
+                isError = endpointError != null,
+                supportingText = { Text(endpointError ?: "Use the HTTPS address of the MCP service.") },
+                singleLine = true,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        ContentCard {
+            SectionHeading("Browser sign-in")
+            Text("Sign in through your browser to authorize this connection.", style = MaterialTheme.typography.bodyMedium)
+            StatusPanel(oauthStatus, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            Button(onClick = {
+                val client = oauth ?: return@Button
+                if (!ConnectionInput.validServer(server)) {
+                    message = "Enter a connection name without whitespace."
+                    return@Button
                 }
-            }
-        }, enabled = !busy && oauth != null && endpointError == null && ConnectionInput.validServer(server)) { Text("Sign in with browser") }
-        Button(onClick = {
-            val client = oauth ?: return@Button
-            val name = server
-            busy = true
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) { client.logout(name) }
-                    message = "OAuth account signed out. Manual tokens are managed separately."
-                } catch (error: kotlinx.coroutines.CancellationException) {
-                    throw error
-                } catch (failure: OAuthProblemException) { message = failure.problem.message }
-                catch (_: Exception) { message = "Could not sign out of this connection." }
-                finally {
-                    busy = false
-                    refreshStatus++
+                val name = server
+                val url = endpoint
+                busy = true
+                message = null
+                scope.launch {
+                    try {
+                        client.signIn(name, url)
+                    } catch (error: kotlinx.coroutines.CancellationException) {
+                        throw error
+                    } catch (failure: OAuthProblemException) {
+                        message = failure.problem.message
+                    } catch (_: Exception) {
+                        message = "Could not start sign-in. Check the endpoint, trust configuration and browser."
+                    } finally {
+                        busy = false
+                        refreshStatus++
+                    }
                 }
-            }
-        }, enabled = !busy && oauth != null && ConnectionInput.validServer(server)) { Text("Sign out of OAuth") }
-        Text("Manual Bearer token (saving switches this connection away from OAuth).")
-        Text(when (saved) {
-            true -> if (savedForEndpoint) "Saved token available for this endpoint."
-                else "Token stored but inactive for this endpoint. Re-save it with its intended endpoint to use manual authentication."
-            false -> "No saved token."
-            null -> if (endpointError != null) "Enter a valid endpoint to check saved-token status."
-                else if (busy) "Updating saved-token status…"
-                else "Saved-token status is unavailable."
-        })
-        OutlinedTextField(
-            value = token,
-            onValueChange = { token = it; message = null },
-            label = { Text("Bearer token") },
-            supportingText = { Text("Paste the token without the Bearer prefix.") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            singleLine = true,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Button(onClick = { update(false) }, enabled = !busy && store != null && endpointError == null) { Text("Save token") }
-        Button(onClick = { removeTokenFor = server }, enabled = !busy && store != null && ConnectionInput.validServer(server)) { Text("Remove token") }
-        message?.let { Text(it, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
-        Button(onClick = { token = ""; onBack() }) { Text("Back") }
+            }, shape = MaterialTheme.shapes.medium, enabled = !busy && oauth != null && endpointError == null && ConnectionInput.validServer(server)) { Text("Sign in with browser") }
+            TextButton(onClick = {
+                val client = oauth ?: return@TextButton
+                val name = server
+                busy = true
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { client.logout(name) }
+                        message = "OAuth account signed out. Manual tokens are managed separately."
+                    } catch (error: kotlinx.coroutines.CancellationException) {
+                        throw error
+                    } catch (failure: OAuthProblemException) { message = failure.problem.message }
+                    catch (_: Exception) { message = "Could not sign out of this connection." }
+                    finally {
+                        busy = false
+                        refreshStatus++
+                    }
+                }
+            }, enabled = !busy && oauth != null && ConnectionInput.validServer(server)) { Text("Sign out of OAuth") }
+        }
+        ContentCard {
+            SectionHeading("Manual token")
+            Text("Saving a Bearer token switches this connection away from browser sign-in (OAuth).", style = MaterialTheme.typography.bodyMedium)
+            Text(when (saved) {
+                true -> if (savedForEndpoint) "Saved token available for this endpoint."
+                    else "Token stored but inactive for this endpoint. Re-save it with its intended endpoint to use manual authentication."
+                false -> "No saved token."
+                null -> if (endpointError != null) "Enter a valid endpoint to check saved-token status."
+                    else if (busy) "Updating saved-token status…"
+                    else "Saved-token status is unavailable."
+            })
+            OutlinedTextField(
+                value = token,
+                onValueChange = { token = it; message = null },
+                label = { Text("Bearer token") },
+                supportingText = { Text("Paste the token without the Bearer prefix.") },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                singleLine = true,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(onClick = { update(false) }, shape = MaterialTheme.shapes.medium, enabled = !busy && store != null && endpointError == null) { Text("Save token") }
+            TextButton(onClick = { removeTokenFor = server }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error), enabled = !busy && store != null && ConnectionInput.validServer(server)) { Text("Remove token") }
+        }
+        message?.let {
+            StatusPanel(it, tone = StatusTone.NEUTRAL, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        }
     }
 }
