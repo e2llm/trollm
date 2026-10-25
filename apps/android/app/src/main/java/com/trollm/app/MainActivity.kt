@@ -4,7 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -13,6 +13,7 @@ import com.trollm.app.ui.FlowListScreen
 import com.trollm.app.ui.ConnectionsScreen
 import com.trollm.app.ui.InstallBundleScreen
 import com.trollm.app.ui.RunScreen
+import com.trollm.app.ui.TrollmTheme
 import uniffi.trollm_uniffi.FlowInfo
 
 class MainActivity : ComponentActivity() {
@@ -27,12 +28,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         val runtime = RuntimeHolder.get(this)
         val history = RunHistory(this)
         notificationRun = intent.getStringExtra(RunService.EXTRA_RUN_ID)?.takeIf(RunIdentity::valid)
         intent.removeExtra(RunService.EXTRA_RUN_ID)
         setContent {
-            MaterialTheme {
+            TrollmTheme {
                 var runId by rememberSaveable { mutableStateOf(notificationRun ?: history.selected()) }
                 var flowId by rememberSaveable { mutableStateOf<String?>(null) }
                 var flowSha by rememberSaveable { mutableStateOf<String?>(null) }

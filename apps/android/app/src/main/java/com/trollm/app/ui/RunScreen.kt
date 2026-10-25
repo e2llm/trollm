@@ -26,7 +26,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -63,6 +66,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import com.trollm.app.RunService
+import com.trollm.app.StatusTone
 import com.trollm.app.RunPresentation
 import com.trollm.app.presentRun
 import uniffi.trollm_uniffi.FlowInfo
@@ -201,18 +205,16 @@ fun RunScreen(
         )
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(inputScroll).padding(16.dp)) {
-        Text(setup?.title ?: flow?.id ?: "Run ${runId.orEmpty()}", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            flow?.let { "sha256 ${it.sha256.take(12)}…" } ?: runId.orEmpty(),
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall,
-        )
+    Column(
+        Modifier.fillMaxSize().verticalScroll(inputScroll).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        ScreenHeader(setup?.title ?: flow?.id ?: "Run", onBack = onBack)
 
         if (runId == null && flow != null) {
             setup?.description?.let { Text(it) }
             if (setup != null) {
-                Button(enabled = !starting, onClick = {
+                OutlinedButton(enabled = !starting, shape = MaterialTheme.shapes.medium, onClick = {
                     // Setup can change model/endpoint overrides. Require Continue
                     // to supply fresh verified settings before another start.
                     configurationJson = null
@@ -248,7 +250,7 @@ fun RunScreen(
                     )
                 }
             }
-            Button(enabled = !starting && setupChecked && (setup == null || configurationJson != null), onClick = {
+            Button(shape = MaterialTheme.shapes.medium, enabled = !starting && setupChecked && (setup == null || configurationJson != null), onClick = {
                 inputAttempted = true
                 val validation = StructuredInput.errors(fields, structuredValues)
                 if (validation.isNotEmpty()) {
@@ -291,17 +293,19 @@ fun RunScreen(
                 }
             }) { Text(if (starting) "Starting…" else "Start run") }
         } else if (runId != null) {
-            Text(presentation?.text ?: "Loading run status…", style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite })
-
-            presentation?.details?.let { TechnicalDetails(it) }
+            StatusPanel(
+                title = presentation?.label ?: "Run status",
+                message = presentation?.text?.takeIf { it != presentation?.label } ?: if (presentation == null) "Loading run status…" else null,
+                tone = presentation?.tone ?: StatusTone.NEUTRAL,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Button(enabled = !requesting && presentation?.canPause == true, onClick = {
+                OutlinedButton(shape = MaterialTheme.shapes.medium, enabled = !requesting && presentation?.canPause == true, onClick = {
                     error = null
                     requesting = true
                     scope.launch {
@@ -310,7 +314,7 @@ fun RunScreen(
                         requesting = false
                     }
                 }) { Text("Pause") }
-                Button(enabled = !requesting && presentation?.canResume == true, onClick = {
+                OutlinedButton(shape = MaterialTheme.shapes.medium, enabled = !requesting && presentation?.canResume == true, onClick = {
                     error = null
                     requesting = true
                     prepareNotifications()
@@ -332,24 +336,46 @@ fun RunScreen(
                         requesting = false
                     }
                 }) { Text("Resume") }
-                Button(enabled = !requesting && presentation?.canCancel == true, onClick = {
-                    confirmCancel = true
-                }) { Text("Cancel run") }
+                OutlinedButton(
+                    shape = MaterialTheme.shapes.medium,
+                    enabled = !requesting && presentation?.canCancel == true,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    border = BorderStroke(1.dp, if (!requesting && presentation?.canCancel == true)
+                        MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)),
+                    onClick = { confirmCancel = true },
+                ) { Text("Cancel run") }
             }
 
             finalReport?.let { report ->
-                Text("Final report", style = MaterialTheme.typography.titleMedium)
-                SelectionContainer { Text(report, modifier = Modifier.padding(top = 4.dp)) }
-                TextButton(onClick = {
-                    scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Final report", report))) }
-                }) { Text("Copy final report") }
+                ContentCard {
+                    SectionHeading("Final report")
+                    SelectionContainer { Text(report, style = MaterialTheme.typography.bodyLarge) }
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.medium,
+                        onClick = {
+                            scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Final report", report))) }
+                        },
+                    ) { Text("Copy final report") }
+                }
             }
 
-            Button(
+            TextButton(
                 onClick = { showTechnicalEvents = !showTechnicalEvents },
                 modifier = Modifier.semantics { stateDescription = if (showTechnicalEvents) "Expanded" else "Collapsed" },
-            ) { Text(if (showTechnicalEvents) "Hide technical events" else "Show technical events") }
+            ) { Text(if (showTechnicalEvents) "Hide technical details" else "Technical details") }
             if (showTechnicalEvents) {
+                SelectionContainer {
+                    Text(
+                        "Run ID: $runId" + (flow?.let { "\nFlow ID: ${it.id}\nBundle SHA-256: ${it.sha256}" } ?: ""),
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                presentation?.details?.let { details ->
+                    SelectionContainer { Text(details, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                }
+                SectionHeading("Technical events")
                 TextButton(enabled = lines.isNotEmpty(), onClick = {
                     val events = lines.joinToString("\n")
                     scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Technical events", events))) }
@@ -373,6 +399,8 @@ fun RunScreen(
         error?.let { OperationError(it) }
         pollingError?.let { OperationError(it) }
         startedRunError?.let { OperationError(it) }
-        Button(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back") }
+        if (runId == null && flow != null) {
+            TechnicalDetails("Flow ID: ${flow.id}\nBundle SHA-256: ${flow.sha256}")
+        }
     }
 }

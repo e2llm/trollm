@@ -122,16 +122,11 @@ See [contract direction](FLOW-CONTRACT-DIRECTION.md) and
 
 Start with [Anatomy of a flow](ANATOMY-OF-A-FLOW.md) for the implemented v1
 format and [Contributing](../CONTRIBUTING.md) for the GitHub issue/PR route.
-These tasks improve existing behavior without depending on the proposed format:
+Use the live [help-wanted backlog](https://github.com/e2llm/trollm/labels/help%20wanted)
+to find bounded work on the current format. Check each issue against current
+source before starting: report selection/copying and wrapping run controls are
+already implemented, although their issue checklists may still include device
+validation. Remaining validation is distinct from missing implementation.
 
-| Task | Starting point | Scope |
-| --- | --- | --- |
-| [Actionable validator errors](https://github.com/e2llm/trollm/issues/1) | Python example checker | Good first issue: identify the file and field to fix. |
-| [Selectable final reports](https://github.com/e2llm/trollm/issues/2) | Android run screen | Good first issue: standard text selection and copying. |
-| [Responsive run controls](https://github.com/e2llm/trollm/issues/3) | Android run screen | Keep controls usable at narrow widths and large font sizes. |
-| [Current-format bundle packer](https://github.com/e2llm/trollm/issues/4) | Starter packer and bridge reader | Intermediate: package existing v1 files deterministically, without a schema migration. |
-
-Issue status is authoritative for availability; this list is not a delivery-date
-commitment. See [help wanted](https://github.com/e2llm/trollm/labels/help%20wanted)
-for current opportunities. Dependency changes should also update
-[third-party notices](../THIRD_PARTY_NOTICES.md).
+The backlog is not a delivery-date commitment. Dependency changes should also
+update [third-party notices](../THIRD_PARTY_NOTICES.md).

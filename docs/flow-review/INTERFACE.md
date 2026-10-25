@@ -38,9 +38,22 @@ Execution validation and presentation validation have separate diagnostics.
 ## HTTP API v1
 
 All responses JSON except browser assets. Semantic validation failures return
-an inspection document with `valid: false`; unsafe/unreadable requests return
-400/413 with `{ "error": "safe human-readable explanation" }`. No traceback,
-credentials or absolute host paths. Keep identifiers opaque where appropriate.
+an inspection document with `valid: false`. Request failures use
+`{ "error": "safe human-readable explanation" }`:
+
+| Status | Meaning |
+| --- | --- |
+| 400 | The request or package cannot be safely read or inspected. |
+| 413 | The request body exceeds the 64 MiB limit. |
+| 408 | The request exceeded the 60-second response deadline. |
+| 429 | Both inspection slots are occupied; retry after an earlier request finishes. |
+
+Other client errors, such as an unsupported media type or malformed JSON body,
+retain their HTTP status with the same safe JSON error envelope. A response
+timeout does not cancel inspection work that is already running: its slot stays
+occupied until that work exits. Requests beyond the two-slot bound are rejected
+without joining a queue. No traceback, credentials or absolute host paths are
+returned. Keep identifiers opaque where appropriate.
 
 - `GET /healthz`: `{ "status": "ok" }`.
 - `GET /api/packages`: `{ "packages": [{ "id": "opaque", "name": "name", "kind": "source" }] }`.
@@ -77,10 +90,12 @@ Inspection document:
 `entryFlow`, `taskRegistry` and `registry` may be null for incomplete/ambiguous
 sources. Plan/registry structures use current serialized camelCase contracts,
 without absolute source/base directories or recursive duplicate subflow objects.
-`plans` includes each loaded flow once. A diagnostic may additionally have
-`node` as a qualified `flow/node` reference. `valid` concerns execution/package
-validation; presentation problems use codes prefixed `presentation-` and are
-reported separately. Invalid source is still returned where safe to inspect.
+`plans` includes each loaded flow once. Diagnostic objects contain `level`,
+`code`, `message` and `path`; node-specific context currently appears in the
+message rather than a separate structured diagnostic field. `valid` concerns
+execution/package validation; presentation problems use codes prefixed
+`presentation-` and are reported separately. Invalid source is still returned
+where safe to inspect.
 
 Execution validation covers the selected root and its referenced subflows.
 Other supplied flow sources remain visible with `plan-unselected` warnings;

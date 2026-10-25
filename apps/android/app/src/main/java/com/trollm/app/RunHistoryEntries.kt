@@ -10,6 +10,7 @@ data class RunHistoryEntry(
     val flowId: String?,
     val startedAtMs: Long?,
     val status: String,
+    val tone: StatusTone = StatusTone.NEUTRAL,
 )
 
 fun historyEntries(
@@ -24,7 +25,7 @@ fun historyEntries(
     val status = when (phase) {
         is RunPhaseApi.Running -> if (summary?.workerActive == true) "Running" else "Interrupted · Resume"
         is RunPhaseApi.Paused -> if (summary?.workerActive == true) "Paused" else "Saved pause · Resume"
-        is RunPhaseApi.Succeeded -> "Succeeded"
+        is RunPhaseApi.Succeeded -> "Completed"
         is RunPhaseApi.Failed -> if (phase.reason == "cancelled") "Cancelled" else "Failed"
         null -> "Status unavailable"
         else -> "Status unavailable"
@@ -35,5 +36,12 @@ fun historyEntries(
         flowId = flowId,
         startedAtMs = summary?.startedAtMs?.takeIf { it > 0uL && it <= Long.MAX_VALUE.toULong() }?.toLong(),
         status = status,
+        tone = when (phase) {
+            is RunPhaseApi.Running -> if (summary?.workerActive == true) StatusTone.INFO else StatusTone.WARNING
+            is RunPhaseApi.Paused -> StatusTone.WARNING
+            is RunPhaseApi.Succeeded -> StatusTone.SUCCESS
+            is RunPhaseApi.Failed -> if (phase.reason == "cancelled") StatusTone.NEUTRAL else StatusTone.ERROR
+            else -> StatusTone.NEUTRAL
+        },
     )
 }.sortedWith(compareByDescending<RunHistoryEntry> { it.startedAtMs ?: Long.MIN_VALUE }.thenBy { it.id })

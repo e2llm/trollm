@@ -28,7 +28,7 @@ class RunHistoryEntriesTest {
         assertEquals(listOf(recent, old, legacy), rows.map { it.id })
         assertEquals("Web reader", rows.first().flowTitle)
         assertEquals("reader", rows.first().flowId)
-        assertEquals("Succeeded", rows.first().status)
+        assertEquals("Completed", rows.first().status)
     }
 
     @Test fun missingOrCorruptMetadataStillHasAnOpenableUuidRow() {
@@ -62,4 +62,23 @@ class RunHistoryEntriesTest {
         assertEquals(listOf(recent, old), rows.map { it.id })
         assertEquals(null, rows.last().startedAtMs)
     }
+    @Test fun historyTonesUseTypedOutcomesAndRetainUnknownRows() {
+        val phases = listOf(
+            RunPhaseApi.Succeeded to StatusTone.SUCCESS,
+            RunPhaseApi.Failed("cancelled") to StatusTone.NEUTRAL,
+            RunPhaseApi.Failed("Completed successfully") to StatusTone.ERROR,
+            RunPhaseApi.Paused("Completed successfully") to StatusTone.WARNING,
+            RunPhaseApi.Running to StatusTone.WARNING,
+        )
+        for ((phase, tone) in phases) {
+            val row = historyEntries(listOf(old), mapOf(old to summary(old, 1uL, phase)), emptyMap()).single()
+            assertEquals(tone, row.tone)
+        }
+        val active = summary(old, 1uL, RunPhaseApi.Running).copy(workerActive = true)
+        assertEquals(StatusTone.INFO, historyEntries(listOf(old), mapOf(old to active), emptyMap()).single().tone)
+        val unknown = historyEntries(listOf(old, recent), emptyMap(), emptyMap())
+        assertEquals(listOf(old, recent), unknown.map { it.id })
+        assertEquals(listOf(StatusTone.NEUTRAL, StatusTone.NEUTRAL), unknown.map { it.tone })
+    }
+
 }
