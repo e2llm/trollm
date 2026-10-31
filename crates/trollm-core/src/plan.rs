@@ -40,6 +40,13 @@ pub struct ExecutionPlan {
     #[serde(default)]
     pub mcp: McpSection,
     pub entry_step: String,
+    /// Explicit child return values. Omission preserves all node outputs.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub exports: Option<BTreeMap<String, FromBinding>>,
     pub nodes: BTreeMap<String, Node>,
 
     /// Plans referenced via `flowRef`, keyed by plan id. Not part of the YAML
@@ -284,6 +291,12 @@ pub struct FlowRef {
 pub struct ForeachCollect {
     pub collect: CollectFrom,
     pub index_by: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub view: Option<crate::artifact_view::ArtifactView>,
 }
 
 /// Closed per §4.6: only `body.outputs` exists in v1.

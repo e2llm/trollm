@@ -15,7 +15,9 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY schemas/ schemas/
 COPY apps/flow-review/server/ apps/flow-review/server/
-RUN CARGO_BUILD_JOBS=2 cargo build --locked --release -p trollm-flow-review \
+# Use the toolchain already installed in the pinned builder. Building does not
+# need the optional lint components requested by the repository toolchain file.
+RUN CARGO_BUILD_JOBS=2 rustup run 1.90.0 cargo build --locked --release -p trollm-flow-review \
     && mkdir -p /out/packages
 
 FROM ${RUNTIME_IMAGE}

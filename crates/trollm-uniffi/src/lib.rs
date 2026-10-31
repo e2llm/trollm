@@ -17,8 +17,10 @@ mod authentication;
 pub mod bundle;
 pub mod configuration;
 mod history;
+mod observation;
 pub mod run;
 pub mod setup;
+mod source_report;
 pub mod tar;
 
 use std::path::{Path, PathBuf};
@@ -169,6 +171,8 @@ pub struct FlowInfo {
 /// core validation.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct InstallResult {
+    pub installation_sha256: String,
+    pub archive_sha256: String,
     pub flow_sha256: String,
     pub flow_id: String,
     pub flow_version: u32,
@@ -237,6 +241,17 @@ pub struct EventLine {
     pub json: String,
 }
 
+/// Bounded disposable observation, separate from strict disk APIs. A cursor
+/// predating retained history is advanced with an explicit omission signal.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RunObservation {
+    pub status: RunStatusInfo,
+    pub events: Vec<EventLine>,
+    pub next_seq: u64,
+    pub older_events_omitted: bool,
+    pub has_more: bool,
+}
+
 /// The runtime entrypoint: wires the §8 storage layout under the app's
 /// files dir, the model slots (llama feature) and the per-run MCP gateway.
 #[derive(uniffi::Object)]
@@ -248,6 +263,7 @@ pub struct TrollmRuntime {
     /// Serializes explicit resume reconstruction and registry insertion only;
     /// workers execute independently after their handles have been registered.
     resume_lock: Mutex<()>,
+    observations: Mutex<observation::ColdCache>,
 }
 
 #[uniffi::export]
@@ -270,6 +286,7 @@ impl TrollmRuntime {
             token_provider: Mutex::new(token_provider.map(Arc::new)),
             runs: RunRegistry::default(),
             resume_lock: Mutex::new(()),
+            observations: Mutex::new(observation::ColdCache::default()),
         }))
     }
 
@@ -310,6 +327,8 @@ impl TrollmRuntime {
     pub fn install_flow_bundle(&self, bytes: Vec<u8>) -> Result<InstallResult, TrollmError> {
         let outcome = bundle::install_bundle(&self.base, &bytes).map_err(TrollmError::bundle)?;
         Ok(InstallResult {
+            installation_sha256: outcome.installation_sha256,
+            archive_sha256: outcome.archive_sha256,
             flow_sha256: outcome.flow_sha256,
             flow_id: outcome.flow_id,
             flow_version: outcome.flow_version,
@@ -317,6 +336,152 @@ impl TrollmRuntime {
             bundle_dir: outcome.bundle_dir.to_string_lossy().to_string(),
             signature_status: outcome.signature_status,
         })
+    }
+
+    /// Import a dependency-complete owned-source revision through the same
+    /// verified installer. This does not grant model or MCP authority.
+    pub fn install_source_bundle(&self, bytes: Vec<u8>) -> Result<InstallResult, TrollmError> {
+        let outcome =
+            bundle::install_source_bundle(&self.base, &bytes).map_err(TrollmError::bundle)?;
+        Ok(InstallResult {
+            installation_sha256: outcome.installation_sha256,
+            archive_sha256: outcome.archive_sha256,
+            flow_sha256: outcome.flow_sha256,
+            flow_id: outcome.flow_id,
+            flow_version: outcome.flow_version,
+            files_verified: outcome.files_verified,
+            bundle_dir: outcome.bundle_dir.to_string_lossy().to_string(),
+            signature_status: outcome.signature_status,
+        })
+    }
+
+    pub fn source_bundle_setup(
+        &self,
+        installation_sha256: String,
+    ) -> Result<Option<String>, TrollmError> {
+        bundle::revision_setup(&self.base, &installation_sha256)
+            .map_err(TrollmError::bundle)?
+            .map(|setup| serde_json::to_string(&setup))
+            .transpose()
+            .map_err(|e| TrollmError::Bundle(format!("serializing source setup: {e}")))
+    }
+
+    /// Validate original structured bytes against this exact installed setup and
+    /// the APK's independent normalized serialization before creating a run.
+    pub fn admit_source_input(
+        &self,
+        installation_sha256: String,
+        raw_input: String,
+        apk_normalized_input: String,
+    ) -> Result<String, TrollmError> {
+        let setup = bundle::revision_setup(&self.base, &installation_sha256)
+            .map_err(TrollmError::bundle)?
+            .and_then(|setup| setup.input)
+            .ok_or_else(|| TrollmError::Bundle("structured source input unavailable".into()))?;
+        let admitted = setup::admit_source_input(&setup, &raw_input, &apk_normalized_input)
+            .map_err(TrollmError::bundle)?;
+        serde_json::to_string(&admitted).map_err(|error| TrollmError::bundle(error.into()))
+    }
+
+    pub fn start_source_run(
+        &self,
+        flow_sha256: String,
+        installation_sha256: String,
+        user_input: String,
+        association_json: String,
+    ) -> Result<String, TrollmError> {
+        let association = serde_json::from_str(&association_json)
+            .map_err(|e| TrollmError::Bundle(format!("invalid source association: {e}")))?;
+        let spawned = run::spawn_source_run(
+            self.base.clone(),
+            flow_sha256,
+            user_input,
+            self.token_provider.lock().unwrap().clone(),
+            None,
+            None,
+            Some((installation_sha256, association)),
+        )
+        .map_err(TrollmError::run)?;
+        let run_id = spawned.run_id.clone();
+        self.runs.insert(run_id.clone(), spawned.handle);
+        Ok(run_id)
+    }
+
+    pub fn start_source_run_configured(
+        &self,
+        flow_sha256: String,
+        installation_sha256: String,
+        user_input: String,
+        configuration_json: String,
+        association_json: String,
+    ) -> Result<String, TrollmError> {
+        let association = serde_json::from_str(&association_json)
+            .map_err(|e| TrollmError::Bundle(format!("invalid source association: {e}")))?;
+        let configuration = serde_json::from_str(&configuration_json)
+            .map_err(|e| TrollmError::Run(format!("invalid run configuration: {e}")))?;
+        let spawned = run::spawn_source_run(
+            self.base.clone(),
+            flow_sha256,
+            user_input,
+            self.token_provider.lock().unwrap().clone(),
+            None,
+            Some(configuration),
+            Some((installation_sha256, association)),
+        )
+        .map_err(TrollmError::run)?;
+        let run_id = spawned.run_id.clone();
+        self.runs.insert(run_id.clone(), spawned.handle);
+        Ok(run_id)
+    }
+
+    pub fn is_source_run(&self, run_id: String) -> Result<bool, TrollmError> {
+        history::validate_run_id(&run_id)?;
+        let dir = self.base.join("runs").join(run_id);
+        Ok(dir.join("installation.json").exists() || dir.join("source-association.json").exists())
+    }
+
+    /// Passive terminal observation. This never invokes models, tools or resume.
+    pub fn prepare_source_report(
+        &self,
+        run_id: String,
+        device_id: String,
+    ) -> Result<String, TrollmError> {
+        let _guard = self.resume_lock.lock().unwrap();
+        let status = self.poll_status(run_id.clone())?;
+        if status.worker_active
+            || !matches!(
+                status.phase,
+                RunPhaseApi::Succeeded | RunPhaseApi::Failed { .. }
+            )
+        {
+            return Err(TrollmError::Run(
+                "retain a report only after the native worker stops".into(),
+            ));
+        }
+        let association = self.source_run_association(run_id.clone())?;
+        source_report::retain(&self.base, &run_id, &device_id, &association, &status)
+            .map_err(TrollmError::bundle)
+    }
+
+    /// Original source/install/native identity for report custody, never a new run.
+    pub fn source_run_association(&self, run_id: String) -> Result<String, TrollmError> {
+        history::validate_run_id(&run_id)?;
+        let path = self
+            .base
+            .join("runs")
+            .join(&run_id)
+            .join("source-association.json");
+        let bytes = std::fs::read(path)
+            .map_err(|e| TrollmError::Io(format!("reading source association: {e}")))?;
+        let source: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| TrollmError::Bundle(format!("invalid source association: {e}")))?;
+        if source["nativeRunId"].as_str() != Some(run_id.as_str()) {
+            return Err(TrollmError::Bundle(
+                "source association belongs to another run".into(),
+            ));
+        }
+        String::from_utf8(bytes)
+            .map_err(|e| TrollmError::Bundle(format!("invalid source association: {e}")))
     }
 
     /// Verified, pinned setup defaults for an installed flow. Legacy bundles
@@ -451,6 +616,100 @@ impl TrollmRuntime {
         })
     }
 
+    /// Observe a bounded live view. Once seeded, idle polls perform no journal
+    /// reads. This deliberately does not validate external edits to old records;
+    /// use poll_status/tail_events for strict disk validation.
+    pub fn observe_run(
+        &self,
+        run_id: String,
+        from_seq: u64,
+    ) -> Result<RunObservation, TrollmError> {
+        history::validate_run_id(&run_id)?;
+        let _resume = self.resume_lock.lock().unwrap();
+        if let Some(handle) = self.runs.get(&run_id) {
+            let phase = handle.status.lock().unwrap();
+            if handle.control.worker_active() {
+                let active = matches!(*phase, RunPhase::Running | RunPhase::Paused { .. });
+                let activity = if active && matches!(*phase, RunPhase::Running) {
+                    handle.control.activity()
+                } else {
+                    None
+                };
+                let view = handle.control.observation.lock().map_err(|_| {
+                    TrollmError::Run("observation unavailable; reopen after worker stops".into())
+                })?;
+                if let Some(error) = &view.report_error {
+                    return Err(TrollmError::Run(error.clone()));
+                }
+                let status = RunStatusInfo {
+                    run_id,
+                    phase: RunPhaseApi::from(&*phase),
+                    worker_active: active,
+                    activity,
+                    last_seq: view.last_seq,
+                    final_report: if matches!(*phase, RunPhase::Succeeded) {
+                        view.final_report.clone()
+                    } else {
+                        None
+                    },
+                };
+                return Ok(view.batch(status, from_seq));
+            }
+        }
+        // Serialize cold construction so concurrent screen/service first polls
+        // share one strict scan. Entries are immutable until explicit invalidation,
+        // eviction or a new worker registration.
+        let mut cache = self.observations.lock().unwrap();
+        if cache.get(&run_id).is_none() {
+            let phase = match self.runs.get(&run_id) {
+                Some(handle) if handle.control.has_volatile_failure() => {
+                    handle.status.lock().unwrap().clone()
+                }
+                _ => run::status_from_disk(&self.base, &run_id)
+                    .map_err(TrollmError::run)?
+                    .ok_or_else(|| TrollmError::NotFound(format!("no run '{run_id}'")))?,
+            };
+            let mut view =
+                observation::Projection::seed(&self.base, &run_id).map_err(TrollmError::run)?;
+            if matches!(phase, RunPhase::Succeeded) {
+                view.final_report = run::final_report_for_node(
+                    &self.base.join("runs").join(&run_id),
+                    view.report_node.as_deref(),
+                )
+                .map_err(TrollmError::run)?;
+            }
+            let status = RunStatusInfo {
+                run_id: run_id.clone(),
+                phase: RunPhaseApi::from(&phase),
+                worker_active: false,
+                activity: None,
+                last_seq: view.last_seq,
+                final_report: view.final_report.clone(),
+            };
+            cache.insert(run_id.clone(), view, status);
+        }
+        let (view, status) = cache.get(&run_id).unwrap();
+        Ok(view.batch(status.clone(), from_seq))
+    }
+
+    /// Discard an inactive derived view. The next observe_run strictly rebuilds
+    /// it from disk. A live worker exclusively owns its view until it stops.
+    pub fn invalidate_observation(&self, run_id: String) -> Result<(), TrollmError> {
+        history::validate_run_id(&run_id)?;
+        let _resume = self.resume_lock.lock().unwrap();
+        if self
+            .runs
+            .get(&run_id)
+            .is_some_and(|handle| handle.control.worker_active())
+        {
+            return Err(TrollmError::Run(
+                "cannot invalidate a live worker observation".into(),
+            ));
+        }
+        self.observations.lock().unwrap().remove(&run_id);
+        Ok(())
+    }
+
     /// §9: pause. Plan-paused runs stay paused; running runs get a
     /// cooperative hold at the next model/tool boundary (see `run.rs` docs).
     pub fn pause(&self, run_id: String) -> Result<(), TrollmError> {
@@ -566,6 +825,7 @@ impl TrollmRuntime {
             return Ok(());
         }
         let handle = reconstruct()?;
+        self.observations.lock().unwrap().remove(&run_id);
         self.runs.insert(run_id, handle);
         Ok(())
     }

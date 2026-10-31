@@ -53,9 +53,10 @@ and reuses the browser starter's pinned models. It performs no browser or purcha
 actions. Arithmetic is exact for the selected operands; selection and advice are
 model work. Its scripted tests do not establish native-device acceptance.
 
-Current source prepares **0.1.0-rc.6 / Android code 7** with `local.calculate`
-and this starter. Source checks cover scripted execution, pinned bundles and
-native tool-fence grammar; rc.6 real-model and device acceptance remain open.
+Current source prepares **0.1.0-rc.8 / Android code 43**. It adds prepared-list
+tools, explicit child returns, bounded live observation and correlated timing.
+Host checks use scripted dependencies; this build needs separate native CI and
+real-model device acceptance.
 
 Edit starters under `flows/starters/`, update their setup pins if needed, and run
 `python3 scripts/android/make_starter_bundles.py` from the repository root. The
@@ -63,9 +64,11 @@ Python helper tests verify that all three committed assets match their sources.
 Setup pins Hugging Face revision URLs, sizes and SHA-256 hashes for the GGUF
 weights; no vision/audio projectors are downloaded.
 
-Native slots load on first use, with streaming SHA-256 verification before
-construction and reuse within the run. UI/notifications show verification,
-loading and generation. Persistent interrupted progress needs explicit Resume
+After explicit Start/Resume, up to two task-referenced native slots prepare in
+parallel, with streaming SHA-256 verification before construction and reuse within
+the run; plans referencing more than two slots retain lazy loading for all slots. UI/notifications show foreground verification,
+loading and generation without background preparations overwriting them. See
+[model preparation](../../docs/MODEL-PREPARATION.md). Persistent interrupted progress needs explicit Resume
 after worker loss; startup never preloads models or replays a run. Interruptible
 retry delays, durable cancellation, readable history and typed bridge errors
 are also present.
@@ -127,7 +130,10 @@ requires explicit Resume under the existing recovery safeguards.
 
 The foreground service observes each UUID once and retains shared ownership
 until all attached runs finish. A polling error does not remove an owner.
-The existing one-hour wake-lock ceiling remains. Pure Kotlin/JUnit tests cover bounded bundle input, identity and service ownership;
+A ten-minute timed wake-lock lease is renewable every five minutes only after a
+successful active-worker observation; read errors cannot renew it. Pause/terminal
+cleanup and destruction release it, so long bounded runs can exceed one hour.
+Pure Kotlin/JUnit tests cover the renewal decision, bounded bundle input, identity and service ownership;
 device navigation/restart and real FFI checks provide separate integration validation.
 
 Bindings generation uses `--metadata-no-deps --no-format`: exported bridge
@@ -241,7 +247,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.6` (code `7`), read from the root Cargo manifest through
+`0.1.0-rc.8` (code `43`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. This is a build recipe; physical-phone acceptance and public APK delivery remain unfinished.
 
 Run only flows from authors you trust. Bundles are not publisher signed and
@@ -329,3 +335,10 @@ See [current architecture](../../docs/ARCHITECTURE-ANDROID.md),
 [contributor checks](../../CONTRIBUTING.md). Emulator passes do not replace
 interruption/recovery, signed-release update or physical arm64 evidence from the
 actual installed APK.
+
+Live screen/service polling uses the bounded `observe_run` projection rather
+than rereading the whole journal. Technical history shows an omission notice
+when older lines are evicted; the authoritative journal remains on disk.
+The strict bridge read APIs and conservative resume rules are unchanged.
+[Measurement contracts](../../docs/amazon-generalization/PERFORMANCE.md) explain
+correlation, optional timings and offline numeric summaries.

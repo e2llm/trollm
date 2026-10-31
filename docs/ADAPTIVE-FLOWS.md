@@ -26,8 +26,9 @@ Task registries add `completion: flow-route`. Such a task uses the literal
 `coder` slot and explicitly grants `flow.choose`. It may also grant ordinary
 tools and use a bounded model loop. Prose never completes it. Model-derived
 outputs are forbidden, as for `tool-result`; artifact contracts still apply.
-Existing argument-binding rules remain unchanged in this slice: task-level
-`toolArguments` requires single-call `tool-result` completion.
+Task-level `toolArguments` requires single-call `tool-result` or `tool-or-route`
+completion; the latter is described below. `flow-route` does not inject bound
+arguments into its multi-generation tool loop.
 
 A task node using this completion mode declares `routes` instead of
 `onVerified`: a nonempty map of at most 16 authored route names to ordinary
@@ -41,7 +42,8 @@ Legacy inline pauses without `resumeAt` retain their previous behavior outside
 routes. Explicit null is rejected for `routes`, `promptSupplement` and
 `resumeAt`. Names use
 ASCII identifiers, at most 64 characters. All targets are validated at load.
-Other completion modes cannot declare routes. `onError` keeps its current
+Only `tool-or-route` also declares routes, together with `onVerified`, as described
+below. `onError` keeps its current
 meaning and budgets continue to bound cycles.
 
 `flow` is a reserved runtime namespace, never a remote MCP server, setup
@@ -158,3 +160,24 @@ scripted models and local mock services. A paused routing test performs a mock
 mutation before choosing a continuation and checks both warm and cold Resume
 without repeating that mutation. No result here establishes real-model route
 selection or physical-phone acceptance.
+
+## One tool result or one authored route
+
+`completion: tool-or-route` is a coder-only, single-generation alternative to
+`tool-result`. Grant an ordinary tool and `flow.choose`, declare `onVerified`
+and `routes`, and keep `loop.maxSteps` at one. An ordinary call uses the existing
+typed argument bindings and must satisfy the normal artifact output contract
+before `onVerified`. Required artifacts must come from that current call;
+effective node output overrides retain their existing schema validation.
+
+A sole `flow.choose` call selects a declared route without producing ordinary
+success outputs. Only this completion mode skips those success-artifact
+obligations on its control branch. Previous outputs for the node, including bare
+and `.outputs` aliases, are cleared on a new attempt and remain absent after
+decline and Resume. Original artifact files remain retained as evidence.
+
+The mode forbids model output bindings, bound `flow.choose` arguments, prose
+completion and mixed or multiple calls. Tool failures and invalid calls follow
+`onError`; they never become semantic abstention. Other completion modes retain
+their contracts. A route named `more_evidence` is only an authored exit: it does
+not obtain evidence unless the graph explicitly performs that work.

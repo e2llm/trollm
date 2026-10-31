@@ -123,3 +123,8 @@ limits, setup and phase membership. Show ordinary text changes for prompts;
 do not claim semantic equivalence. Renamed/unmatched nodes appear as removal
 and addition rather than guessed matches. Unchanged files must not dominate
 the review. Package bytes remain untouched by this interface.
+
+Plan inspection preserves optional `exports` and per-collection `view` fields
+through the typed core contract. These control which original saved values a
+child returns and what a parent receives; they do not execute expressions.
+See [child-return limits](../amazon-generalization/G2-CONTRACT.md).

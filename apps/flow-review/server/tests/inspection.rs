@@ -619,3 +619,31 @@ fn non_flow_entry_selection_cannot_bypass_reference_preflight() {
     );
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn preserves_explicit_child_exports_and_foreach_collection_views() {
+    use serde_json::json;
+    let mut files = minimal();
+    let root = files
+        .iter_mut()
+        .find(|file| file.path.ends_with(".flow.yaml"))
+        .unwrap();
+    root.content
+        .push_str("\nexports:\n  summary: {from: summarize.outputs.summary}\n");
+    let result = review(files);
+    assert!(result.valid, "{:?}", result.diagnostics);
+    assert_eq!(
+        result.plans[0]["exports"]["summary"]["from"],
+        "summarize.outputs.summary"
+    );
+    // Foreach view parsing is the same typed core contract used by inspection.
+    let collect: trollm_core::plan::ForeachCollect = serde_json::from_value(json!({
+        "collect":"body.outputs", "indexBy":"itemKey",
+        "view":{"fields":{"outputs":{"amount":true}},"maxBytes":4096}
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(collect).unwrap()["view"]["maxBytes"],
+        4096
+    );
+}

@@ -138,7 +138,55 @@ pub struct PolicySet {
     pub policies: HashMap<String, ToolPolicy>,
 }
 
+/// Task-owned destinations cannot impersonate native/internal proof artifacts.
+pub fn validate_task_result_artifact_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name.as_bytes()[0].is_ascii_alphanumeric()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        || name.starts_with("model-failure-")
+        || matches!(
+            name,
+            "calculation"
+                | "price-extraction"
+                | "unique-selection"
+                | "equality-proof"
+                | "prepared-worklist"
+                | "collection-total"
+        )
+    {
+        bail!("task resultArtifact must be a safe, non-reserved basename (1..64 ASCII letters/digits, '_' or '-')");
+    }
+    Ok(())
+}
+
 impl PolicySet {
+    /// Resolve an explicit storage override without modifying the shared policy.
+    pub fn task_result_policy(&self, server: &str, tool: &str, name: &str) -> Result<ToolPolicy> {
+        validate_task_result_artifact_name(name)?;
+        anyhow::ensure!(
+            server != "local" && server != "flow",
+            "task resultArtifact requires a remote read tool"
+        );
+        let key = policy_key(server, tool);
+        let mut policy = self
+            .get(server, tool)
+            .context("task resultArtifact requires an existing tool policy")?
+            .clone();
+        anyhow::ensure!(policy.class == ToolClass::Read && policy.paginate.is_none() && policy.serve_from.is_none() && policy.result_artifact.is_some(), "task resultArtifact requires a non-paginated remote read with an existing resultArtifact");
+        anyhow::ensure!(
+            !self
+                .policies
+                .iter()
+                .any(|(owner, p)| owner != &key && p.result_artifact.as_deref() == Some(name)),
+            "task resultArtifact collides with another tool's artifact"
+        );
+        policy.result_artifact = Some(name.to_owned());
+        Ok(policy)
+    }
+
     pub fn from_yaml_value(value: &serde_yaml::Value) -> Result<Self> {
         let policies: HashMap<String, ToolPolicy> =
             serde_yaml::from_value(value.clone()).context("parsing mcp.policies into PolicySet")?;

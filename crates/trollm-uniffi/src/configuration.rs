@@ -242,7 +242,10 @@ mod tests {
                     (
                         name.clone(),
                         ResolvedModel {
-                            path: "/models/chosen.gguf".into(),
+                            path: std::env::temp_dir()
+                                .join("chosen.gguf")
+                                .to_string_lossy()
+                                .into_owned(),
                             sha256: "a".repeat(64),
                             ctx: 1024,
                             temperature: 0.4,

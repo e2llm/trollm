@@ -78,6 +78,17 @@ object StructuredInput {
         return serialized
     }
 
+    /** Original form values, before Kotlin trimming. Native admission retains these
+     * exact serialized UTF-8 bytes and compares independent normalized output. */
+    fun serializeOriginal(fields: List<StructuredInputField>, values: Map<String, String>): String {
+        validateFields(fields)
+        val json = JSONObject()
+        fields.forEach { json.put(it.key, values[it.key].orEmpty()) }
+        return json.toString().also {
+            require(it.toByteArray(Charsets.UTF_8).size <= MAX_JSON_BYTES) { "Original input is too large." }
+        }
+    }
+
     private fun validUrl(value: String): Boolean = try {
         val uri = URI(value)
         uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank() &&

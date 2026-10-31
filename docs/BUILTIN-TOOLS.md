@@ -1,7 +1,8 @@
 # Built-in tools: interface contract v1
 
 Calculator design agreed 2026-10-21; literal extraction added 2026-10-24.
-This contract accompanies `local.calculate` and `local.extract_decimal`.
+This contract accompanies `local.calculate`, `local.extract_decimal`, `local.select_unique`
+and `local.assert_equal`.
 It defines source capabilities; older APKs do not gain them by
 installing a new flow bundle. Build an APK containing the implementation before
 claiming phone acceptance. The fixture and scripted checks below require no
@@ -78,6 +79,151 @@ produce no successful tool result. Existing executor error classes remain:
 argument validation uses `tool-call-parse`; execution errors use `mcp-error`.
 Do not turn an error, truncated model generation or missing result into success.
 
+## Structural JSON equality contract
+
+`local.assert_equal` is an explicitly granted, coder-invoked local read tool.
+Supply exactly `left` and `right`, both required and each any parsed JSON value.
+It compares the two `serde_json::Value` values directly: object key order is
+ignored, array order matters, strings are literal and case-sensitive, and no
+decoding, trimming, numeric coercion or Unicode normalization occurs. A missing
+operand is invalid; two explicit null operands are equal.
+
+Equality follows the parsed number representation: integer `1` differs from
+floating `1.0`, and integer `0` differs from `0.0`; floating `1.0` and `1e0`
+are equal, as are floating `0.0` and `-0.0`. This is equality of parsed values,
+not a comparison of the original JSON spelling or exact-decimal arithmetic.
+
+Success returns exactly `{"equal":true}` through the normal result policy and
+artifact path. Mismatch returns `local.assert_equal: mismatch` without operand
+values or a successful proof artifact. Standalone malformed requests return
+`local.assert_equal: invalid-arguments`; gateway schema or byte/depth admission
+may instead return the existing bounded diagnostic. The standard combined
+256 KiB argument-JSON and depth-64 limits remain unchanged. The contracts are
+[input](../schemas/local-assert-equal.v1.input.schema.json) and
+[output](../schemas/local-assert-equal.v1.output.schema.json).
+
+Authored flows can project the fields whose structural equality matters into
+separate views, preserve the original artifacts, and bind both operands with
+`modelFields: []`. The coder still invokes an ordinary tool call; a later task
+uses the original evidence and the proof artifact. Equality proves only literal
+agreement of those operands, not freshness, ownership or semantic suitability.
+
+## Unique object selection contract
+
+`local.select_unique` is an explicitly granted, coder-invoked read tool. It uses
+the existing local dispatch, argument bindings, result validation, artifacts and
+response-size telemetry. It requires no connection and has no browser, DOM,
+selector, URL or site semantics. Its schemas are [input](../schemas/local-select-unique.v1.input.schema.json)
+and [output](../schemas/local-select-unique.v1.output.schema.json).
+
+Supply exactly `items` (an array of original objects), `field` (a JSON pointer),
+`equals` (a literal string) and `prefix` (a literal string, possibly empty).
+An item matches precisely when `prefix + item[field]` equals `equals`, with
+case-sensitive string comparison. Missing or non-string field values do not
+match. JSON pointer escapes `~0` and `~1` address literal tilde and slash keys;
+malformed pointers fail. Empty pointer addresses the object itself and therefore
+does not match a string. There is no URI-fragment or percent decoding, Unicode
+normalization, trimming, regular expression evaluation or fallback selection.
+
+Exactly one match returns `{selected, index, sourceSha256}`. `selected` is the
+unchanged original object, including fields not used by the predicate; `index`
+is its zero-based position in the complete input array. `sourceSha256` hashes
+the entire bound `items` JSON value using compact `serde_json` serialization
+(the same bytes as `serde_json::to_vec(items)`), preserving array order. It
+identifies the supplied value, not the original artifact's whitespace or bytes.
+Preserve that original artifact separately. Reordering unique candidates keeps
+the selected object but changes its index and source hash.
+
+Zero matches fail with `local.select_unique: no-match`; multiple matches fail
+with `local.select_unique: ambiguous`, including identical duplicate objects.
+Neither failure publishes a selected result artifact. Invalid standalone
+arguments use `local.select_unique: invalid-arguments`; gateway schema and
+byte/depth admission may report their existing bounded diagnostics instead.
+
+Selection admits at most 100,000 objects and 32 MiB of compact serialized items,
+matching the existing complete-query collection allowance. Total argument JSON
+is bounded to 33 MiB and depth 64; only this tool receives that argument-byte
+allowance. Other tools retain their 256 KiB argument bound. `field` is bounded
+to 4,096 UTF-8 bytes, and `equals` and `prefix` to 16,384 bytes each. Bounds are
+checked before matching/hash work, and oversized inputs fail without truncation.
+Flows may apply smaller result/artifact budgets; complete sources must fit those
+budgets too. A selected object is never silently shortened to make a result fit.
+
+An authored task can bind all four arguments and use `modelFields: []`; its
+coder still invokes the ordinary tool-call fence. A later ordinary tool step
+can bind `selection.outputs.data.selected.id` without transcribing an ID from
+model prose. This operation establishes literal uniqueness only, not semantic
+suitability or freshness of the selected object.
+
+## Prepared worklist contract
+
+`local.prepare_worklist` accepts exactly `{input: string}`. The string contains
+one JSON envelope with exactly `context` (a string, possibly empty) and `items`
+(an array of 1–8 original JSON objects). The tool has no item-domain rules;
+request prose, quantity or ticket-specific constraints belong in the flow's
+result schema. Its contracts are [input](../schemas/local-prepare-worklist.v1.input.schema.json)
+and [output](../schemas/local-prepare-worklist.v1.output.schema.json).
+
+Admission rejects malformed, empty or oversized input without partial results.
+The original input string is at most 48 KiB of UTF-8; decoded context is at most
+4 KiB of UTF-8; each compact serialized item is at most 4 KiB. The envelope has
+a maximum nesting depth of 32. Combined argument JSON retains the standard
+256 KiB/depth-64 bound. Schema string lengths count characters; the tool and
+gateway additionally enforce byte bounds and the decoded envelope contract.
+
+Success returns exactly `{format, context, items}`, with format
+`trollm.local.prepare_worklist.v1`. Each output item is `{id, value}`, preserving
+the original parsed object unchanged. No truncation, normalization, inference,
+sorting or duplicate consolidation occurs. Duplicate original entries receive
+different occurrence IDs. IDs are lowercase SHA-256 hex of the concatenation
+of the UTF-8 domain string `trollm.local.prepare_worklist.v1`, a zero byte, the
+complete original input string's UTF-8 bytes, and the zero-based occurrence
+position as an unsigned 64-bit big-endian integer. Identical input/position is
+deterministic; a whitespace or context change also changes IDs. IDs identify
+these occurrences, not semantic equivalence or the freshness of evidence.
+Preserve the original input and original evidence separately.
+
+Standalone malformed requests use `local.prepare_worklist: invalid-arguments`;
+size/depth or gateway schema admission may instead use bounded diagnostics.
+The fully bound coder call can use `modelFields: []`; the tool never creates a
+model-authored worklist or a new executor node kind.
+
+## Complete collection total contract
+
+`local.collection_total` accepts exactly `expected`, `results`, `expectedId`,
+`resultId`, `outcome` and `amount`. Both arrays contain 1–8 values. The remaining
+four arguments are static RFC 6901 JSON pointers into each expected value or
+result value, respectively. Empty pointer addresses the whole value; slash and
+tilde keys use `~1` and `~0`. No fragment decoding or expression evaluation occurs.
+Pointer strings and selected nonempty identities are bounded to 4,096 UTF-8
+bytes. Combined argument JSON is at most 256 KiB and depth 64, checked by the
+tool itself as well as gateway admission. Bind compact result records rather
+than repeating full observations. Contracts are [input](../schemas/local-collection-total.v1.input.schema.json)
+and [output](../schemas/local-collection-total.v1.output.schema.json).
+
+Every expected identity must occur exactly once on each side. Duplicates,
+missing or unexpected results fail. Every selected outcome must be the literal
+string `succeeded`; failed, skipped or missing outcomes cannot be omitted from
+the sum. Each selected amount must be a calculator-format decimal string, with
+the same 12 integer/6 fractional digit limits. Addition is exact with no
+rounding; the final magnitude is bounded to `999999999999.999999`.
+
+Success returns exactly `{format, count, sum, terms}`, with format
+`trollm.local.collection_total.v1`. The sum is canonical decimal text. Terms
+are `{id, amount}` in expected-array order and retain the exact original amount
+strings, including trailing zeros. This establishes identity coverage and exact
+arithmetic only; the authored flow still checks currency, semantic identity,
+price basis, and whether a claimed successful outcome is supported by evidence.
+
+Stable failures use the `local.collection_total:` prefix with
+`invalid-arguments`, `duplicate-expected`, `duplicate-result`,
+`coverage-mismatch`, `unsuccessful-result` or `out-of-range`. Size/depth and
+gateway schema admission may report bounded diagnostics instead. No failure
+publishes a successful result artifact. Both collection tools use explicit task
+grants and the existing local read-tool policy, binding and artifact pipeline.
+Focused fixture/gateway coverage is in `worklist_collection` (no real models,
+phone execution or live MCP).
+
 ## Literal decimal extraction contract
 
 `local.extract_decimal` is an optional coder-invoked read tool. It has no site
@@ -149,7 +295,7 @@ cargo test --locked -p trollm-core --no-default-features --test local_decimal
 
 ## Policies, bindings and artifacts
 
-Both built-in tools are read-class operations. Their policies support the existing
+Built-in local tools are read-class operations. Their policies support the existing
 `resultArtifact`, `resultValidation` and `shape` behavior, with ordinary limits
 and the single-attempt retry defaults. Mutation classification, passthrough,
 cache, pagination and `serveFrom`/`onMiss` policies are rejected for local tools.

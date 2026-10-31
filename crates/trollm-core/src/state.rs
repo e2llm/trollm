@@ -117,12 +117,23 @@ pub struct Counters {
     pub artifact_bytes: u64,
 }
 
+/// Immutable full child node-output payload, independent of logical artifact files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildEvidence {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingReturn {
     pub parent_plan: String,
     pub parent_node: String,
-    pub outputs: BTreeMap<String, BTreeMap<String, Value>>,
+    pub outputs: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ChildEvidence>,
     pub outcome: String,
 }
 
@@ -134,6 +145,8 @@ pub struct RunState {
     pub event_watermark: u64,
     #[serde(default)]
     pub pending_return: Option<PendingReturn>,
+    #[serde(default)]
+    pub child_evidence_returns: u32,
     pub run_id: String,
     pub status: StateStatus,
     /// Terminal failure/cancellation reason. Older snapshots omit this field.
@@ -153,6 +166,7 @@ impl RunState {
         Self {
             event_watermark: 0,
             pending_return: None,
+            child_evidence_returns: 0,
             run_id: run_id.to_string(),
             status: StateStatus::Running,
             terminal_reason: None,

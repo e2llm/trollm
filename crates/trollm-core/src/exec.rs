@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Context};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -279,6 +280,11 @@ pub enum RunStatus {
 /// Optional cooperative control at dispatch and retry boundaries. An active
 /// model or tool call remains synchronous; the next boundary observes cancel.
 pub trait ExecutionControl: Send + Sync {
+    /// Optional cumulative user-hold duration in this worker epoch. Observation
+    /// only; None means this control cannot distinguish holds from active time.
+    fn observation_hold_ns(&self) -> Option<u64> {
+        None
+    }
     /// Hold for a user pause if needed, then return true if cancelled.
     fn checkpoint(&self) -> bool;
     /// Wait for retry backoff, preserving any pause and returning true on cancel.
@@ -319,7 +325,45 @@ enum TaskLoopOutcome {
     Cancelled,
 }
 
+enum ModelFailureEvidence<'a> {
+    Response(&'a trollm_models::GenerateResponse),
+    Error {
+        ms: u64,
+        diagnostics: Option<&'a trollm_models::GenerationDiagnostics>,
+    },
+}
+
+#[derive(Default, Clone, Copy)]
+struct SnapshotMetrics {
+    attempts: u64,
+    writes: u64,
+    bytes: u64,
+    serialize_ns: u64,
+    write_rename_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+struct AttemptStart {
+    started: Instant,
+    events: crate::events::EventWriteMetrics,
+    snapshot: SnapshotMetrics,
+    hold: Option<u64>,
+    retry: u64,
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 pub struct Executor<M: ModelSlot, G: ToolGateway> {
+    observation_epoch: String,
+    observation_attempt: u64,
+    observation_call: u32,
+    observation_context: Option<Value>,
+    observation_start: Option<AttemptStart>,
+    snapshot_metrics: Cell<SnapshotMetrics>,
+    retry_wait_ns: u64,
+    tool_failure_observed: bool,
     plan: ExecutionPlan,
     registry: TaskRegistry,
     user_input: String,
@@ -363,6 +407,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             gateway.tool_class(server, tool)
         })
         .map_err(|e| anyhow!(e.to_string()))?;
+        validate::validate_task_result_artifacts(&plan, &registry, |server, tool| {
+            gateway.tool_class(server, tool)
+        })
+        .map_err(|e| anyhow!(e.to_string()))?;
         fn check_completion_outputs(
             plan: &ExecutionPlan,
             registry: &TaskRegistry,
@@ -375,7 +423,9 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     .is_some_and(|task| {
                         matches!(
                             task.completion,
-                            TaskCompletion::ToolResult | TaskCompletion::FlowRoute
+                            TaskCompletion::ToolResult
+                                | TaskCompletion::FlowRoute
+                                | TaskCompletion::ToolOrRoute
                         )
                     })
                 {
@@ -473,6 +523,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .clone()
             .unwrap_or_else(|| "run already failed".to_string());
         Ok(Self {
+            observation_epoch: Uuid::new_v4().to_string(),
+            observation_attempt: 0,
+            observation_call: 0,
+            observation_context: None,
+            observation_start: None,
+            snapshot_metrics: Cell::new(SnapshotMetrics::default()),
+            retry_wait_ns: 0,
+            tool_failure_observed: false,
             plan,
             registry,
             user_input,
@@ -506,6 +564,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     pub fn run_id(&self) -> &str {
         self.run_dir.run_id()
+    }
+
+    /// Observe events only after their journal record is committed.
+    pub fn set_event_sink(&mut self, sink: crate::events::CommittedEventSink) {
+        self.log.set_committed_sink(sink);
     }
 
     pub fn state(&self) -> &RunState {
@@ -548,8 +611,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 self.persist_snapshot()?;
                 return self.current_status();
             }
-            // Recovery can refuse execution. Do not consume bounded journal
-            // capacity recording a resume that never passed that safety gate.
+            // Record a resume only after recovery permits execution.
             self.emit(EventType::Resumed, json!({}))?;
             self.persist_snapshot()?;
         }
@@ -627,6 +689,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 }
                 StateStatus::Running => {}
             }
+            let dispatch_started = Instant::now();
+            let dispatch_hold_before = self.observation_hold_ns();
             if self.control_cancelled() {
                 self.finish_cancelled()?;
                 continue;
@@ -639,11 +703,43 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 self.apply_run_limit(&fp, &failure.detail)?;
                 continue;
             }
-            match node.kind {
-                NodeKind::Task => self.step_task(&node_id, &node, &fp)?,
-                NodeKind::Foreach => self.step_foreach(&node_id, &node, &fp)?,
-                NodeKind::End => self.step_end(&node_id, &node, &fp)?,
+            self.observation_attempt = self.observation_attempt.saturating_add(1);
+            self.observation_call = 0;
+            self.observation_context = Some(json!({
+                "epoch": self.observation_epoch, "attempt": self.observation_attempt,
+                "plan": plan_id, "node": node_id, "frameDepth": self.state.stack.len(),
+                "foreach": self.state.foreach_cursors.iter().map(|(node, cursor)|
+                    json!({"node":node,"index":cursor.index,"phase":cursor.phase})).collect::<Vec<_>>(),
+            }));
+            self.observation_start = Some(AttemptStart {
+                started: dispatch_started,
+                events: self.log.write_metrics(),
+                snapshot: self.snapshot_metrics.get(),
+                hold: dispatch_hold_before,
+                retry: self.retry_wait_ns,
+            });
+            let result = match node.kind {
+                NodeKind::Task => self.step_task(&node_id, &node, &fp),
+                NodeKind::Foreach => self.step_foreach(&node_id, &node, &fp),
+                NodeKind::End => self.step_end(&node_id, &node, &fp),
+            };
+            // Preserve run_ended/paused as the final lifecycle record. Their
+            // existing event carries the available pre-snapshot measurements.
+            if self.state.status == StateStatus::Running {
+                let measurement = self.attempt_measurement(Some(result.is_ok()), true);
+                // A trailing observation never replaces the original step result;
+                // actual write errors remain sticky for later required writes.
+                let _ = self.emit(
+                    EventType::NodeExited,
+                    json!({
+                        "phase":"attempt","plan":plan_id,"node":node_id,"measurement":measurement,
+                    }),
+                );
             }
+            self.observation_start = None;
+            self.observation_context = None;
+            self.gateway.set_call_context(None);
+            result?;
         }
     }
 
@@ -681,8 +777,60 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         })
     }
 
-    fn emit(&mut self, ty: EventType, fields: Value) -> std::io::Result<u64> {
+    fn emit(&mut self, ty: EventType, mut fields: Value) -> std::io::Result<u64> {
+        if let (Some(context), Some(fields)) = (&self.observation_context, fields.as_object_mut()) {
+            fields.insert("attemptContext".into(), context.clone());
+            if matches!(ty, EventType::RunEnded | EventType::Paused) {
+                fields.insert("measurement".into(), self.attempt_measurement(None, false));
+            }
+        }
         self.log.append(ty, fields)
+    }
+
+    fn attempt_measurement(&self, returned: Option<bool>, complete: bool) -> Value {
+        let Some(before) = self.observation_start else {
+            return Value::Null;
+        };
+        let inclusive = elapsed_ns(before.started);
+        let events = self.log.write_metrics();
+        let snapshot = self.snapshot_metrics.get();
+        let hold = before
+            .hold
+            .zip(self.observation_hold_ns())
+            .map(|(a, b)| b.saturating_sub(a));
+        let retry = self.retry_wait_ns.saturating_sub(before.retry);
+        let active = hold.map(|held| inclusive.saturating_sub(held).saturating_sub(retry));
+        json!({
+            "attemptObservedNs":inclusive,"attemptInclusiveNs":complete.then_some(inclusive),
+            "userHoldNs":hold,"retryWaitNs":hold.map(|_|retry),
+            "activeObservedNs":active,"activeNs":if complete { active } else { None },
+            "boundaryReturned":returned,"boundarySnapshotIncluded":complete,
+            "eventRecords":events.records.saturating_sub(before.events.records),
+            "eventRecordBytes":events.record_bytes.saturating_sub(before.events.record_bytes),
+            "eventSerializeNs":events.serialize_ns.saturating_sub(before.events.serialize_ns),
+            "eventWriteFlushNs":events.write_flush_ns.saturating_sub(before.events.write_flush_ns),
+            "eventObserverNs":events.observer_ns.saturating_sub(before.events.observer_ns),
+            "snapshotAttempts":snapshot.attempts.saturating_sub(before.snapshot.attempts),
+            "snapshotWrites":snapshot.writes.saturating_sub(before.snapshot.writes),
+            "snapshotBytes":snapshot.bytes.saturating_sub(before.snapshot.bytes),
+            "snapshotSerializeNs":snapshot.serialize_ns.saturating_sub(before.snapshot.serialize_ns),
+            "snapshotWriteRenameNs":snapshot.write_rename_ns.saturating_sub(before.snapshot.write_rename_ns),
+        })
+    }
+
+    fn observation_hold_ns(&self) -> Option<u64> {
+        self.control
+            .as_ref()
+            .map_or(Some(0), |control| control.observation_hold_ns())
+    }
+
+    fn next_call_context(&mut self) -> trollm_mcp::CallContext {
+        self.observation_call = self.observation_call.saturating_add(1);
+        trollm_mcp::CallContext {
+            epoch: self.observation_epoch.clone(),
+            attempt: self.observation_attempt,
+            call: self.observation_call,
+        }
     }
 
     fn persist_snapshot(&mut self) -> anyhow::Result<()> {
@@ -691,12 +839,30 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     }
 
     fn write_snapshot(&self) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec_pretty(&self.state)?;
-        let path = self.run_dir.snapshot_path();
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        let mut metrics = self.snapshot_metrics.get();
+        metrics.attempts = metrics.attempts.saturating_add(1);
+        let started = Instant::now();
+        let bytes = serde_json::to_vec_pretty(&self.state);
+        metrics.serialize_ns = metrics.serialize_ns.saturating_add(elapsed_ns(started));
+        let result = match bytes {
+            Err(error) => Err(anyhow::Error::from(error)),
+            Ok(bytes) => {
+                let started = Instant::now();
+                let path = self.run_dir.snapshot_path();
+                let tmp = path.with_extension("tmp");
+                let result =
+                    std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path));
+                metrics.write_rename_ns =
+                    metrics.write_rename_ns.saturating_add(elapsed_ns(started));
+                if result.is_ok() {
+                    metrics.writes = metrics.writes.saturating_add(1);
+                    metrics.bytes = metrics.bytes.saturating_add(bytes.len() as u64);
+                }
+                result.map_err(anyhow::Error::from)
+            }
+        };
+        self.snapshot_metrics.set(metrics);
+        result
     }
 
     fn finish_failed(&mut self, reason: &str) -> anyhow::Result<()> {
@@ -828,12 +994,61 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         } else {
             // flowRef return (§4.4): hand the child frame's node outputs to the
             // parent foreach for §4.6 aggregation.
-            let frame = self.state.stack.pop().unwrap();
+            let exports = self
+                .plan
+                .find_plan(&fp.id)
+                .expect("active plan")
+                .exports
+                .clone();
+            let returned = (|| -> anyhow::Result<_> {
+                let frame = self.state.stack.last().unwrap();
+                let outputs = if let Some(exports) = &exports {
+                    exports
+                        .iter()
+                        .map(|(name, binding)| {
+                            template::lookup(&binding.from, &frame.vars)
+                                .cloned()
+                                .map(|value| (name.clone(), value))
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "missing child export '{}' from '{}'",
+                                        name,
+                                        binding.from
+                                    )
+                                })
+                        })
+                        .collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                } else {
+                    frame
+                        .node_outputs
+                        .iter()
+                        .map(|(name, value)| Ok((name.clone(), serde_json::to_value(value)?)))
+                        .collect::<anyhow::Result<_>>()?
+                };
+                if exports.is_some() {
+                    anyhow::ensure!(
+                        crate::json_size::compact_json_bytes(&outputs)? <= 256 * 1024,
+                        "child exports exceed 256 KiB"
+                    );
+                }
+                let evidence = if exports.is_some() {
+                    Some(self.archive_child_outputs(fp)?)
+                } else {
+                    None
+                };
+                Ok((outputs, evidence))
+            })();
+            let (outputs, evidence) = match returned {
+                Ok(value) => value,
+                Err(error) => return self.finish_failed(&format!("child-return: {error:#}")),
+            };
+            self.state.stack.pop().unwrap();
             let parent = self.state.stack.last().unwrap();
             self.state.pending_return = Some(PendingReturn {
                 parent_plan: parent.plan.clone(),
                 parent_node: parent.node.clone(),
-                outputs: frame.node_outputs,
+                outputs,
+                evidence,
                 outcome,
             });
             self.persist_snapshot()?;
@@ -841,11 +1056,108 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         Ok(())
     }
 
+    /// Store complete bound node outputs once before an explicit return discards them.
+    /// Logical gateway files are deliberately not references in this payload.
+    fn archive_child_outputs(&mut self, fp: &FramePlan) -> anyhow::Result<ChildEvidence> {
+        use std::io::Write;
+        const MAX_RETURNS: u32 = 128;
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+        const MAX_CHILD_BYTES: u64 = 8 * 1024 * 1024;
+        anyhow::ensure!(
+            self.state.child_evidence_returns < MAX_RETURNS,
+            "child evidence return count exceeds {MAX_RETURNS}"
+        );
+        let outputs = &self.state.stack.last().unwrap().node_outputs;
+        let size = crate::json_size::compact_json_bytes(outputs)? as u64;
+        anyhow::ensure!(
+            size <= MAX_CHILD_BYTES,
+            "child evidence exceeds {MAX_CHILD_BYTES} bytes"
+        );
+        let current = self.state.stack.last().unwrap().counters.artifact_bytes;
+        anyhow::ensure!(
+            current.saturating_add(size) <= fp.limits.artifact_max_mb.saturating_mul(1024 * 1024),
+            "child evidence exceeds artifactMaxMb"
+        );
+        let bytes = serde_json::to_vec(outputs)?;
+        let hash = hex_sha256(&bytes);
+        let dir = self.run_dir.path().join("child-evidence");
+        if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "unsafe child evidence directory"
+            );
+        } else {
+            std::fs::create_dir(&dir)?;
+        }
+        let mut total = 0u64;
+        let mut count = 0u32;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid child evidence filename"))?;
+            let stem = name.strip_suffix(".json").unwrap_or("");
+            anyhow::ensure!(
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && stem.len() == 64
+                    && stem
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "unexpected child evidence entry"
+            );
+            anyhow::ensure!(
+                metadata.len() <= MAX_CHILD_BYTES,
+                "oversized child evidence entry"
+            );
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| anyhow!("child evidence byte overflow"))?;
+            count += 1;
+            anyhow::ensure!(
+                count <= MAX_RETURNS && total <= MAX_BYTES,
+                "child evidence archive limit exceeded"
+            );
+        }
+        let path = dir.join(format!("{hash}.json"));
+        if path.exists() {
+            anyhow::ensure!(
+                std::fs::read(&path)? == bytes,
+                "child evidence hash collision or corruption"
+            );
+        } else {
+            anyhow::ensure!(
+                count < MAX_RETURNS && total.saturating_add(size) <= MAX_BYTES,
+                "child evidence archive limit exceeded"
+            );
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        self.account_artifact_bytes(size, fp)
+            .map_err(|error| anyhow!("{error:?}"))?;
+        self.state.child_evidence_returns += 1;
+        Ok(ChildEvidence {
+            path: format!("child-evidence/{hash}.json"),
+            sha256: hash,
+            bytes: size,
+        })
+    }
+
     // ------------------------------------------------------------------
     // task nodes (§5)
 
     /// Parent frames remain active while a child runs; the earliest deadline wins.
-    fn remaining_duration(&self) -> Duration {
+    pub fn remaining_duration(&self) -> Duration {
         let now = now_ms();
         self.state
             .stack
@@ -860,6 +1172,20 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             })
             .min()
             .unwrap_or(Duration::ZERO)
+    }
+
+    /// Time left on the persisted root run clock. Run-owned work such as
+    /// background model preparation can outlive the currently active child;
+    /// foreground operations must continue using `remaining_duration`.
+    pub fn remaining_run_duration(&self) -> Duration {
+        let Some(root) = self.state.stack.first() else {
+            return Duration::ZERO;
+        };
+        let deadline = root
+            .counters
+            .started_at
+            .saturating_add(self.plan.limits.timeout_s.saturating_mul(1000));
+        Duration::from_millis(deadline.saturating_sub(now_ms()))
     }
 
     fn check_deadline(&mut self, node_id: &str) -> Result<(), TaskFailure> {
@@ -890,6 +1216,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         // Verification metadata belongs only to this invocation, including retries
         // and child tasks that fail before reaching verification.
         self.verified_binding_sizes = None;
+        self.tool_failure_observed = false;
         if let Err(failure) = self.check_deadline(node_id) {
             return self.apply_run_limit(fp, &failure.detail);
         }
@@ -900,10 +1227,58 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .cloned()
             .ok_or_else(|| anyhow!("taskRef {:?} not in registry", node.task_ref))?;
 
+        if task.completion == TaskCompletion::ToolOrRoute || task.result_artifact.is_some() {
+            let frame = self.state.stack.last_mut().unwrap();
+            vars_obj_mut(frame).remove(node_id);
+            frame.node_outputs.remove(node_id);
+            self.verified_binding_sizes = None;
+        }
         self.mutation_outcome = crate::state::MutationOutcome::None;
         self.gateway
             .set_deadline(Instant::now().checked_add(self.remaining_duration()));
-        let outcome = self.run_task_loop(node_id, node, &task, fp);
+        let outcome = if let Some(name) = &task.result_artifact {
+            let (server, method) = task.tools[0].split_once('.').expect("validated task grant");
+            // Invalidate the run's declared target even if an adapter rejects
+            // the new capability before dispatch. A failed producer must not
+            // expose an old complete artifact through an authored error exit.
+            if let Err(error) = artifacts::write_meta(
+                &self.run_dir.artifacts_dir().join(format!("{name}.json")),
+                &artifacts::ArtifactMeta {
+                    fetched_at: 0,
+                    complete: false,
+                },
+            ) {
+                // The old complete sidecar may still be readable. Do not let
+                // onError (including retries or a success join) reuse it.
+                let failure = TaskFailure::new(
+                    ErrorClass::ArtifactIo,
+                    format!("task resultArtifact invalidation: {error}"),
+                );
+                self.record_task_failure(node_id, &failure);
+                self.emit(
+                    EventType::Error,
+                    json!({"class": failure.class.as_str(), "detail": failure.detail,
+                        "node": node_id, "plan": fp.id}),
+                )?;
+                return self.finish_failed(&format!(
+                    "{}: {}",
+                    failure.class.as_str(),
+                    failure.detail
+                ));
+            }
+            match self
+                .gateway
+                .begin_result_artifact_attempt(server, method, name)
+            {
+                Ok(()) => self.run_task_loop(node_id, node, &task, fp),
+                Err(error) => Err(TaskFailure::new(
+                    ErrorClass::ArtifactIo,
+                    format!("task resultArtifact: {error:#}"),
+                )),
+            }
+        } else {
+            self.run_task_loop(node_id, node, &task, fp)
+        };
         let cancelled = self.control_cancelled();
         match outcome {
             // A failed journal write must never be reported as a durable
@@ -1016,10 +1391,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 bound_arguments.insert(tool.clone(), values);
             }
         }
+        let prompt_started = Instant::now();
         let template_text = self
             .registry
             .prompt_template(task)
             .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, format!("prompt: {e}")))?;
+        let render_started = Instant::now();
         let mut context =
             template::render(&template_text, &frame_vars, &self.user_input).map_err(|e| {
                 TaskFailure::new(
@@ -1045,6 +1422,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             ));
         }
 
+        let prompt_render_ns = elapsed_ns(render_started);
         // Project only model-owned top-level fields. The gateway still validates
         // the original wire schema after deterministic arguments are injected.
         let mut model_argument_schemas = BTreeMap::new();
@@ -1199,22 +1577,28 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         .and_then(Value::as_array)
                         .filter(|names| !names.is_empty());
                     if let Some(required) = required {
-                        let fields: Map<String, Value> = required
+                        let fields: Vec<String> = required
                             .iter()
                             .filter_map(Value::as_str)
                             .map(|name| {
-                                (
-                                    name.to_string(),
-                                    schema["properties"][name]
-                                        .get("type")
-                                        .cloned()
-                                        .unwrap_or(json!("JSON value")),
-                                )
+                                let field_type = &schema["properties"][name]["type"];
+                                let label = if let Some(name) = field_type.as_str() {
+                                    name.to_string()
+                                } else if let Some(types) = field_type.as_array() {
+                                    types
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join(" | ")
+                                } else {
+                                    "JSON value".to_string()
+                                };
+                                format!("{name} ({label})")
                             })
                             .collect();
                         context.push_str(&format!(
-                            "\n[Required model arguments for {fqn}] {}\n",
-                            Value::Object(fields)
+                            "\n[Required argument names and types for {fqn} (types are not values)] {}\n",
+                            fields.join(", ")
                         ));
                     }
                     model_argument_schemas.insert((descriptor.server, descriptor.name), schema);
@@ -1237,7 +1621,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         let mut artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut prose: Option<String> = None;
 
-        for _ in 0..max_steps {
+        let prompt_assembly_ns = elapsed_ns(prompt_started);
+        for model_ordinal in 1..=max_steps {
             self.check_deadline(node_id)?;
             self.check_generation_budget(node_id, task, fp)?;
 
@@ -1256,7 +1641,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                                 .collect::<Vec<_>>(),
                             &model_argument_schemas,
                             match task.completion {
-                                TaskCompletion::ToolResult => {
+                                TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute => {
                                     trollm_models::fence::ToolCallGrammarMode::SingleToolCall
                                 }
                                 TaskCompletion::FlowRoute => {
@@ -1292,15 +1677,42 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 })?;
                 slot.generate(req.clone())
             };
-            let resp = match resp {
+            let mut resp = match resp {
                 Ok(resp) => resp,
                 Err(error) => {
-                    self.save_model_failure_diagnostic(node_id, node, task, fp, &req, None);
+                    let ms = t0.elapsed().as_millis() as u64;
+                    let mut diagnostics = error
+                        .downcast_ref::<trollm_models::ModelDiagnosticError>()
+                        .map(|error| error.diagnostics.clone());
+                    if let Some(diagnostics) = diagnostics.as_mut() {
+                        diagnostics.total_ms = Some(ms);
+                    }
+                    self.emit(EventType::ModelCall, json!({
+                        "slot":task.model,"node":node_id,"modelCallOrdinal":model_ordinal,
+                        "tokensIn":null,"tokensOut":null,"ms":ms,"diagnostics":diagnostics,
+                        "finishReason":null,"failed":true,"requestPromptUtf8Bytes":req.prompt.len(),
+                        "promptAssemblyNs":if model_ordinal == 1 { Some(prompt_assembly_ns) } else { None },
+                        "promptRenderNs":if model_ordinal == 1 { Some(prompt_render_ns) } else { None },
+                    })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                    self.save_model_diagnostic(
+                        node_id,
+                        node,
+                        task,
+                        fp,
+                        &req,
+                        Some(ModelFailureEvidence::Error {
+                            ms,
+                            diagnostics: diagnostics.as_ref(),
+                        }),
+                    );
                     self.check_deadline(node_id)?;
                     return Err(TaskFailure::new(ErrorClass::ModelError, error.to_string()));
                 }
             };
             let ms = t0.elapsed().as_millis() as u64;
+            if let Some(diagnostics) = resp.diagnostics.as_mut() {
+                diagnostics.total_ms = Some(ms);
+            }
 
             {
                 let frame = self.state.stack.last_mut().unwrap();
@@ -1319,7 +1731,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 EventType::ModelCall,
                 json!({
                     "slot": task.model, "node": node_id,
+                    "modelCallOrdinal":model_ordinal,"failed":false,
+                    "requestPromptUtf8Bytes":req.prompt.len(),
+                    "promptAssemblyNs":if model_ordinal == 1 { Some(prompt_assembly_ns) } else { None },
+                        "promptRenderNs":if model_ordinal == 1 { Some(prompt_render_ns) } else { None },
                     "tokensIn": resp.tokens_in, "tokensOut": resp.tokens_out, "ms": ms,
+                    "diagnostics": resp.diagnostics,
+                    "requestPromptSha256": hex_sha256(req.prompt.as_bytes()),
+                    "grammarSha256": req.grammar_gbnf.as_deref().map(|grammar| hex_sha256(grammar.as_bytes())),
                     "finishReason": match resp.finish {
                         FinishReason::Stop => "stop",
                         FinishReason::Length => "length",
@@ -1399,7 +1818,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             // Control and action calls may never share a generation. Validate
             // this before any gateway preflight or dispatch.
             if calls.iter().any(|c| c.server == "flow") {
-                if calls.len() != 1 || task.completion != TaskCompletion::FlowRoute {
+                if calls.len() != 1
+                    || !matches!(
+                        task.completion,
+                        TaskCompletion::FlowRoute | TaskCompletion::ToolOrRoute
+                    )
+                {
                     self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
                     return Err(TaskFailure::new(
                         ErrorClass::ToolCallParse,
@@ -1440,11 +1864,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         )
                     })?;
                 // Control calls have no response payload or appended tool result.
+                let call_context = self.next_call_context();
                 self.emit(
                     EventType::ToolCallResult,
                     json!({
                         "node": node_id, "taskRef": task_ref, "server": "flow", "tool": "choose",
-                        "source": "runtime_control", "gatewayResultCompactJsonUtf8Bytes": null,
+                        "source": "runtime_control", "callContext":call_context,
+                        "gatewayResultCompactJsonUtf8Bytes": null,
                         "toolResultContextCandidateUtf8Bytes": 0,
                     }),
                 )
@@ -1456,7 +1882,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     artifacts,
                 }));
             }
-            if task.completion == TaskCompletion::ToolResult && calls.len() != 1 {
+            if matches!(
+                task.completion,
+                TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute
+            ) && calls.len() != 1
+            {
                 self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
                 return Err(TaskFailure::new(
                     ErrorClass::ToolCallParse,
@@ -1467,7 +1897,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 ));
             }
             if calls.is_empty() {
-                if task.completion == TaskCompletion::FlowRoute {
+                if matches!(
+                    task.completion,
+                    TaskCompletion::FlowRoute | TaskCompletion::ToolOrRoute
+                ) {
                     self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
                     return Err(TaskFailure::new(
                         ErrorClass::VerificationFailed,
@@ -1475,7 +1908,36 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     ));
                 }
                 // No fence: this generation is the node's prose output (§5).
-                prose = Some(resp.text.trim().to_string());
+                let text = resp.text.trim().to_string();
+                for (name, output) in &task.output_contract.outputs {
+                    if let OutputSpec::FromModel {
+                        schema: Some(schema),
+                        ..
+                    } = output
+                    {
+                        // This is exactly the string all model-source bindings
+                        // publish, including same-source node overrides. Existing
+                        // generation limits apply; no artifact budget is required.
+                        let value = Value::String(text.clone());
+                        let valid = trollm_mcp::ArtifactSchema::compile(schema)
+                            .and_then(|schema| schema.validate(&value, usize::MAX));
+                        if valid.is_err() {
+                            self.save_model_failure_diagnostic(
+                                node_id,
+                                node,
+                                task,
+                                fp,
+                                &req,
+                                Some(&resp),
+                            );
+                            return Err(TaskFailure::new(
+                                ErrorClass::VerificationFailed,
+                                format!("output '{name}' model schema validation failed"),
+                            ));
+                        }
+                    }
+                }
+                prose = Some(text);
                 break;
             }
 
@@ -1548,6 +2010,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 self.check_deadline(node_id)?;
                 self.gateway
                     .set_deadline(Instant::now().checked_add(self.remaining_duration()));
+                let call_context = self.next_call_context();
+                self.gateway.set_call_context(Some(call_context.clone()));
                 self.gateway.validate_call(call).map_err(|e| {
                     self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
                     TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
@@ -1572,6 +2036,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                                 "node": node_id, "taskRef": task_ref,
                                 "server": call.server, "tool": call.tool,
                                 "args": call.args, "argsSha256": args_sha256,
+                                "callContext":call_context,
                             }),
                         )
                         .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?,
@@ -1595,21 +2060,31 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     self.mutation_outcome = crate::state::MutationOutcome::Unknown;
                 }
                 let t0 = Instant::now();
-                let result = match self.gateway.call(call) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let failure =
-                            TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {error}"));
-                        // A late failed mutation can already have taken effect.
-                        // Retain its original uncertainty before a run deadline
-                        // finalizes the run, including respond_partial limits.
-                        if self.remaining_duration().is_zero() {
-                            self.record_task_failure(node_id, &failure);
-                            self.check_deadline(node_id)?;
+                let result =
+                    match self
+                        .gateway
+                        .call_with_result_artifact(call, task.result_artifact.as_deref())
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let failure =
+                                TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {error}"));
+                            self.emit(EventType::Error, json!({
+                            "phase":"tool_call","node":node_id,"callContext":call_context,
+                            "class":failure.class.as_str(),"detail":failure.detail,"plan":fp.id,
+                            "ms":t0.elapsed().as_millis() as u64,"failed":true,
+                        })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
+                            self.tool_failure_observed = true;
+                            // A late failed mutation can already have taken effect.
+                            // Retain its original uncertainty before a run deadline
+                            // finalizes the run, including respond_partial limits.
+                            if self.remaining_duration().is_zero() {
+                                self.record_task_failure(node_id, &failure);
+                                self.check_deadline(node_id)?;
+                            }
+                            return Err(failure);
                         }
-                        return Err(failure);
-                    }
-                };
+                    };
                 if is_mutation
                     && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
                 {
@@ -1620,7 +2095,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 let gateway_result_bytes =
                     crate::json_size::compact_json_bytes(&result.content_for_model)
                         .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                let tool_context = (task.completion != TaskCompletion::ToolResult).then(|| {
+                let tool_context = (!matches!(task.completion, TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute)).then(|| {
                     // Display serializes the borrowed Value directly into the
                     // continuation string, without cloning the result tree.
                     format!(
@@ -1631,7 +2106,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 self.emit(
                     EventType::ToolCallResult,
                     json!({
-                        "taskRef": task_ref,
+                        "taskRef": task_ref, "callContext":call_context,
+                        "resultArtifact": task.result_artifact,
                         "argsHash": trollm_mcp::CacheStore::hash_args(&call.args, None, None),
                         "gatewayResultCompactJsonUtf8Bytes": gateway_result_bytes,
                         "toolResultContextCandidateUtf8Bytes": tool_context.as_ref().map_or(0, String::len),
@@ -1668,7 +2144,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     return Ok(TaskLoopOutcome::Cancelled);
                 }
 
-                if task.completion == TaskCompletion::ToolResult {
+                if matches!(
+                    task.completion,
+                    TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute
+                ) {
                     return Ok(TaskLoopOutcome::Completed(TaskOutcome {
                         // This mode forbids all model-prose output bindings.
                         route: None,
@@ -1709,6 +2188,36 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         request: &GenerateRequest,
         response: Option<&trollm_models::GenerateResponse>,
     ) {
+        self.save_model_diagnostic(
+            node_id,
+            node,
+            task,
+            fp,
+            request,
+            response.map(ModelFailureEvidence::Response),
+        );
+    }
+
+    fn save_model_diagnostic(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        task: &TaskDef,
+        fp: &FramePlan,
+        request: &GenerateRequest,
+        evidence: Option<ModelFailureEvidence<'_>>,
+    ) {
+        let response = match &evidence {
+            Some(ModelFailureEvidence::Response(response)) => Some(*response),
+            _ => None,
+        };
+        let failure = match &evidence {
+            Some(ModelFailureEvidence::Error { ms, diagnostics }) => Some(json!({
+                "ms": ms, "diagnostics": diagnostics,
+                "tokensIn": null, "tokensOut": null, "finishReason": null,
+            })),
+            _ => None,
+        };
         const MAX_BYTES: usize = 256 * 1024;
         fn bounded(text: &str) -> Value {
             const FIELD_BYTES: usize = 48 * 1024;
@@ -1730,11 +2239,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 "completion": task.completion,
             },
             "responseAvailable": response.is_some(),
+            "failure": failure,
             "response": response.map(|response| json!({
                 "text": bounded(&response.text), "tokensIn": response.tokens_in,
                 "tokensOut": response.tokens_out,
                 "finishReason": match response.finish { FinishReason::Stop => "stop", FinishReason::Length => "length", FinishReason::Timeout => "timeout", FinishReason::GrammarReject => "grammar-reject" },
                 "capacity": response.capacity,
+                "diagnostics": response.diagnostics,
                 "lengthCause": if response.finish != FinishReason::Length { None } else { Some(match response.capacity {
                     Some(capacity) if capacity.effective_max_tokens < request.max_tokens => "context-capacity",
                     Some(_) => "requested-output-ceiling", None => "unavailable"
@@ -1909,15 +2420,17 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             return self.finish_cancelled();
         }
         self.record_task_failure(node_id, &failure);
-        self.emit(
-            EventType::Error,
-            json!({
-                "class": failure.class.as_str(),
-                "detail": failure.detail,
-                "node": node_id,
-                "plan": fp.id,
-            }),
-        )?;
+        if !self.tool_failure_observed {
+            self.emit(
+                EventType::Error,
+                json!({
+                    "class": failure.class.as_str(),
+                    "detail": failure.detail,
+                    "node": node_id,
+                    "plan": fp.id,
+                }),
+            )?;
+        }
         let policy = node.on_error.clone().unwrap_or(OnError {
             retry: 0,
             backoff_s: 0,
@@ -1939,6 +2452,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 let remaining_duration = self.remaining_duration();
                 let deadline = Instant::now().checked_add(remaining_duration);
                 let delay = Duration::from_secs(policy.backoff_s).min(remaining_duration);
+                let wait_started = Instant::now();
+                let hold_before = self.observation_hold_ns();
                 let cancelled = if let Some(control) = &self.control {
                     control.wait_backoff_until(delay, deadline)
                 } else {
@@ -1950,6 +2465,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     }
                     false
                 };
+                let held = hold_before
+                    .zip(self.observation_hold_ns())
+                    .map_or(0, |(a, b)| b.saturating_sub(a));
+                self.retry_wait_ns = self
+                    .retry_wait_ns
+                    .saturating_add(elapsed_ns(wait_started).saturating_sub(held));
                 if cancelled {
                     return self.finish_cancelled();
                 }
@@ -1979,6 +2500,67 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         outcome: &TaskOutcome,
     ) -> Result<(), TaskFailure> {
         let contract = &task.output_contract;
+        if let Some(name) = &task.result_artifact {
+            if !outcome.artifacts.contains_key(name) {
+                return Err(TaskFailure::new(
+                    ErrorClass::VerificationFailed,
+                    format!("task resultArtifact requires current-call artifact '{name}'"),
+                ));
+            }
+        }
+        if task.completion == TaskCompletion::ToolOrRoute && outcome.route.is_some() {
+            // A declared control route is an explicit alternative to ordinary
+            // tool success. Publish no success outputs, including any aliases
+            // left by an earlier visit to this node. Original files stay saved.
+            let frame = self.state.stack.last_mut().unwrap();
+            vars_obj_mut(frame).remove(node_id);
+            frame.node_outputs.remove(node_id);
+            self.verified_binding_sizes = None;
+            return Ok(());
+        }
+        if task.completion == TaskCompletion::ToolOrRoute || task.result_artifact.is_some() {
+            let mut required = contract.require_artifact_complete.clone();
+            for (name, output) in &contract.outputs {
+                if matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.contains_key(name))
+                {
+                    continue;
+                }
+                if let OutputSpec::FromArtifact { from_artifact, .. } = output {
+                    required.push(from_artifact.clone());
+                }
+            }
+            if let Some(NodeOutputs::Task(outputs)) = &node.outputs {
+                for output in outputs.values() {
+                    if let NodeOutputBinding::FromArtifact { from_artifact, .. } = output {
+                        required.push(from_artifact.clone());
+                    }
+                }
+            }
+            if let Some(names) = node
+                .verify
+                .as_ref()
+                .and_then(|verify| verify.artifact_complete.as_ref())
+            {
+                required.push(names.clone());
+            }
+            if let Some(missing) = required
+                .iter()
+                .find(|name| !outcome.artifacts.contains_key(*name))
+            {
+                return Err(TaskFailure::new(
+                    ErrorClass::VerificationFailed,
+                    format!("tool-or-route success requires current-call artifact '{missing}'"),
+                ));
+            }
+        }
+        let artifact_budget = self
+            .state
+            .stack
+            .last()
+            .and_then(|frame| self.plan.find_plan(&plan_id_of_pin(&frame.plan)))
+            .map(|plan| plan.limits.artifact_max_mb.saturating_mul(1024 * 1024))
+            .unwrap_or(0);
+        let artifact_budget = usize::try_from(artifact_budget).unwrap_or(usize::MAX);
 
         // allowNoop (§4.3): a task with a tool allowlist that made no calls is
         // a no-op; the contract must explicitly accept that.
@@ -2010,6 +2592,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     from_artifact,
                     format,
                     view,
+                    schema,
                     type_,
                 } => {
                     let path = self.find_artifact(from_artifact, &outcome.artifacts)?;
@@ -2027,12 +2610,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             format!("reading artifact '{from_artifact}': {e}"),
                         )
                     })?;
-                    let v = parse_artifact_view(format, &bytes, view.as_ref()).map_err(|e| {
-                        TaskFailure::new(
-                            ErrorClass::ArtifactIo,
-                            format!("parsing artifact '{from_artifact}': {e}"),
-                        )
-                    })?;
+                    let v = parse_artifact_output(
+                        name,
+                        format,
+                        &bytes,
+                        view.as_ref(),
+                        schema.as_ref(),
+                        artifact_budget,
+                    )?;
                     check_output_type(name, &v, *type_)?;
                     binding_sizes.insert(name.clone(), json!({
                         "artifact": path, "fromArtifact": from_artifact,
@@ -2072,8 +2657,18 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                             Some("json") => ArtifactFormat::Json,
                             _ => ArtifactFormat::Jsonl,
                         };
-                        let v = parse_artifact_view(&fmt, &bytes, view.as_ref())
-                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                        let schema = match contract.outputs.get(name) {
+                            Some(OutputSpec::FromArtifact { schema, .. }) => schema.as_ref(),
+                            _ => None,
+                        };
+                        let v = parse_artifact_output(
+                            name,
+                            &fmt,
+                            &bytes,
+                            view.as_ref(),
+                            schema,
+                            artifact_budget,
+                        )?;
                         binding_sizes.insert(name.clone(), json!({
                             "artifact": path, "fromArtifact": from_artifact,
                             "artifactFileBytes": bytes.len(), "viewApplied": view.is_some(),
@@ -2268,18 +2863,48 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         if index >= items.len() {
             // Aggregate per §4.6 and transition onComplete: each declared
             // output name collects `body.outputs` across iterations.
+            let bounded = self.foreach_bounded_returns(node);
+            if bounded
+                && crate::json_size::compact_json_bytes(
+                    &self.state.foreach_cursors[node_id].results,
+                )? > 2 * 1024 * 1024
+            {
+                return self.finish_failed("foreach collected results exceed 2 MiB");
+            }
             let results = self.state.foreach_cursors[node_id].results.clone();
-            let frame = self.state.stack.last_mut().unwrap();
             let mut outputs_obj = Map::new();
             match &node.outputs {
                 Some(NodeOutputs::Foreach(spec)) => {
-                    for name in spec.keys() {
-                        outputs_obj.insert(name.clone(), Value::Array(results.clone()));
+                    for (name, collect) in spec {
+                        let value = Value::Array(results.clone());
+                        let value = match &collect.view {
+                            Some(view) => match view.apply(&value) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return self.finish_failed(&format!(
+                                        "foreach collection view: {error:#}"
+                                    ))
+                                }
+                            },
+                            None => value,
+                        };
+                        outputs_obj.insert(name.clone(), value);
                     }
                 }
                 _ => {
                     outputs_obj.insert("results".to_string(), Value::Array(results));
                 }
+            }
+            let frame = self.state.stack.last_mut().unwrap();
+            if self
+                .plan
+                .find_plan(&fp.id)
+                .is_some_and(|plan| plan.exports.is_some())
+            {
+                frame.node_outputs.insert(
+                    node_id.to_string(),
+                    outputs_obj.clone().into_iter().collect(),
+                );
             }
             let mut node_obj = Map::new();
             node_obj.insert("outputs".to_string(), Value::Object(outputs_obj));
@@ -2335,6 +2960,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         Ok(())
     }
 
+    fn foreach_bounded_returns(&self, node: &Node) -> bool {
+        matches!(&node.outputs, Some(NodeOutputs::Foreach(spec)) if spec.values().any(|collect| collect.view.is_some()))
+            || node
+                .body
+                .as_ref()
+                .and_then(|body| self.plan.find_plan(&body.flow_ref))
+                .is_some_and(|plan| plan.exports.is_some())
+    }
+
     /// Phase InBody: the body frame just popped; aggregate its outputs (§4.6),
     /// then push the between frame if declared.
     fn foreach_body_done(&mut self, node_id: &str, node: &Node) -> anyhow::Result<()> {
@@ -2368,12 +3002,24 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .and_then(|it| it.get(&effective_field))
             .cloned()
             .unwrap_or(Value::Null);
+        let mut entry = Map::new();
+        entry.insert(effective_field, key_value);
+        entry.insert("outcome".to_string(), Value::String(outcome));
+        entry.insert("outputs".to_string(), serde_json::to_value(&outputs)?);
+        if let Some(evidence) = returned.evidence {
+            entry.insert("evidence".to_string(), serde_json::to_value(evidence)?);
+        }
+        if self.foreach_bounded_returns(node) {
+            let results = &self.state.foreach_cursors[node_id].results;
+            let bytes = crate::json_size::compact_json_bytes(results)?;
+            let added =
+                crate::json_size::compact_json_bytes(&entry)? + usize::from(!results.is_empty());
+            if bytes.saturating_add(added) > 2 * 1024 * 1024 {
+                return self.finish_failed("foreach collected results exceed 2 MiB");
+            }
+        }
         {
             let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
-            let mut entry = Map::new();
-            entry.insert(effective_field, key_value);
-            entry.insert("outcome".to_string(), Value::String(outcome));
-            entry.insert("outputs".to_string(), serde_json::to_value(&outputs)?);
             cur.results.push(Value::Object(entry));
             cur.session_items += 1;
         }
@@ -2577,6 +3223,38 @@ fn check_output_type(name: &str, v: &Value, ty: OutputType) -> Result<(), TaskFa
         ));
     }
     Ok(())
+}
+
+fn parse_artifact_output(
+    name: &str,
+    format: &ArtifactFormat,
+    bytes: &[u8],
+    view: Option<&crate::artifact_view::ArtifactView>,
+    schema: Option<&Value>,
+    artifact_budget: usize,
+) -> Result<Value, TaskFailure> {
+    if schema.is_none() {
+        return parse_artifact_view(format, bytes, view)
+            .map_err(|error| TaskFailure::new(ErrorClass::ArtifactIo, error.to_string()));
+    }
+    let original = parse_artifact(format, bytes)
+        .map_err(|error| TaskFailure::new(ErrorClass::ArtifactIo, error.to_string()))?;
+    if let Some(schema) = schema {
+        let valid = trollm_mcp::ArtifactSchema::compile(schema)
+            .and_then(|schema| schema.validate(&original, artifact_budget));
+        if valid.is_err() {
+            return Err(TaskFailure::new(
+                ErrorClass::VerificationFailed,
+                format!("output '{name}' artifact schema validation failed"),
+            ));
+        }
+    }
+    match view {
+        Some(view) => view
+            .apply(&original)
+            .map_err(|error| TaskFailure::new(ErrorClass::ArtifactIo, error.to_string())),
+        None => Ok(original),
+    }
 }
 
 fn parse_artifact_view(
@@ -2787,6 +3465,7 @@ mod recovery_regressions {
                     context_remaining: 16,
                     effective_max_tokens: 16,
                 }),
+                diagnostics: None,
             })
         }
     }
@@ -3009,6 +3688,187 @@ mod recovery_regressions {
             crate::state::MutationOutcome::Unknown
         );
         drop(restored);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn observation_correlates_retries_identical_calls_and_distinct_epochs() {
+        struct RecordingGateway {
+            context: Option<trollm_mcp::CallContext>,
+            calls: Arc<std::sync::Mutex<Vec<trollm_mcp::CallContext>>>,
+        }
+        impl ToolGateway for RecordingGateway {
+            fn set_call_context(&mut self, context: Option<trollm_mcp::CallContext>) {
+                self.context = context;
+            }
+            fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>> {
+                Ok(vec![])
+            }
+            fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+                trollm_mcp::policy::ToolClass::Read
+            }
+            fn validate_call(&self, _: &ToolCall) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn call(&mut self, _: &ToolCall) -> anyhow::Result<ToolResult> {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(
+                    self.context
+                        .clone()
+                        .expect("exact context forwarded before dispatch"),
+                );
+                if calls.len() == 1 {
+                    anyhow::bail!("synthetic response lost");
+                }
+                Ok(ToolResult {
+                    content_for_model: json!({"ok":true}),
+                    artifacts: vec![],
+                    provenance: trollm_mcp::Provenance::Live,
+                })
+            }
+        }
+        let base = std::env::temp_dir().join(format!("observation-correlation-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("work.md"), "invoke the granted tool").unwrap();
+        let root = plan("correlation", "work", "  work: { kind: task, taskRef: work, onVerified: done, onError: { retry: 1, then: { status: failed, reason: exhausted } } }\n  done: { kind: end, outcome: succeeded }");
+        let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: work.md\n    completion: tool-result\n    tools: [tracker.read]", &base).unwrap();
+        let fence = r#"<tool_call>{"server":"tracker","tool":"read","args":{}}</tool_call>"#;
+        let run = RunDir::under(&base);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut exec = Executor::new(
+            root.clone(),
+            registry.clone(),
+            String::new(),
+            SlotMap::new().with("coder", MockModel::scripted([fence, fence])),
+            RecordingGateway {
+                context: None,
+                calls: calls.clone(),
+            },
+            run.clone(),
+        )
+        .unwrap();
+        assert_eq!(exec.run_until_blocked().unwrap(), RunStatus::Succeeded);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].epoch, calls[1].epoch);
+        assert_ne!(calls[0].attempt, calls[1].attempt);
+        assert_eq!((calls[0].call, calls[1].call), (1, 1));
+        let events = EventLog::read_all(&run.events_path()).unwrap();
+        let failure = events
+            .iter()
+            .find(|event| event["type"] == "error" && event["phase"] == "tool_call")
+            .unwrap();
+        let result = events
+            .iter()
+            .find(|event| event["type"] == "tool_call_result")
+            .unwrap();
+        assert_eq!(
+            failure["callContext"],
+            serde_json::to_value(&calls[0]).unwrap()
+        );
+        assert_eq!(
+            result["callContext"],
+            serde_json::to_value(&calls[1]).unwrap()
+        );
+        assert!(failure["ms"].is_u64());
+        let attempts: Vec<_> = events
+            .iter()
+            .filter(|event| event["measurement"].is_object())
+            .collect();
+        assert_eq!(attempts.len(), 3);
+        for attempt in attempts {
+            assert!(attempt["measurement"]["attemptObservedNs"].is_u64());
+            assert!(attempt["measurement"]["eventRecords"].as_u64().unwrap() > 0);
+            assert!(attempt["measurement"]["snapshotWrites"].is_u64());
+            assert_eq!(attempt["measurement"]["userHoldNs"], 0);
+        }
+        let model = events
+            .iter()
+            .find(|event| event["type"] == "model_call")
+            .unwrap();
+        assert_eq!(
+            model["requestPromptUtf8Bytes"],
+            "invoke the granted tool".len()
+        );
+        assert!(model["promptRenderNs"].is_u64());
+        assert_eq!(events.last().unwrap()["type"], "run_ended");
+        assert_eq!(exec.state.event_watermark, exec.log.last_seq());
+        assert!(events.last().unwrap()["measurement"]["attemptInclusiveNs"].is_null());
+        let old_epoch = exec.observation_epoch.clone();
+        drop(exec);
+        let restored = Executor::new(
+            root,
+            registry,
+            String::new(),
+            // Reconstruction validates model bindings even for terminal state.
+            SlotMap::new().with("coder", MockModel::scripted(["unused"])),
+            NoGateway,
+            run,
+        )
+        .unwrap();
+        assert_ne!(restored.observation_epoch, old_epoch);
+        drop(restored);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn observation_model_error_preserves_unknown_tokens_and_generic_hold_coverage() {
+        struct FailedModel;
+        impl ModelSlot for FailedModel {
+            fn generate(
+                &mut self,
+                _: GenerateRequest,
+            ) -> anyhow::Result<trollm_models::GenerateResponse> {
+                anyhow::bail!("synthetic model failure");
+            }
+        }
+        struct UnknownControl;
+        impl ExecutionControl for UnknownControl {
+            fn checkpoint(&self) -> bool {
+                false
+            }
+            fn wait_backoff(&self, _: Duration) -> bool {
+                false
+            }
+        }
+        let base = std::env::temp_dir().join(format!("observation-model-error-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("work.md"), "a UTF-8 prompt: 界").unwrap();
+        let root = plan("model-error","work","  work: { kind: task, taskRef: work, onVerified: done }\n  done: { kind: end, outcome: succeeded }");
+        let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work: { model: coder, prompt: work.md, outputContract: { allowNoop: true } }",&base).unwrap();
+        let run = RunDir::under(&base);
+        let mut exec = Executor::new(
+            root,
+            registry,
+            String::new(),
+            SlotMap::new().with("coder", FailedModel),
+            NoGateway,
+            run.clone(),
+        )
+        .unwrap();
+        exec.set_control(Arc::new(UnknownControl));
+        assert!(matches!(
+            exec.run_until_blocked().unwrap(),
+            RunStatus::Failed { .. }
+        ));
+        let events = EventLog::read_all(&run.events_path()).unwrap();
+        let model = events
+            .iter()
+            .find(|event| event["type"] == "model_call")
+            .unwrap();
+        assert_eq!(model["failed"], true);
+        assert!(model["tokensIn"].is_null() && model["tokensOut"].is_null());
+        assert_eq!(model["requestPromptUtf8Bytes"], "a UTF-8 prompt: 界".len());
+        assert!(model["ms"].is_u64());
+        assert_eq!(exec.state.counters.tokens, 0);
+        let attempt = events
+            .iter()
+            .find(|event| event["measurement"].is_object())
+            .unwrap();
+        for field in ["activeNs", "userHoldNs", "retryWaitNs"] {
+            assert!(attempt["measurement"][field].is_null());
+        }
+        drop(exec);
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -3347,12 +4207,231 @@ nodes:
             let mut resumed = executor(root, run.clone());
             assert_eq!(resumed.resume().unwrap(), RunStatus::Succeeded);
             let results = &resumed.state.stack[0].vars["each"]["outputs"]["results"];
+            assert!(
+                !resumed.state.stack[0].node_outputs.contains_key("each"),
+                "legacy collectors keep the old return map"
+            );
             assert_eq!(results.as_array().unwrap().len(), 1);
             assert_eq!(results[0]["outcome"], "succeeded");
             assert_eq!(results[0]["outputs"]["work"]["note"], "durable");
             drop(resumed);
             std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn cold_restore_keeps_root_preparation_clock_after_child_returns() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        root.limits.timeout_s = 60;
+        let mut child = plan("child", "done", "  done: { kind: end, outcome: succeeded }");
+        child.limits.timeout_s = 1;
+        root.subflows.insert("child".into(), child);
+        let base =
+            std::env::temp_dir().join(format!("restore-preparation-clock-{}", Uuid::new_v4()));
+        let run = RunDir::under(&base);
+        let mut original = executor(root.clone(), run.clone());
+        original.state.stack[0].vars = json!({"items": [{"id": 7, "children": []}]});
+        advance_foreach(&mut original, "each");
+        let now = now_ms();
+        original.state.stack[0].counters.started_at = now - 5_000;
+        original.state.stack[1].counters.started_at = now;
+        original.write_snapshot().unwrap();
+        drop(original);
+
+        let mut restored = executor(root, run.clone());
+        assert!(restored.restored);
+        assert_eq!(restored.state.stack.len(), 2);
+        assert!(restored.remaining_duration() <= Duration::from_secs(1));
+        let preparation_allowance = restored.remaining_run_duration();
+        assert!(preparation_allowance > Duration::from_secs(50));
+        assert!(preparation_allowance < Duration::from_secs(60));
+
+        // The resumed child returns. The foreground clock can then expand to
+        // the root's remaining time while preparation retains that root clock.
+        let fp = restored.frame_plan("child").unwrap();
+        let end = restored.plan.subflows["child"].nodes["done"].clone();
+        restored.step_end("done", &end, &fp).unwrap();
+        assert_eq!(restored.state.stack.len(), 1);
+        assert!(restored.remaining_duration() > Duration::from_secs(50));
+        assert_eq!(restored.resume().unwrap(), RunStatus::Succeeded);
+        drop(restored);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn explicit_returns_keep_large_originals_and_compact_collections_across_resume() {
+        for count in 1..=3 {
+            for boundary in 0..=2 {
+                let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+                root.exports = Some(BTreeMap::from([(
+                    "collected".into(),
+                    FromBinding {
+                        from: "each.outputs.results".into(),
+                    },
+                )]));
+                let NodeOutputs::Foreach(collections) = root
+                    .nodes
+                    .get_mut("each")
+                    .unwrap()
+                    .outputs
+                    .as_mut()
+                    .unwrap()
+                else {
+                    panic!()
+                };
+                let mut compact = collections["results"].clone();
+                compact.view = Some(serde_json::from_value(json!({"fields":{"id":true,"outcome":true,"outputs":{"request":true}},"maxBytes":4096})).unwrap());
+                collections.insert("compact".into(), compact);
+                let mut child = plan("child", "done", "  done: { kind: end, outcome: succeeded }");
+                child.exports = Some(BTreeMap::from([
+                    (
+                        "request".into(),
+                        FromBinding {
+                            from: "items.request".into(),
+                        },
+                    ),
+                    (
+                        "amount".into(),
+                        FromBinding {
+                            from: "accepted.outputs.amount".into(),
+                        },
+                    ),
+                ]));
+                root.subflows.insert("child".into(), child);
+                let run = RunDir::under(
+                    &std::env::temp_dir().join(format!("exports-{}", Uuid::new_v4())),
+                );
+                let mut exec = executor(root.clone(), run.clone());
+                exec.state.stack[0].vars = json!({"items":(0..count).map(|i| json!({"id":i,"children":{"request":format!("original {i}")}})).collect::<Vec<_>>()});
+                let original = "large original evidence ".repeat(8192);
+                for index in 0..count {
+                    advance_foreach(&mut exec, "each");
+                    let child = exec.state.stack.last_mut().unwrap();
+                    child.vars["accepted"] = json!({"outputs":{"amount":"1.25"}});
+                    child.node_outputs.insert(
+                        "accepted".into(),
+                        BTreeMap::from([
+                            ("amount".into(), json!("1.25")),
+                            ("original".into(), json!(format!("{index} {original}"))),
+                        ]),
+                    );
+                    let fp = exec.frame_plan("child").unwrap();
+                    let end = exec.plan.subflows["child"].nodes["done"].clone();
+                    // Simulate a logical tool result being overwritten between children.
+                    std::fs::write(
+                        run.artifacts_dir().join("latest.json"),
+                        format!("item {index}"),
+                    )
+                    .unwrap();
+                    exec.step_end("done", &end, &fp).unwrap();
+                    if boundary == 0 {
+                        drop(exec);
+                        exec = executor(root.clone(), run.clone());
+                    }
+                    advance_foreach(&mut exec, "each");
+                    if boundary == 1 {
+                        drop(exec);
+                        exec = executor(root.clone(), run.clone());
+                    }
+                }
+                // Completion publishes both collections and retains them for exports.
+                advance_foreach(&mut exec, "each");
+                drop(exec);
+                let mut exec = executor(root.clone(), run.clone());
+                assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+                let outputs = &exec.state.stack[0].node_outputs["each"];
+                assert_eq!(outputs["compact"].as_array().unwrap().len(), count);
+                assert!(outputs["compact"][0].get("evidence").is_none());
+                for (index, entry) in outputs["results"].as_array().unwrap().iter().enumerate() {
+                    assert_eq!(entry["outputs"]["request"], format!("original {index}"));
+                    assert!(entry["outputs"].get("accepted").is_none());
+                    let bytes =
+                        std::fs::read(run.path().join(entry["evidence"]["path"].as_str().unwrap()))
+                            .unwrap();
+                    assert_eq!(hex_sha256(&bytes), entry["evidence"]["sha256"]);
+                    let archived: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(
+                        archived["accepted"]["original"],
+                        format!("{index} {original}")
+                    );
+                }
+                assert!(crate::json_size::compact_json_bytes(&outputs["compact"]).unwrap() < 4096);
+                assert!(crate::json_size::compact_json_bytes(&exec.state).unwrap() < 16384);
+                drop(exec);
+                std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn missing_export_and_archive_limit_stop_before_later_children() {
+        for failure in ["missing", "archive", "count"] {
+            let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+            let mut child = plan("child", "done", "  done: { kind: end, outcome: succeeded }");
+            child.exports = Some(BTreeMap::from([(
+                "result".into(),
+                FromBinding {
+                    from: "result".into(),
+                },
+            )]));
+            root.subflows.insert("child".into(), child);
+            let run = RunDir::under(
+                &std::env::temp_dir().join(format!("exports-fail-{}", Uuid::new_v4())),
+            );
+            let mut exec = executor(root, run.clone());
+            exec.state.stack[0].vars =
+                json!({"items":[{"id":1,"children":[]},{"id":2,"children":[]}]});
+            advance_foreach(&mut exec, "each");
+            if failure != "missing" {
+                exec.state.stack.last_mut().unwrap().vars["result"] = json!("ready");
+            }
+            if failure == "archive" {
+                exec.state.stack.last_mut().unwrap().node_outputs.insert(
+                    "too_big".into(),
+                    BTreeMap::from([("original".into(), json!("x".repeat(8 * 1024 * 1024)))]),
+                );
+            }
+            if failure == "count" {
+                exec.state.child_evidence_returns = 128;
+            }
+            let fp = exec.frame_plan("child").unwrap();
+            let end = exec.plan.subflows["child"].nodes["done"].clone();
+            exec.step_end("done", &end, &fp).unwrap();
+            assert_eq!(exec.state.status, StateStatus::Failed);
+            assert!(exec.state.pending_return.is_none());
+            assert_eq!(exec.state.foreach_cursors["each"].index, 0);
+            assert!(exec.state.foreach_cursors["each"].results.is_empty());
+            drop(exec);
+            std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_failing_child_transition_prevents_next_item() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        root.subflows.insert(
+            "child".into(),
+            plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        let run =
+            RunDir::under(&std::env::temp_dir().join(format!("child-fail-{}", Uuid::new_v4())));
+        let mut exec = executor(root, run.clone());
+        exec.state.stack[0].vars = json!({"items":[{"id":1,"children":[]},{"id":2,"children":[]}]});
+        advance_foreach(&mut exec, "each");
+        exec.transit(
+            "unresolved",
+            &Transition::Inline(InlineTransition {
+                status: InlineStatus::Failed,
+                reason: "uncertain observation".into(),
+                resume_at: None,
+            }),
+        )
+        .unwrap();
+        assert!(matches!(exec.resume().unwrap(), RunStatus::Failed { .. }));
+        assert_eq!(exec.state.foreach_cursors["each"].index, 0);
+        assert!(exec.state.foreach_cursors["each"].results.is_empty());
+        drop(exec);
+        std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
     }
 
     #[test]

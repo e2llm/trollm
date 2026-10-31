@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
@@ -28,7 +29,7 @@ import uniffi.trollm_uniffi.TrollmRuntime
  * (§10). The run executes on Rust-side threads; this service's only jobs
  * are to support execution across UI backgrounding, hold the wake
  * lock, and reflect progress in the notification. It observes the run the
- * same way the UI does: `poll_status` over the UniFFI surface.
+ * same way the UI does: `observe_run` over the UniFFI surface.
  */
 class RunService : Service() {
 
@@ -37,6 +38,8 @@ class RunService : Service() {
     private val activeRuns = ActiveRuns()
     private val observationVersions = mutableMapOf<String, Long>()
     private var wakeLock: PowerManager.WakeLock? = null
+    private val wakeLease = RunWakeLease()
+    private var destroyed = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -60,14 +63,31 @@ class RunService : Service() {
     private fun observe(runId: String, runtime: TrollmRuntime) {
         val version = observationVersions[runId]
         scope.launch {
+            var cursor = 0uL
             var previousText = getString(R.string.notification_run_active)
             while (isActive) {
+                // A repeated start can change the generation without replacing
+                // this observer. Snapshot it for each fresh read, not just once.
+                val readVersion = withContext(Dispatchers.Main) {
+                    observationVersions[runId].takeUnless { destroyed }
+                } ?: break
                 val presentation = runCatching {
-                    val status = runtime.pollStatus(runId)
+                    val observation = runtime.observeRun(runId, cursor)
+                    val status = observation.status
+                    cursor = status.lastSeq
                     presentRun(status.phase, status.workerActive, status.activity)
-                }.getOrNull() // A transient read error does not relinquish a live owner's lock.
+                }.getOrNull() // Read errors keep ownership, but cannot renew the timed lease.
                 if (presentation != null) {
                     if (!presentation.observeInBackground) break
+                    withContext(Dispatchers.Main) {
+                        if (!destroyed && observationVersions[runId] == readVersion &&
+                            wakeLease.shouldRenew(SystemClock.elapsedRealtime(), presentation.observeInBackground)) {
+                            wakeLock?.let {
+                                it.acquire(RunWakeLease.TIMEOUT_MS)
+                                wakeLease.acquired(SystemClock.elapsedRealtime())
+                            }
+                        }
+                    }
                     if (presentation.text != previousText &&
                         ContextCompat.checkSelfPermission(this@RunService, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
                         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -78,6 +98,7 @@ class RunService : Service() {
                 delay(1000)
             }
             withContext(Dispatchers.Main) {
+                if (destroyed) return@withContext
                 // Resume may restart observation while a paused observer is
                 // detaching. Honor that newer request before releasing ownership.
                 if (observationVersions[runId] != version) {
@@ -86,8 +107,7 @@ class RunService : Service() {
                 }
                 observationVersions.remove(runId)
                 if (activeRuns.complete(runId)) {
-                    wakeLock?.let { if (it.isHeld) it.release() }
-                    wakeLock = null
+                    releaseWakeLock()
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 } else {
@@ -99,20 +119,29 @@ class RunService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         scope.cancel()
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseWakeLock()
         super.onDestroy()
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
+        // Repeated starts are not fresh evidence that a worker is still active.
+        if (wakeLock != null) return
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "trollm:run").apply {
-            // Safety ceiling: a run is bounded by the plan's timeoutS, but the
-            // wake lock must never leak past an hour regardless.
-            acquire(60 * 60 * 1000L)
+            // Non-reference-counted reacquisition replaces the timed release;
+            // one explicit release still clears the whole lease.
+            setReferenceCounted(false)
+            acquire(RunWakeLease.TIMEOUT_MS)
         }
+        wakeLease.acquired(SystemClock.elapsedRealtime())
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wakeLease.reset()
     }
 
     private fun notification(text: String, runId: String): Notification {

@@ -9,10 +9,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-rc.6"
+version = "0.1.0-rc.8"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.metadata.android]
 # Increase for every newly distributed APK; independent of the product version.
-version-code = 7
+version-code = 43

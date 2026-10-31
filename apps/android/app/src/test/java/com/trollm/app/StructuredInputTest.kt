@@ -3,6 +3,7 @@ package com.trollm.app
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -118,4 +119,15 @@ class StructuredInputTest {
         assertTrue(setup.inputFields.isEmpty())
         assertFalse(StructuredInput.errors(emptyList(), emptyMap()).isNotEmpty())
     }
+    @Test fun originalFormBytesRetainWhitespaceBeforeIndependentNormalization() {
+        val declared = listOf(StructuredInputField("text", "Text", required = true))
+        val values = mapOf("text" to " \t😀é\n ")
+        val raw = StructuredInput.serializeOriginal(declared, values)
+        val normalized = StructuredInput.serialize(declared, values, "")
+        assertEquals(values.getValue("text"), JSONObject(raw).getString("text"))
+        assertEquals("😀é", JSONObject(normalized).getString("text"))
+        assertNotEquals(raw, normalized)
+        rejects { StructuredInput.serializeOriginal(declared, mapOf("text" to " ".repeat(65536))) }
+    }
+
 }

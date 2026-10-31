@@ -33,9 +33,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -43,6 +41,9 @@ use trollm_core::exec::{ExecutionControl, SlotMap};
 use trollm_core::{EventType, ExecutionPlan, Executor, RunDir, RunStatus, TaskRegistry};
 use trollm_mcp::{EventSink, McpGateway, PolicySet, ProxyEvent, RootCertificates, ServerConfig};
 use trollm_models::{GenerateRequest, GenerateResponse, ModelSlot};
+
+mod preparation;
+use preparation::Preparations;
 
 use crate::authentication::RunAuthentication;
 use crate::bundle::{BundleManifest, MANIFEST_NAME};
@@ -66,11 +67,14 @@ pub enum RunPhase {
 
 /// Shared control block for one run.
 pub struct RunControl {
+    pub(crate) observation: Arc<Mutex<crate::observation::Projection>>,
+    hold_ns: AtomicU64,
     cancel: AtomicBool,
     worker_active: AtomicBool,
     /// Keep the only available failure diagnostic if its sidecar could not be written.
     volatile_worker_failure: AtomicBool,
     activity: Mutex<Option<RunActivityApi>>,
+    preparation_activity: Mutex<HashMap<String, RunActivityApi>>,
     pause_requested: AtomicBool,
     gate: Mutex<PauseGate>,
     gate_cond: Condvar,
@@ -93,7 +97,13 @@ impl RunControl {
     }
 
     pub fn activity(&self) -> Option<RunActivityApi> {
-        self.activity.lock().unwrap().clone()
+        self.activity.lock().unwrap().clone().or_else(|| {
+            let background = self.preparation_activity.lock().unwrap();
+            background
+                .get("coder")
+                .or_else(|| background.values().next())
+                .cloned()
+        })
     }
 
     fn set_activity(&self, activity: Option<RunActivityApi>) {
@@ -112,6 +122,7 @@ impl RunControl {
             bail!(CANCEL_MARKER);
         }
         if self.pause_requested.load(Ordering::SeqCst) {
+            let hold_started = Instant::now();
             {
                 let mut status = self.status.lock().unwrap();
                 *status = RunPhase::Paused {
@@ -126,12 +137,22 @@ impl RunControl {
                     .wait(guard)
                     .map_err(|_| anyhow!("run control lock poisoned"))?;
             }
+            self.record_hold(hold_started);
             *self.status.lock().unwrap() = RunPhase::Running;
         }
         if self.cancel.load(Ordering::SeqCst) {
             bail!(CANCEL_MARKER);
         }
         Ok(())
+    }
+
+    fn record_hold(&self, started: Instant) {
+        let ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let _ = self
+            .hold_ns
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(ns))
+            });
     }
 
     pub fn request_pause(&self) {
@@ -169,6 +190,7 @@ impl RunControl {
                 return false;
             }
             if self.pause_requested.load(Ordering::SeqCst) {
+                let hold_started = Instant::now();
                 *self.status.lock().unwrap() = RunPhase::Paused {
                     reason: "user-requested (cooperative hold; not a persisted §4.4 pause)"
                         .to_string(),
@@ -178,6 +200,7 @@ impl RunControl {
                 {
                     guard = self.gate_cond.wait(guard).unwrap();
                 }
+                self.record_hold(hold_started);
                 *self.status.lock().unwrap() = RunPhase::Running;
                 continue;
             }
@@ -199,6 +222,9 @@ impl RunControl {
 }
 
 impl ExecutionControl for RunControl {
+    fn observation_hold_ns(&self) -> Option<u64> {
+        Some(self.hold_ns.load(Ordering::Relaxed))
+    }
     fn checkpoint(&self) -> bool {
         self.before_boundary().is_err()
     }
@@ -268,6 +294,7 @@ fn generation_timeout() -> GenerateResponse {
         tokens_out: 0,
         finish: trollm_models::FinishReason::Timeout,
         capacity: None,
+        diagnostics: None,
     }
 }
 
@@ -281,8 +308,7 @@ pub struct ControlledModel {
 impl ModelSlot for ControlledModel {
     fn generate(&mut self, mut req: GenerateRequest) -> Result<GenerateResponse> {
         let budget = GenerationBudget::new(req.max_duration);
-        // Own cleanup before a hold can exhaust the budget or cancellation can
-        // return early, including an inherited Starting activity.
+        // Clean up inherited activity even when a hold consumes the budget.
         let _activity = ActivityGuard(self.ctl.clone());
         self.ctl.before_boundary()?;
         if budget.expired() {
@@ -293,7 +319,14 @@ impl ModelSlot for ControlledModel {
         }));
         req.max_duration = budget.remaining();
         let mut resp = self.inner.generate(req)?;
-        self.ctl.before_boundary()?;
+        self.ctl
+            .before_boundary()
+            .map_err(|error| match resp.diagnostics.clone() {
+                Some(diagnostics) => {
+                    trollm_models::ModelDiagnosticError::attach(error, diagnostics)
+                }
+                None => error,
+            })?;
         if budget.expired() {
             resp.finish = trollm_models::FinishReason::Timeout;
         }
@@ -316,7 +349,21 @@ struct WorkerGuard(Arc<RunControl>);
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
         self.0.set_activity(None);
+        // Readers capture phase then projection in this same order. Release
+        // event/report storage even for retained volatile-failure handles; only
+        // their irreplaceable diagnostic must survive the inactive cache bound.
+        let _phase = self
+            .0
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.0.worker_active.store(false, Ordering::SeqCst);
+        let mut view = self
+            .0
+            .observation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *view = crate::observation::Projection::default();
     }
 }
 
@@ -327,6 +374,9 @@ pub struct ControlledGateway {
 }
 
 impl trollm_mcp::ToolGateway for ControlledGateway {
+    fn set_call_context(&mut self, context: Option<trollm_mcp::CallContext>) {
+        self.inner.set_call_context(context);
+    }
     fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.inner.set_deadline(deadline);
     }
@@ -353,6 +403,25 @@ impl trollm_mcp::ToolGateway for ControlledGateway {
     fn call(&mut self, call: &trollm_mcp::ToolCall) -> Result<trollm_mcp::ToolResult> {
         self.ctl.before_boundary()?;
         self.inner.call(call)
+    }
+
+    fn begin_result_artifact_attempt(
+        &mut self,
+        server: &str,
+        tool: &str,
+        name: &str,
+    ) -> Result<()> {
+        self.ctl.before_boundary()?;
+        self.inner.begin_result_artifact_attempt(server, tool, name)
+    }
+
+    fn call_with_result_artifact(
+        &mut self,
+        call: &trollm_mcp::ToolCall,
+        name: Option<&str>,
+    ) -> Result<trollm_mcp::ToolResult> {
+        self.ctl.before_boundary()?;
+        self.inner.call_with_result_artifact(call, name)
     }
 }
 
@@ -418,8 +487,75 @@ struct RunPlan {
     argument_constraints: std::collections::BTreeMap<String, Value>,
 }
 
-fn load_run_plan(base: &Path, flow_sha: &str) -> Result<RunPlan> {
-    let dir = base.join("bundles").join(flow_sha);
+/// Closed first declared-text execution shape. Other declared sources require
+/// their own explicit native mapping, never a relaxed generic source flag.
+fn validate_declared_text(plan: &RunPlan) -> Result<()> {
+    use trollm_core::plan::{NodeKind, RunLimitPolicy, Transition};
+    use trollm_core::registry::TaskCompletion;
+    let root = &plan.plan;
+    if root.source_baseline.is_some()
+        || plan.registry.source_baseline.is_some()
+        || !root.subflows.is_empty()
+        || root.models.len() != 1
+        || !root.models.contains_key("coder")
+        || !root.mcp.servers.is_empty()
+        || !root.mcp.policies.is_empty()
+        || root.limits.max_steps != 1
+        || root.limits.max_reasoner_calls != 0
+        || root.limits.max_tokens_total == 0
+        || root.limits.timeout_s == 0
+        || root.limits.artifact_max_mb == 0
+        || root.on_limit != RunLimitPolicy::Abort
+        || root.nodes.len() != 2
+        || plan.registry.tasks.len() != 1
+    {
+        bail!("declared text profile requires one bounded no-tool generation");
+    }
+    let entry = root
+        .nodes
+        .get(&root.entry_step)
+        .context("declared entry unavailable")?;
+    if !matches!(entry.kind, NodeKind::Task)
+        || entry.routes.is_some()
+        || entry.on_error.is_some()
+        || entry.verify.is_some()
+        || entry.outputs.is_some()
+    {
+        bail!("declared text task routing unsupported");
+    }
+    let task = plan
+        .registry
+        .tasks
+        .get(entry.task_ref.as_deref().unwrap_or(""))
+        .context("declared text task unavailable")?;
+    if task.model != "coder"
+        || !task.tools.is_empty()
+        || task.completion != TaskCompletion::ModelProse
+        || task.loop_spec.is_some()
+        || task.mutations.is_some()
+        || task.tool_arguments.is_some()
+        || task.result_artifact.is_some()
+    {
+        bail!("declared text task cannot loop, retry or use tools");
+    }
+    let Some(Transition::Node(next)) = &entry.on_verified else {
+        bail!("declared text requires one terminal transition");
+    };
+    let end = root
+        .nodes
+        .get(next)
+        .context("declared text end unavailable")?;
+    if !matches!(end.kind, NodeKind::End) || end.outcome.as_deref() != Some("succeeded") {
+        bail!("declared text terminal outcome unsupported");
+    }
+    Ok(())
+}
+
+fn load_run_plan(base: &Path, flow_sha: &str, installation: Option<&str>) -> Result<RunPlan> {
+    let dir = match installation {
+        Some(id) => crate::bundle::revision_dir(base, id)?,
+        None => base.join("bundles").join(flow_sha),
+    };
     let manifest_bytes = fs::read(dir.join(MANIFEST_NAME)).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             anyhow!(TrollmError::NotFound(format!(
@@ -652,14 +788,26 @@ fn verify_weights(
     ctl: &RunControl,
     budget: &GenerationBudget,
 ) -> Result<()> {
+    verify_weights_with_checkpoint(path, expected, slot, &|| {
+        ctl.before_boundary()?;
+        budget.check()
+    })
+}
+
+#[cfg(any(feature = "llama", test))]
+fn verify_weights_with_checkpoint(
+    path: &Path,
+    expected: &str,
+    slot: &str,
+    checkpoint: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("no weights for model slot '{slot}' ({})", path.display()))?;
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        ctl.before_boundary()?;
-        budget.check()?;
+        checkpoint()?;
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -693,46 +841,77 @@ struct LazyModel {
 #[cfg(any(feature = "llama", test))]
 impl ModelSlot for LazyModel {
     fn generate(&mut self, mut req: GenerateRequest) -> Result<GenerateResponse> {
-        let budget = GenerationBudget::new(req.max_duration);
-        let _activity = ActivityGuard(self.ctl.clone());
-        self.ctl.before_boundary()?;
-        if budget.expired() {
-            return Ok(generation_timeout());
-        }
-        if self.loaded.is_none() {
-            self.ctl.set_activity(Some(RunActivityApi::VerifyingModel {
-                slot: self.slot.clone(),
-            }));
-            let verification = match &self.weights {
-                Some((path, expected)) => {
-                    verify_weights(path, expected, &self.slot, &self.ctl, &budget)
-                        .map(|()| path.clone())
-                }
-                None => verify_model_weights(&self.base, &self.slot, &self.ctl, &budget),
-            };
-            let path = match verification {
-                Ok(path) => path,
-                Err(error) if error.is::<GenerationExpired>() => return Ok(generation_timeout()),
-                Err(error) => return Err(error),
-            };
+        let mut loading_diagnostics = trollm_models::GenerationDiagnostics::default();
+        let result = (|| -> Result<GenerateResponse> {
+            let budget = GenerationBudget::new(req.max_duration);
+            let _activity = ActivityGuard(self.ctl.clone());
             self.ctl.before_boundary()?;
             if budget.expired() {
                 return Ok(generation_timeout());
             }
-            self.ctl.set_activity(Some(RunActivityApi::LoadingModel {
+            if self.loaded.is_none() {
+                self.ctl.set_activity(Some(RunActivityApi::VerifyingModel {
+                    slot: self.slot.clone(),
+                }));
+                let verify_started = Instant::now();
+                let verification = match &self.weights {
+                    Some((path, expected)) => {
+                        verify_weights(path, expected, &self.slot, &self.ctl, &budget)
+                            .map(|()| path.clone())
+                    }
+                    None => verify_model_weights(&self.base, &self.slot, &self.ctl, &budget),
+                };
+                loading_diagnostics.weight_verify_ms =
+                    Some(verify_started.elapsed().as_millis() as u64);
+                let path = match verification {
+                    Ok(path) => path,
+                    Err(error) if error.is::<GenerationExpired>() => {
+                        return Ok(generation_timeout())
+                    }
+                    Err(error) => return Err(error),
+                };
+                self.ctl.before_boundary()?;
+                if budget.expired() {
+                    return Ok(generation_timeout());
+                }
+                self.ctl.set_activity(Some(RunActivityApi::LoadingModel {
+                    slot: self.slot.clone(),
+                }));
+                let load_started = Instant::now();
+                let loaded = (self.loader)(&path);
+                loading_diagnostics.load_ms = Some(load_started.elapsed().as_millis() as u64);
+                self.loaded = Some(loaded?);
+            }
+            self.ctl.before_boundary()?;
+            if budget.expired() {
+                return Ok(generation_timeout());
+            }
+            self.ctl.set_activity(Some(RunActivityApi::Generating {
                 slot: self.slot.clone(),
             }));
-            self.loaded = Some((self.loader)(&path)?);
+            req.max_duration = budget.remaining();
+            self.loaded.as_mut().unwrap().generate(req)
+        })();
+        match result {
+            Ok(mut response) => {
+                response
+                    .diagnostics
+                    .get_or_insert_default()
+                    .include_loading(&loading_diagnostics);
+                Ok(response)
+            }
+            Err(error) => {
+                let mut diagnostics = error
+                    .downcast_ref::<trollm_models::ModelDiagnosticError>()
+                    .map(|error| error.diagnostics.clone())
+                    .unwrap_or_default();
+                diagnostics.include_loading(&loading_diagnostics);
+                Err(trollm_models::ModelDiagnosticError::attach(
+                    error,
+                    diagnostics,
+                ))
+            }
         }
-        self.ctl.before_boundary()?;
-        if budget.expired() {
-            return Ok(generation_timeout());
-        }
-        self.ctl.set_activity(Some(RunActivityApi::Generating {
-            slot: self.slot.clone(),
-        }));
-        req.max_duration = budget.remaining();
-        self.loaded.as_mut().unwrap().generate(req)
     }
 }
 
@@ -750,13 +929,16 @@ fn slot_decls(plan: &ExecutionPlan, out: &mut Vec<(String, u32)>) {
 #[cfg(feature = "llama")]
 fn build_slots(
     plan: &ExecutionPlan,
+    registry: &TaskRegistry,
     base: &Path,
     configuration: Option<&RunConfiguration>,
     ctl: Arc<RunControl>,
-) -> Result<SlotMap<ControlledModel>> {
+) -> Result<(SlotMap<ControlledModel>, Preparations)> {
     let mut decls = Vec::new();
     slot_decls(plan, &mut decls);
     let mut map = SlotMap::new();
+    let mut preparations = Preparations::default();
+    let selected = preparation::selected_slots(plan, registry);
     for (name, ctx) in decls {
         if map.contains(&name) {
             continue;
@@ -787,25 +969,31 @@ fn build_slots(
             loaded: None,
             ctl: ctl.clone(),
         };
+        let inner: Box<dyn ModelSlot> = if selected.contains(&name) {
+            preparations.add(lazy)
+        } else {
+            Box::new(lazy)
+        };
         map.insert(
             name.clone(),
             ControlledModel {
                 slot: name,
-                inner: Box::new(lazy),
+                inner,
                 ctl: ctl.clone(),
             },
         );
     }
-    Ok(map)
+    Ok((map, preparations))
 }
 
 #[cfg(all(feature = "stub", not(feature = "llama")))]
 fn build_slots(
     plan: &ExecutionPlan,
+    _registry: &TaskRegistry,
     _base: &Path,
     _configuration: Option<&RunConfiguration>,
     ctl: Arc<RunControl>,
-) -> Result<SlotMap<ControlledModel>> {
+) -> Result<(SlotMap<ControlledModel>, Preparations)> {
     let mut decls = Vec::new();
     slot_decls(plan, &mut decls);
     let mut map = SlotMap::new();
@@ -819,16 +1007,17 @@ fn build_slots(
             },
         );
     }
-    Ok(map)
+    Ok((map, Preparations::default()))
 }
 
 #[cfg(not(any(feature = "llama", feature = "stub")))]
 fn build_slots(
     _plan: &ExecutionPlan,
+    _registry: &TaskRegistry,
     _base: &Path,
     _configuration: Option<&RunConfiguration>,
     _ctl: Arc<RunControl>,
-) -> Result<SlotMap<ControlledModel>> {
+) -> Result<(SlotMap<ControlledModel>, Preparations)> {
     bail!(
         "this build has no model runtime: built without the 'llama' feature \
          (and without the 'stub' test feature)"
@@ -850,6 +1039,7 @@ impl ModelSlot for StubModel {
             text,
             finish: trollm_models::FinishReason::Stop,
             capacity: None,
+            diagnostics: None,
         })
     }
 }
@@ -865,10 +1055,6 @@ pub struct SpawnedRun {
 /// Spawn a worker thread for a new run (fresh RunDir) or, when
 /// `resume_run_id` is set, over the existing run dir (core's resume/crash
 /// path: `Executor::new` restores from `state.snapshot.json`).
-#[cfg_attr(
-    not(any(feature = "llama", feature = "stub")),
-    allow(unused_variables, unreachable_code)
-)]
 pub fn spawn_run(
     base: PathBuf,
     flow_sha: String,
@@ -877,20 +1063,173 @@ pub fn spawn_run(
     resume_run_id: Option<String>,
     configuration: Option<RunConfiguration>,
 ) -> Result<SpawnedRun> {
+    spawn_source_run(
+        base,
+        flow_sha,
+        user_input,
+        token_provider,
+        resume_run_id,
+        configuration,
+        None,
+    )
+}
+
+#[cfg_attr(
+    not(any(feature = "llama", feature = "stub")),
+    allow(unused_variables, unreachable_code)
+)]
+pub fn spawn_source_run(
+    base: PathBuf,
+    flow_sha: String,
+    user_input: String,
+    token_provider: Option<SharedTokenProvider>,
+    resume_run_id: Option<String>,
+    configuration: Option<RunConfiguration>,
+    source: Option<(String, Value)>,
+) -> Result<SpawnedRun> {
     // Fail synchronously when this build carries no model runtime at all.
     #[cfg(not(any(feature = "llama", feature = "stub")))]
     bail!(TrollmError::ModelUnavailable(
         "this build has no model runtime: built without the 'llama' feature (and without the 'stub' test feature)".into()
     ));
 
-    let mut run_plan = load_run_plan(&base, &flow_sha)?;
-    let user_input = match crate::bundle::installed_flow_setup(&base, &flow_sha)?
-        .and_then(|setup| setup.input)
-    {
+    let (installation, source_association) = match source {
+        Some((id, association)) => (Some(id), Some(association)),
+        None => (None, None),
+    };
+    // A resumed run uses only its original installation sidecar. Never select
+    // the latest dependency revision, even when the entry flow is unchanged.
+    let installation = match &resume_run_id {
+        Some(id) => match fs::read(base.join("runs").join(id).join("installation.json")) {
+            Ok(bytes) => Some(serde_json::from_slice::<String>(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if base
+                    .join("runs")
+                    .join(id)
+                    .join("source-association.json")
+                    .exists()
+                {
+                    bail!("source run is missing its pinned installation identity");
+                }
+                None
+            }
+            Err(error) => return Err(error.into()),
+        },
+        None => installation,
+    };
+    let mut source_association = match &resume_run_id {
+        Some(id) if installation.is_some() => Some(serde_json::from_slice::<Value>(&fs::read(
+            base.join("runs").join(id).join("source-association.json"),
+        )?)?),
+        _ => source_association,
+    };
+    if let Some(id) = &installation {
+        let source = source_association
+            .as_ref()
+            .context("source run requires retained installation association")?;
+        let installed = &source["installation"];
+        let identity = &source["descriptor"]["identity"];
+        if installed["installationSha256"].as_str() != Some(id.as_str())
+            || installed["flowSha256"].as_str() != Some(flow_sha.as_str())
+            || identity["manifestSha256"].as_str() != Some(id.as_str())
+            || identity["entryFlowSha256"].as_str() != Some(flow_sha.as_str())
+            || installed["archiveSha256"].as_str().is_none()
+            || installed["archiveSha256"] != identity["sha256"]
+        {
+            bail!("source installation association does not match selected native revision");
+        }
+    }
+    let mut run_plan = load_run_plan(&base, &flow_sha, installation.as_deref())?;
+    let setup = match &installation {
+        Some(id) => crate::bundle::revision_setup(&base, id)?,
+        None => crate::bundle::installed_flow_setup(&base, &flow_sha)?,
+    };
+    let declared = source_association
+        .as_ref()
+        .is_some_and(|source| source["descriptor"]["source"]["origin"] == "DECLARED");
+    if declared {
+        validate_declared_text(&run_plan)?;
+        if source_association.as_ref().unwrap()["descriptor"]["source"]["schemaVersion"]
+            != "moray.declared-native-text.v1"
+        {
+            bail!("declared source schema unsupported");
+        }
+        let input = setup
+            .as_ref()
+            .and_then(|setup| setup.input.as_ref())
+            .context("declared text input unavailable")?;
+        let fields = input
+            .fields
+            .as_ref()
+            .context("declared text input unavailable")?;
+        if fields.len() != 1
+            || !fields[0].required
+            || !matches!(fields[0].kind, crate::setup::InputKind::Text)
+            || !input.tool_arguments.is_empty()
+            || !setup.as_ref().unwrap().connections.is_empty()
+        {
+            bail!("declared text requires one required text field and no connections");
+        }
+    }
+    let supplied_admission = source_association
+        .as_ref()
+        .and_then(|source| source.get("inputAdmission"));
+    if declared && supplied_admission.is_none() {
+        bail!("declared source requires native input admission");
+    }
+    let original_input = if let Some(id) = &resume_run_id {
+        if supplied_admission.is_some() {
+            // Continuation retains the original input, never resubmits edited UI values.
+            String::from_utf8(crate::setup::read_input_evidence(
+                &base.join("runs").join(id),
+                "input.original.json",
+                65536,
+            )?)?
+        } else {
+            user_input.clone()
+        }
+    } else {
+        user_input.clone()
+    };
+    let mut admitted_input = None;
+    let user_input = match setup.and_then(|setup| setup.input) {
         Some(input) => {
-            let resolved = input.resolve(&user_input)?;
+            if let Some(supplied) = supplied_admission {
+                let apk = supplied["apkNormalized"]
+                    .as_str()
+                    .context("missing APK input agreement")?;
+                let admitted = crate::setup::admit_source_input(&input, &original_input, apk)?;
+                if &admitted != supplied {
+                    bail!("source input admission identity mismatch");
+                }
+                if let Some(id) = &resume_run_id {
+                    let directory = base.join("runs").join(id);
+                    let saved: Value = serde_json::from_slice(&crate::setup::read_input_evidence(
+                        &directory,
+                        "input-admission.json",
+                        524288,
+                    )?)?;
+                    if saved != admitted
+                        || crate::setup::read_input_evidence(
+                            &directory,
+                            "input.normalized.json",
+                            65536,
+                        )? != apk.as_bytes()
+                    {
+                        bail!("retained input admission changed");
+                    }
+                }
+                if resume_run_id.is_some() && user_input != apk {
+                    bail!("source continuation input changed");
+                }
+                admitted_input = Some(admitted);
+            }
+            let resolved = input.resolve(&original_input)?;
             run_plan.argument_constraints = resolved.argument_constraints;
             resolved.canonical
+        }
+        None if supplied_admission.is_some() || declared => {
+            bail!("structured source input unavailable")
         }
         None => user_input,
     };
@@ -907,6 +1246,18 @@ pub fn spawn_run(
         None => RunDir::under(&base),
     };
     let run_id = run_dir.run_id().to_string();
+    if let Some(source) = &mut source_association {
+        if resume_run_id.is_some() {
+            if source["nativeRunId"].as_str() != Some(run_id.as_str()) {
+                bail!("source association belongs to a different native run");
+            }
+        } else {
+            source["nativeRunId"] = Value::String(run_id.clone());
+            // One native attempt spans explicit cold continuation of this run.
+            // Reporting retries do not allocate a new run or attempt.
+            source["nativeAttemptId"] = Value::String(format!("{run_id}-source-1"));
+        }
+    }
 
     // Resume always uses recorded effective settings; UI/default changes cannot
     // silently select different weights or endpoints for an existing run.
@@ -920,12 +1271,23 @@ pub fn spawn_run(
         configuration.apply_to_plan(&mut run_plan.plan);
     }
 
+    let observation =
+        crate::observation::Projection::seed(&base, &run_id).unwrap_or_else(|error| {
+            // Core still performs its own authoritative reconstruction and publishes
+            // its usual failure. A disposable observer cannot replace that path.
+            let mut view = crate::observation::Projection::default();
+            view.report_error = Some(format!("observation seed failed: {error:#}"));
+            view
+        });
     let status = Arc::new(Mutex::new(RunPhase::Running));
     let control = Arc::new(RunControl {
+        hold_ns: AtomicU64::new(0),
+        observation: Arc::new(Mutex::new(observation)),
         cancel: AtomicBool::new(false),
         worker_active: AtomicBool::new(true),
         volatile_worker_failure: AtomicBool::new(false),
         activity: Mutex::new(Some(RunActivityApi::Starting)),
+        preparation_activity: Mutex::new(HashMap::new()),
         pause_requested: AtomicBool::new(false),
         gate: Mutex::new(PauseGate::default()),
         gate_cond: Condvar::new(),
@@ -944,6 +1306,29 @@ pub fn spawn_run(
     // does not carry it; documented in OPEN QUESTIONS).
     if resume_run_id.is_none() {
         run_dir.create_dirs()?;
+        if let Some(source) = &source_association {
+            trollm_core::artifacts::write_atomic(
+                run_dir.path(),
+                "source-association.json",
+                &serde_json::to_vec(source)?,
+            )?;
+        }
+        if let Some(id) = &installation {
+            trollm_core::artifacts::write_atomic(
+                run_dir.path(),
+                "installation.json",
+                &serde_json::to_vec(id)?,
+            )?;
+        }
+        if let Some(admission) = &admitted_input {
+            for (name, bytes) in [
+                ("input.original.json", original_input.as_bytes().to_vec()),
+                ("input.normalized.json", user_input.as_bytes().to_vec()),
+                ("input-admission.json", serde_json::to_vec(admission)?),
+            ] {
+                trollm_core::artifacts::write_atomic(run_dir.path(), name, &bytes)?;
+            }
+        }
         fs::write(run_dir.path().join("user_input.txt"), &user_input)?;
         if let Some(configuration) = &configuration {
             configuration.save(run_dir.path())?;
@@ -1023,7 +1408,13 @@ fn drive(
         inner: gateway,
         ctl: ctl.clone(),
     };
-    let slots = build_slots(&run_plan.plan, &base, configuration.as_ref(), ctl.clone())?;
+    let (slots, mut preparations) = build_slots(
+        &run_plan.plan,
+        &run_plan.registry,
+        &base,
+        configuration.as_ref(),
+        ctl.clone(),
+    )?;
     let mut exec = Executor::new(
         run_plan.plan,
         run_plan.registry,
@@ -1033,6 +1424,12 @@ fn drive(
         run_dir,
     )?;
     exec.set_control(ctl.clone());
+    let observation = ctl.observation.clone();
+    exec.set_event_sink(Arc::new(move |value, line| {
+        if let Ok(mut view) = observation.lock() {
+            view.committed(value, line);
+        }
+    }));
     // A repaired cold startup supersedes a previous worker failure. Preserve
     // that failure until reconstruction actually succeeds, then let the core
     // snapshot be authoritative again.
@@ -1049,6 +1446,7 @@ fn drive(
     // Reconstruction is complete. Execution may wait in authored backoff
     // without invoking a model, so Starting must not survive into that wait.
     ctl.set_activity(None);
+    start_run_preparations(&mut preparations, &exec)?;
 
     // Cold resume carries its intent into worker startup; it must not depend
     // on a buffered command sent before the worker publishes its pause.
@@ -1065,8 +1463,28 @@ fn drive(
             Ok(RunStatus::Failed { reason }) => RunPhase::Failed { reason },
             Err(error) => return Err(error),
         };
-        ctl.set_activity(None);
         let terminal = !matches!(phase, RunPhase::Running | RunPhase::Paused { .. });
+        if terminal {
+            preparations.stop_and_join();
+        }
+        // Resolve complete prose once, before publishing terminal success. The
+        // compact source node survives eviction from the technical-event ring.
+        if matches!(phase, RunPhase::Succeeded) {
+            let source = ctl
+                .observation
+                .lock()
+                .ok()
+                .and_then(|view| view.report_node.clone());
+            let report =
+                final_report_for_node(&base.join("runs").join(exec.run_id()), source.as_deref());
+            if let Ok(mut view) = ctl.observation.lock() {
+                match report {
+                    Ok(report) => view.final_report = report,
+                    Err(error) => view.report_error = Some(format!("{error:#}")),
+                }
+            }
+        }
+        ctl.set_activity(None);
         {
             let mut gate = ctl.gate.lock().unwrap();
             gate.plan_paused = matches!(phase, RunPhase::Paused { .. });
@@ -1077,6 +1495,7 @@ fn drive(
         }
         if ctl.is_cancelled() {
             exec.try_cancel()?;
+            preparations.stop_and_join();
             *ctl.status.lock().unwrap() = RunPhase::Failed {
                 reason: "cancelled".to_string(),
             };
@@ -1089,6 +1508,7 @@ fn drive(
             }
             Ok(RunCommand::Cancel) => {
                 exec.try_cancel()?;
+                preparations.stop_and_join();
                 *ctl.status.lock().unwrap() = RunPhase::Failed {
                     reason: "cancelled".to_string(),
                 };
@@ -1097,6 +1517,13 @@ fn drive(
             Err(_) => return Ok(()), // runtime dropped; snapshot is persisted
         }
     }
+}
+
+fn start_run_preparations<M: ModelSlot, G: trollm_mcp::ToolGateway>(
+    preparations: &mut Preparations,
+    exec: &Executor<M, G>,
+) -> Result<()> {
+    preparations.start(exec.remaining_run_duration())
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1664,13 @@ pub fn final_report(base: &Path, run_id: &str) -> Result<Option<String>> {
             }
         }
     })?;
+    final_report_for_node(&dir, last_done_node.as_deref())
+}
+
+pub(crate) fn final_report_for_node(
+    dir: &Path,
+    last_done_node: Option<&str>,
+) -> Result<Option<String>> {
     let Some(last_done_node) = last_done_node else {
         return Ok(None);
     };
@@ -1250,7 +1684,7 @@ pub fn final_report(base: &Path, run_id: &str) -> Result<Option<String>> {
     let Some(outputs) = state
         .stack
         .first()
-        .and_then(|frame| frame.node_outputs.get(&last_done_node))
+        .and_then(|frame| frame.node_outputs.get(last_done_node))
     else {
         return Ok(None);
     };
@@ -1431,6 +1865,93 @@ mod regression_tests {
         let (events, last) = tail_events(&base.0, "partial", 1).unwrap();
         assert_eq!(last, 2);
         assert_eq!(events, vec![(2, "run_started".into(), second)]);
+    }
+
+    #[test]
+    fn cached_observation_revalidates_only_after_invalidation_and_keeps_full_report() {
+        let base = TrustTestDir::new("live-observation-cold");
+        let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
+        let id = "00000000-0000-0000-0000-000000000078";
+        let dir = rt.base.join("runs").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let mut state = trollm_core::RunState::fresh(id, "flow@sha256:absent", "report");
+        state.status = trollm_core::state::StateStatus::Succeeded;
+        let prose = "complete report\n".repeat(40_000);
+        state.stack[0]
+            .node_outputs
+            .insert("report".into(), [("text".into(), json!(prose))].into());
+        fs::write(
+            dir.join("state.snapshot.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let path = dir.join("events.jsonl");
+        let mut log = trollm_core::EventLog::open(&path, id).unwrap();
+        log.append(
+            EventType::Transition,
+            json!({"key":"onVerified", "from":"report"}),
+        )
+        .unwrap();
+        for _ in 0..400 {
+            log.append(EventType::ModelCall, Value::Null).unwrap();
+        }
+        drop(log);
+        let first = rt.observe_run(id.into(), 0).unwrap();
+        assert!(first.older_events_omitted && first.has_more);
+        assert_eq!(first.status.final_report.as_deref(), Some(prose.as_str()));
+        assert_eq!(first.status.last_seq, 401);
+        // A corrupt old prefix proves idle cached polls do not scan the journal.
+        fs::write(&path, "malformed old prefix\n").unwrap();
+        for _ in 0..10 {
+            let idle = rt.observe_run(id.into(), 401).unwrap();
+            assert!(idle.events.is_empty());
+            assert_eq!(idle.status.final_report.as_deref(), Some(prose.as_str()));
+        }
+        assert!(rt.tail_events(id.into(), 401).is_err());
+        assert!(rt.poll_status(id.into()).is_err());
+        rt.invalidate_observation(id.into()).unwrap();
+        assert!(rt.observe_run(id.into(), 401).is_err());
+    }
+
+    #[test]
+    fn live_observation_follows_worker_activity_pause_success_and_failure() {
+        let base = TrustTestDir::new("live-observation-lifecycle");
+        let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
+        let id = "00000000-0000-0000-0000-000000000079";
+        let (handle, _) = handle();
+        rt.runs.insert(id.into(), handle.clone());
+        let status = rt.observe_run(id.into(), 0).unwrap().status;
+        assert!(status.worker_active);
+        assert_eq!(status.activity, Some(RunActivityApi::Starting));
+        assert!(rt.invalidate_observation(id.into()).is_err());
+        *handle.status.lock().unwrap() = RunPhase::Paused {
+            reason: "synthetic hold".into(),
+        };
+        let status = rt.observe_run(id.into(), 0).unwrap().status;
+        assert!(status.worker_active && status.activity.is_none());
+        handle.control.observation.lock().unwrap().final_report = Some("full report".into());
+        *handle.status.lock().unwrap() = RunPhase::Succeeded;
+        let status = rt.observe_run(id.into(), 0).unwrap().status;
+        assert!(!status.worker_active && status.activity.is_none());
+        assert_eq!(status.final_report.as_deref(), Some("full report"));
+        *handle.status.lock().unwrap() = RunPhase::Failed {
+            reason: "worker failed".into(),
+        };
+        let status = rt.observe_run(id.into(), 0).unwrap().status;
+        assert!(matches!(status.phase, crate::RunPhaseApi::Failed { .. }));
+        assert!(status.final_report.is_none());
+        // Projection poisoning is an observation error, never a new dispatch.
+        let projection = handle.control.observation.clone();
+        let _ = std::thread::spawn(move || {
+            let _view = projection.lock().unwrap();
+            panic!("synthetic observation loss");
+        })
+        .join();
+        assert!(rt.observe_run(id.into(), 0).is_err());
+        assert!(matches!(
+            *handle.status.lock().unwrap(),
+            RunPhase::Failed { .. }
+        ));
     }
 
     #[test]
@@ -1683,6 +2204,51 @@ mod regression_tests {
     }
 
     #[test]
+    fn controlled_gateway_forwards_task_result_artifact_attempt_and_dispatch() {
+        use trollm_mcp::ToolGateway;
+        let base = TrustTestDir::new("task-result-forwarding");
+        let artifacts_dir = base.0.join("artifacts");
+        let inner = McpGateway::new(
+            vec![],
+            trollm_mcp::PolicySet::from_yaml_str(
+                "fixture.read: {class: read, resultArtifact: browser-text}",
+            )
+            .unwrap(),
+            base.0.join("cache"),
+            artifacts_dir.clone(),
+            None,
+        )
+        .unwrap();
+        let (handle, _) = handle();
+        let mut gateway = ControlledGateway {
+            inner,
+            ctl: handle.control.clone(),
+        };
+        gateway
+            .begin_result_artifact_attempt("fixture", "read", "selected-original")
+            .unwrap();
+        let meta = artifacts_dir.join("selected-original.json.meta.json");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&meta).unwrap()).unwrap()["complete"],
+            false
+        );
+        fs::remove_file(&meta).unwrap();
+        // No remote server is configured. Re-created metadata proves the storage
+        // option reached the concrete gateway before ordinary call validation.
+        assert!(gateway
+            .call_with_result_artifact(
+                &trollm_mcp::ToolCall {
+                    server: "fixture".into(),
+                    tool: "read".into(),
+                    args: json!({})
+                },
+                Some("selected-original")
+            )
+            .is_err());
+        assert!(meta.is_file());
+    }
+
+    #[test]
     fn tool_free_gateway_ignores_optional_mcp_trust_configuration() {
         let base = TrustTestDir::new("tool-free");
         fs::write(base.0.join("trust/mcp-roots.pem"), b"invalid").unwrap();
@@ -1912,10 +2478,13 @@ mod regression_tests {
     fn handle() -> (Arc<RunHandle>, Receiver<RunCommand>) {
         let status = Arc::new(Mutex::new(RunPhase::Running));
         let control = Arc::new(RunControl {
+            hold_ns: AtomicU64::new(0),
+            observation: Arc::new(Mutex::new(crate::observation::Projection::default())),
             cancel: AtomicBool::new(false),
             worker_active: AtomicBool::new(true),
             volatile_worker_failure: AtomicBool::new(false),
             activity: Mutex::new(Some(RunActivityApi::Starting)),
+            preparation_activity: Mutex::new(HashMap::new()),
             pause_requested: AtomicBool::new(false),
             gate: Mutex::new(PauseGate::default()),
             gate_cond: Condvar::new(),
@@ -2367,6 +2936,7 @@ mod regression_tests {
                 tokens_out: 1,
                 finish: trollm_models::FinishReason::Stop,
                 capacity: None,
+                diagnostics: None,
             })
         }
     }
@@ -2406,6 +2976,492 @@ mod regression_tests {
         }
     }
 
+    #[test]
+    fn preparation_selects_only_referenced_slots_coder_first_with_two_slot_bound() {
+        let mut plan: ExecutionPlan = serde_yaml::from_str(include_str!(
+            "../../../flows/examples/minimal-summary.flow.yaml"
+        ))
+        .unwrap();
+        let mut registry: TaskRegistry = serde_yaml::from_str(include_str!(
+            "../../../flows/tasks/minimal-summary.tasks.yaml"
+        ))
+        .unwrap();
+        let coder = registry.tasks["summarize-text"].clone();
+        let mut child = plan.clone();
+        child.nodes.get_mut("summarize").unwrap().task_ref = Some("reason".into());
+        let mut reasoner = coder.clone();
+        reasoner.model = "reasoner".into();
+        registry.tasks.insert("reason".into(), reasoner);
+        let mut unused = coder.clone();
+        unused.model = "unused".into();
+        registry.tasks.insert("unused-task".into(), unused);
+        plan.subflows.insert("child".into(), child);
+        assert_eq!(
+            preparation::selected_slots(&plan, &registry),
+            vec!["coder", "reasoner"]
+        );
+        let mut extra = coder;
+        extra.model = "extra".into();
+        registry.tasks.insert("extra-task".into(), extra);
+        let mut extra_node = plan.nodes["summarize"].clone();
+        extra_node.task_ref = Some("extra-task".into());
+        plan.nodes.insert("extra".into(), extra_node);
+        assert_eq!(
+            preparation::selected_slots(&plan, &registry),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn preparation_drop_wakes_held_workers_and_loader_panic_is_retained() {
+        for panics in [false, true] {
+            let base = TrustTestDir::new("prepare-drop-panic");
+            let path = base.0.join("weights.gguf");
+            fs::write(&path, b"abc").unwrap();
+            let (handle, _) = handle();
+            let mut lazy = lazy_fixture(
+                path,
+                handle.control.clone(),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+            );
+            if panics {
+                lazy.loader = Box::new(|_| panic!("synthetic native panic"));
+            } else {
+                handle.control.request_pause();
+            }
+            let mut preparations = Preparations::default();
+            let mut model = preparations.add(lazy);
+            preparations.start(Duration::from_secs(60)).unwrap();
+            if panics {
+                preparations.finish_for_test();
+            }
+            let (finished, received) = channel();
+            let cleanup = std::thread::spawn(move || {
+                drop(preparations);
+                finished.send(()).unwrap();
+            });
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
+            cleanup.join().unwrap();
+            handle.control.request_resume();
+            let error = model.generate(request()).unwrap_err().to_string();
+            if panics {
+                assert!(error.contains("worker panicked"));
+            } else {
+                assert!(error.contains(CANCEL_MARKER));
+            }
+            assert!(handle
+                .control
+                .preparation_activity
+                .lock()
+                .unwrap()
+                .is_empty());
+            assert_eq!(handle.control.hold_ns.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn parallel_preparation_overlaps_reuses_and_reports_once() {
+        let base = TrustTestDir::new("parallel-prepare");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"abc").unwrap();
+        let (handle, _) = handle();
+        handle.control.set_activity(None);
+        let (entered_tx, entered_rx) = channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let loads = Arc::new(AtomicU64::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut preparations = Preparations::default();
+        let mut models = Vec::new();
+        for slot in ["reasoner", "coder"] {
+            let mut lazy = lazy_fixture(
+                path.clone(),
+                handle.control.clone(),
+                loads.clone(),
+                Arc::new(AtomicU64::new(0)),
+            );
+            lazy.slot = slot.into();
+            let entered = entered_tx.clone();
+            let release = release.clone();
+            let requests = requests.clone();
+            let loads = loads.clone();
+            lazy.loader = Box::new(move |_| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                entered.send(()).unwrap();
+                let (gate, wake) = &*release;
+                let mut ready = gate.lock().unwrap();
+                while !*ready {
+                    let (next, timed) = wake.wait_timeout(ready, Duration::from_secs(3)).unwrap();
+                    ready = next;
+                    if timed.timed_out() && !*ready {
+                        bail!("synthetic load release timed out");
+                    }
+                }
+                Ok(Box::new(BudgetRecordingModel(requests.clone())))
+            });
+            models.push(preparations.add(lazy));
+        }
+        preparations.start(Duration::from_secs(5)).unwrap();
+        // Both loaders must enter before either is allowed to finish.
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            handle.control.activity(),
+            Some(RunActivityApi::LoadingModel {
+                slot: "coder".into()
+            })
+        );
+        handle.control.set_activity(Some(RunActivityApi::Starting));
+        let foreground = handle.control.activity();
+        {
+            let (gate, wake) = &*release;
+            *gate.lock().unwrap() = true;
+            wake.notify_all();
+        }
+        preparations.finish_for_test();
+        drop(preparations); // Removes only background activity.
+        assert_eq!(handle.control.activity(), foreground);
+        fs::write(&path, b"changed after verification").unwrap();
+        for mut model in models {
+            let first = model.generate(request()).unwrap().diagnostics.unwrap();
+            assert_eq!(first.preparation_async, Some(true));
+            assert!(first.preparation_wait_ms.is_some());
+            assert!(first.weight_verify_ms.is_some());
+            assert!(first.load_ms.is_some());
+            let warm = model.generate(request()).unwrap().diagnostics.unwrap();
+            assert!(warm.preparation_async.is_none());
+            assert!(warm.load_ms.is_none());
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn preparation_failure_is_deferred_and_retained_without_reload() {
+        let base = TrustTestDir::new("prepare-bad-checksum");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"corrupt").unwrap();
+        let (handle, _) = handle();
+        handle.control.set_activity(None);
+        let loads = Arc::new(AtomicU64::new(0));
+        let lazy = lazy_fixture(
+            path.clone(),
+            handle.control.clone(),
+            loads.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut preparations = Preparations::default();
+        let mut model = preparations.add(lazy);
+        preparations.start(Duration::from_secs(5)).unwrap();
+        // Background failure by itself does not fail a run using another slot.
+        preparations.finish_for_test();
+        drop(preparations);
+        assert_eq!(*handle.status.lock().unwrap(), RunPhase::Running);
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        let error = model.generate(request()).unwrap_err();
+        assert!(error.to_string().contains("mismatch"));
+        let diagnostics = &error
+            .downcast_ref::<trollm_models::ModelDiagnosticError>()
+            .unwrap()
+            .diagnostics;
+        assert_eq!(diagnostics.preparation_async, Some(true));
+        assert!(diagnostics.load_ms.is_none());
+        fs::write(&path, b"abc").unwrap();
+        assert!(model.generate(request()).is_err());
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        // A reconstructed run owns a fresh verified slot; the failed slot above
+        // stays failed even after the backing file is repaired.
+        let reconstructed = lazy_fixture(
+            path,
+            handle.control.clone(),
+            loads.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut next_run = Preparations::default();
+        let mut recovered = next_run.add(reconstructed);
+        next_run.start(Duration::from_secs(5)).unwrap();
+        next_run.finish_for_test();
+        assert_eq!(recovered.generate(request()).unwrap().text, "fake response");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn preparation_wait_uses_call_budget_and_cleanup_joins_native_load() {
+        let base = TrustTestDir::new("prepare-wait-budget");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"abc").unwrap();
+        let (handle, _) = handle();
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let mut lazy = lazy_fixture(
+            path,
+            handle.control.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        lazy.loader = Box::new(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(3))
+                .context("synthetic load release")?;
+            Ok(Box::new(BudgetRecordingModel(recorded.clone())))
+        });
+        let mut preparations = Preparations::default();
+        let model = preparations.add(lazy);
+        preparations.start(Duration::from_secs(5)).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut controlled = ControlledModel {
+            slot: "coder".into(),
+            inner: model,
+            ctl: handle.control.clone(),
+        };
+        let generator = std::thread::spawn(move || {
+            let mut req = request();
+            req.max_duration = Some(Duration::from_millis(100));
+            controlled.generate(req).unwrap()
+        });
+        let started = Instant::now();
+        while handle.control.activity()
+            != Some(RunActivityApi::LoadingModel {
+                slot: "coder".into(),
+            })
+        {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+        let response = generator.join().unwrap();
+        assert_eq!(response.finish, trollm_models::FinishReason::Timeout);
+        let diagnostics = response.diagnostics.unwrap();
+        assert_eq!(diagnostics.preparation_async, Some(true));
+        assert!(diagnostics.preparation_wait_ms.unwrap() >= 90);
+        assert!(requests.lock().unwrap().is_empty());
+        let (dropped_tx, dropped_rx) = channel();
+        let cleanup = std::thread::spawn(move || {
+            drop(preparations);
+            dropped_tx.send(()).unwrap();
+        });
+        assert!(dropped_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        cleanup.join().unwrap();
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(handle
+            .control
+            .preparation_activity
+            .lock()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn preparation_can_finish_after_a_returned_child_deadline() {
+        use trollm_core::state::{ForeachCursor, ForeachPhase, StateStatus};
+        use trollm_mcp::{ToolCall, ToolDescriptor, ToolGateway, ToolResult};
+
+        struct NoTools;
+        impl ToolGateway for NoTools {
+            fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
+                Ok(vec![])
+            }
+            fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+                trollm_mcp::policy::ToolClass::Read
+            }
+            fn validate_call(&self, _: &ToolCall) -> Result<()> {
+                bail!("unexpected tool")
+            }
+            fn call(&mut self, _: &ToolCall) -> Result<ToolResult> {
+                bail!("unexpected tool")
+            }
+        }
+
+        let base = TrustTestDir::new("prepare-after-child");
+        fs::write(base.0.join("reason.md"), "Give a brief answer.").unwrap();
+        let mut root = ExecutionPlan::from_yaml_str(
+            r#"
+schemaVersion: ledger.execution-plan.v1
+id: root
+version: 1
+input: { promptTemplate: "" }
+limits: { maxSteps: 10, maxReasonerCalls: 1, maxTokensTotal: 1000, timeoutS: 60, artifactMaxMb: 1 }
+onLimit: abort
+models: { reasoner: { ctx: 4096 } }
+mcp: { servers: [], policies: {} }
+entryStep: each
+nodes:
+  each:
+    kind: foreach
+    items: { from: items }
+    itemKey: id
+    bindAs: item
+    enumeration: snapshot
+    ordering: source
+    body: { flowRef: child }
+    outputs: { results: { collect: body.outputs, indexBy: itemKey } }
+    onEmpty: reason
+    onComplete: reason
+  reason: { kind: task, taskRef: answer, onVerified: done }
+  done: { kind: end, outcome: succeeded }
+"#,
+        )
+        .unwrap();
+        let child = ExecutionPlan::from_yaml_str(
+            r#"
+schemaVersion: ledger.execution-plan.v1
+id: child
+version: 1
+input: { promptTemplate: "" }
+limits: { maxSteps: 2, maxReasonerCalls: 0, maxTokensTotal: 1000, timeoutS: 3, artifactMaxMb: 1 }
+onLimit: abort
+models: { reasoner: { ctx: 4096 } }
+mcp: { servers: [], policies: {} }
+entryStep: done
+nodes:
+  done: { kind: end, outcome: succeeded }
+"#,
+        )
+        .unwrap();
+        let child_pin = child.pin();
+        root.subflows.insert("child".into(), child);
+        let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  answer:\n    model: reasoner\n    prompt: reason.md\n    tools: []\n    outputContract: { outputs: { report: { from: model, type: prose } } }", &base.0).unwrap();
+        let run = RunDir::under(&base.0);
+        run.create_dirs().unwrap();
+        fs::write(
+            run.artifacts_dir().join("each.snapshot.jsonl"),
+            "{\"id\":1}\n",
+        )
+        .unwrap();
+        let mut state = trollm_core::RunState::fresh(run.run_id(), &root.pin(), "each");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        state.stack[0].counters.started_at = now - 5_000;
+        let mut child_frame = trollm_core::RunState::fresh(run.run_id(), &child_pin, "done")
+            .stack
+            .remove(0);
+        child_frame.counters.started_at = now;
+        let child_deadline_ms = now + 3_000;
+        state.stack.push(child_frame);
+        state.status = StateStatus::Paused;
+        state.foreach_cursors.insert(
+            "each".into(),
+            ForeachCursor {
+                index: 0,
+                snapshot_ref: "artifacts/each.snapshot.jsonl".into(),
+                session_items: 0,
+                results: vec![],
+                phase: ForeachPhase::InBody,
+            },
+        );
+        fs::write(run.snapshot_path(), serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"abc").unwrap();
+        let (handle, _) = handle();
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (parent_tx, parent_rx) = channel();
+        let loads = Arc::new(AtomicU64::new(0));
+        let mut lazy = lazy_fixture(
+            path,
+            handle.control.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let load_count = loads.clone();
+        lazy.loader = Box::new(move |_| {
+            load_count.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .context("synthetic load release")?;
+            Ok(Box::new(BudgetRecordingModel(recorded.clone())))
+        });
+        let mut preparations = Preparations::default();
+        let model = ControlledModel {
+            slot: "reasoner".into(),
+            inner: preparations.add(lazy),
+            ctl: handle.control.clone(),
+        };
+        let mut exec = Executor::new(
+            root,
+            registry,
+            String::new(),
+            SlotMap::new().with("reasoner", model),
+            NoTools,
+            run,
+        )
+        .unwrap();
+        exec.set_control(handle.control.clone());
+        exec.set_event_sink(Arc::new(move |event, _| {
+            if event["type"] == "node_entered" && event["node"] == "reason" {
+                let _ = parent_tx.send(());
+            }
+        }));
+        assert!(exec.remaining_duration() > Duration::from_secs(1));
+        assert!(exec.remaining_duration() <= Duration::from_secs(3));
+        assert!(exec.remaining_run_duration() > Duration::from_secs(50));
+        start_run_preparations(&mut preparations, &exec).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let release = std::thread::spawn(move || {
+            parent_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            std::thread::sleep(Duration::from_millis(
+                child_deadline_ms.saturating_sub(now_ms) + 50,
+            ));
+            release_tx.send(()).unwrap();
+        });
+        let outcome = exec.resume().unwrap();
+        release.join().unwrap();
+        preparations.finish_for_test();
+        assert_eq!(outcome, RunStatus::Succeeded);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn preparation_pause_deadline_and_cancel_do_not_count_hold_or_change_phase() {
+        for cancel in [false, true] {
+            let base = TrustTestDir::new("prepare-controls");
+            let path = base.0.join("weights.gguf");
+            fs::write(&path, b"abc").unwrap();
+            let (handle, _) = handle();
+            handle.control.request_pause();
+            let loads = Arc::new(AtomicU64::new(0));
+            let lazy = lazy_fixture(
+                path,
+                handle.control.clone(),
+                loads.clone(),
+                Arc::new(AtomicU64::new(0)),
+            );
+            let mut preparations = Preparations::default();
+            let _model = preparations.add(lazy);
+            preparations.start(Duration::from_millis(20)).unwrap();
+            if cancel {
+                handle.control.request_cancel();
+            }
+            preparations.finish_for_test();
+            drop(preparations);
+            assert_eq!(loads.load(Ordering::SeqCst), 0);
+            assert_eq!(handle.control.hold_ns.load(Ordering::Relaxed), 0);
+            assert_eq!(*handle.status.lock().unwrap(), RunPhase::Running);
+            assert!(handle
+                .control
+                .preparation_activity
+                .lock()
+                .unwrap()
+                .is_empty());
+        }
+    }
+
     struct BudgetRecordingModel(Arc<Mutex<Vec<Option<Duration>>>>);
 
     impl ModelSlot for BudgetRecordingModel {
@@ -2417,6 +3473,7 @@ mod regression_tests {
                 tokens_out: 1,
                 finish: trollm_models::FinishReason::Stop,
                 capacity: None,
+                diagnostics: None,
             })
         }
     }
@@ -2444,10 +3501,19 @@ mod regression_tests {
         let response = lazy.generate(req).unwrap();
         assert_eq!(response.finish, trollm_models::FinishReason::Timeout);
         assert!(response.text.is_empty());
+        let diagnostics = response.diagnostics.unwrap();
+        assert!(diagnostics.weight_verify_ms.is_some());
+        assert!(diagnostics.load_ms.is_some());
+        assert!(diagnostics.prepare_ms.is_none());
+        assert!(diagnostics.prefill_ms.is_none());
+        assert!(diagnostics.generation_ms.is_none());
         assert!(requests.lock().unwrap().is_empty());
         assert!(lazy.loaded.is_some(), "a completed load remains reusable");
         assert_eq!(handle.control.activity(), None);
-        lazy.generate(request()).unwrap();
+        let warm = lazy.generate(request()).unwrap();
+        let diagnostics = warm.diagnostics.unwrap();
+        assert!(diagnostics.weight_verify_ms.is_none());
+        assert!(diagnostics.load_ms.is_none());
         assert_eq!(*requests.lock().unwrap(), vec![None]);
     }
 
@@ -2492,6 +3558,7 @@ mod regression_tests {
                 tokens_out: 2,
                 finish: trollm_models::FinishReason::Stop,
                 capacity: None,
+                diagnostics: None,
             })
         }
     }
@@ -2613,11 +3680,16 @@ mod regression_tests {
             attempts.fetch_add(1, Ordering::SeqCst);
             bail!("native allocation failed; free memory and retry");
         });
-        assert!(lazy
-            .generate(request())
-            .unwrap_err()
-            .to_string()
-            .contains("native allocation failed"));
+        let error = lazy.generate(request()).unwrap_err();
+        assert!(error.to_string().contains("native allocation failed"));
+        let diagnostics = &error
+            .downcast_ref::<trollm_models::ModelDiagnosticError>()
+            .unwrap()
+            .diagnostics;
+        assert!(diagnostics.weight_verify_ms.is_some());
+        assert!(diagnostics.load_ms.is_some());
+        assert!(diagnostics.prepare_ms.is_none());
+        assert!(diagnostics.prefill_ms.is_none());
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(handle.control.activity(), None);
         fs::write(&path, b"corrupt").unwrap();

@@ -7,6 +7,13 @@ import org.junit.Test
 class EventRenderTest {
     private fun render(type: String, json: String) = renderEventJson(type, 7uL, json)
 
+    @Test fun attemptMeasurementsDoNotLookLikeRepeatedNodeExits() {
+        assertEquals("Timing recorded: inspect", render("node_exited",
+            """{"node":"inspect","phase":"attempt","measurement":{"attemptInclusiveNs":123}}"""))
+        assertEquals("← inspect", render("node_exited", """{"node":"inspect"}"""))
+        assertEquals("Timing recorded: ?", render("node_exited", """{"phase":"attempt"}"""))
+    }
+
     @Test fun absentNullAndMalformedMeasurementsStayUnknown() {
         for (json in listOf("{}", "null", "not JSON", "")) {
             assertEquals("model[?] unknown→unknown tokens, unknown ms", render("model_call", json))

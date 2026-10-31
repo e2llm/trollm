@@ -26,7 +26,9 @@ internal fun renderEventJson(eventType: String, seq: ULong, json: String): Strin
         "run_started" -> "Run started — plan ${str("plan") ?: "?"}"
         "plan_loaded" -> "Plan loaded: ${str("plan") ?: "?"}"
         "node_entered" -> "→ ${str("node") ?: "?"}"
-        "node_exited" -> "← ${str("node") ?: "?"}"
+        "node_exited" -> if (str("phase") == "attempt") {
+            "Timing recorded: ${str("node") ?: "?"}"
+        } else "← ${str("node") ?: "?"}"
         "model_call" -> "model[${str("slot") ?: "?"}] " +
             "${measured("tokensIn")}→${measured("tokensOut")} tokens, ${measured("ms")} ms" +
             (finishReason?.let { "; finish $it" } ?: "")

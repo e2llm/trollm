@@ -233,3 +233,184 @@ fn empty_collection_is_two_compact_array_bytes_live_and_cached() {
     }
     assert_eq!(server.count("call:list_issues"), 1);
 }
+
+#[test]
+fn exact_call_context_and_entered_timings_survive_repeated_dispatches_and_failure() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("correlated-response-size");
+    let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = events.clone();
+    let sink: EventSink = Box::new(move |event| {
+        captured.lock().unwrap().push(serde_json::to_value(event)?);
+        Ok(())
+    });
+    let mut gateway = McpGateway::new(
+        vec![ServerConfig::for_local_test("tracker", server.url.clone())],
+        PolicySet::from_yaml_str("tracker.get_issue: {cache: {key: [id], ttlS: 900}}").unwrap(),
+        dirs.path().join("cache"),
+        dirs.path().join("artifacts"),
+        Some(sink),
+    )
+    .unwrap();
+    let call = ToolCall {
+        server: "tracker".into(),
+        tool: "get_issue".into(),
+        args: json!({"id":1}),
+    };
+    for (epoch, attempt, ordinal) in [("epoch-a", 1, 1), ("epoch-a", 1, 2), ("epoch-b", 1, 1)] {
+        gateway.set_call_context(Some(trollm_mcp::CallContext {
+            epoch: epoch.into(),
+            attempt,
+            call: ordinal,
+        }));
+        gateway.call(&call).unwrap();
+    }
+    gateway.set_call_context(Some(trollm_mcp::CallContext {
+        epoch: "epoch-b".into(),
+        attempt: 2,
+        call: 1,
+    }));
+    let failed = ToolCall {
+        server: "tracker".into(),
+        tool: "get_issue".into(),
+        args: json!({"id":999,"toolError":"structured"}),
+    };
+    assert!(gateway.call(&failed).is_err());
+    gateway.set_call_context(None);
+    let local = ToolCall {
+        server: "local".into(),
+        tool: "calculate".into(),
+        args: json!({"operation":"add","left":"2","right":"3"}),
+    };
+    gateway.call(&local).unwrap();
+    let events = events.lock().unwrap();
+    let final_events: Vec<_> = events
+        .iter()
+        .filter(|event| event["stage"] == "gateway_result" || event["stage"] == "failed_result")
+        .collect();
+    assert_eq!(final_events.len(), 5);
+    for (index, expected) in [
+        json!({"epoch":"epoch-a","attempt":1,"call":1}),
+        json!({"epoch":"epoch-a","attempt":1,"call":2}),
+        json!({"epoch":"epoch-b","attempt":1,"call":1}),
+        json!({"epoch":"epoch-b","attempt":2,"call":1}),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let final_event = final_events[index];
+        assert_eq!(&final_event["call_context"], expected);
+        assert!(final_event["timings"]["elapsedMs"].is_u64());
+        let dispatch = final_event["dispatch_id"].clone();
+        assert!(events
+            .iter()
+            .filter(|event| event["type"] == "response_size" && event["dispatch_id"] == dispatch)
+            .all(|event| &event["call_context"] == expected));
+    }
+    let first = final_events[0];
+    assert!(first["timings"]["transportMs"].is_u64());
+    assert!(first["timings"]["resultFinishMs"].is_u64());
+    assert!(first["timings"]["resultAdmissionMs"].is_u64());
+    // Cache observations have no new transport measurement; zero is not used
+    // as a substitute for a phase that was never entered.
+    assert!(final_events[1]["timings"]["transportMs"].is_null());
+    assert!(final_events[1]["timings"]["cacheReadMs"].is_u64());
+    let failed = final_events[3];
+    assert_eq!(failed["stage"], "failed_result");
+    assert!(failed["compact_json_utf8_bytes"].is_null());
+    assert!(failed["timings"]["transportMs"].is_u64());
+    assert!(failed["timings"]["resultFinishMs"].is_null());
+    assert!(final_events[4]["call_context"].is_null());
+    assert!(final_events[4]["timings"]["transportMs"].is_null());
+}
+
+#[test]
+fn cached_result_validation_times_pre_cache_admission_failure_and_final_processing() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("cached-admission-timing");
+    let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = events.clone();
+    let sink: EventSink = Box::new(move |event| {
+        captured.lock().unwrap().push(serde_json::to_value(event)?);
+        Ok(())
+    });
+    let policies = PolicySet::from_yaml_str(
+        &json!({
+            "tracker.get_issue": {
+                "cache":{"key":["id"],"ttlS":900},
+                "resultArtifact":"validated",
+                "resultValidation":{"maxBytes":2048,"schema":{
+                    "type":"object","required":["id"],
+                    "properties":{"id":{"type":"integer"}}
+                }}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut gateway = McpGateway::new(
+        vec![ServerConfig::for_local_test("tracker", server.url.clone())],
+        policies,
+        dirs.path().join("cache"),
+        dirs.path().join("artifacts"),
+        Some(sink),
+    )
+    .unwrap();
+    let call = ToolCall {
+        server: "tracker".into(),
+        tool: "get_issue".into(),
+        args: json!({"id":1}),
+    };
+    server
+        .tool_payloads
+        .lock()
+        .unwrap()
+        .insert("get_issue".into(), json!({"id":"invalid"}));
+    assert!(gateway.call(&call).is_err());
+    let meta = dirs.path().join("artifacts/validated.json.meta.json");
+    let failure_meta: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    assert_eq!(failure_meta["complete"], false);
+    assert!(!dirs.path().join("artifacts/validated.json").exists());
+    {
+        let events = events.lock().unwrap();
+        let failed = events
+            .iter()
+            .find(|event| event["stage"] == "failed_result")
+            .unwrap();
+        assert!(failed["timings"]["resultAdmissionMs"].is_u64());
+        assert!(failed["timings"]["resultFinishMs"].is_null());
+        assert!(failed["timings"]["transportMs"].is_u64());
+        assert!(failed["compact_json_utf8_bytes"].is_null());
+    }
+    // The rejected payload never filled the cache. The same arguments must
+    // fetch again, validate before filling, then validate within finish_result.
+    server
+        .tool_payloads
+        .lock()
+        .unwrap()
+        .insert("get_issue".into(), json!({"id":1}));
+    let live = gateway.call(&call).unwrap();
+    assert_eq!(live.content_for_model["id"], 1);
+    assert_eq!(server.count("call:get_issue"), 2);
+    let completed_meta: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    assert_eq!(completed_meta["complete"], true);
+    let cached = gateway.call(&call).unwrap();
+    assert_eq!(cached.content_for_model, live.content_for_model);
+    assert_eq!(server.count("call:get_issue"), 2);
+    let events = events.lock().unwrap();
+    let finals: Vec<_> = events
+        .iter()
+        .filter(|event| event["stage"] == "gateway_result")
+        .collect();
+    assert_eq!(finals.len(), 2);
+    for event in &finals {
+        assert!(event["timings"]["resultAdmissionMs"].is_u64());
+        assert!(event["timings"]["resultFinishMs"].is_u64());
+        assert!(event["timings"]["elapsedMs"].is_u64());
+    }
+    assert!(finals[0]["timings"]["transportMs"].is_u64());
+    assert!(finals[1]["timings"]["transportMs"].is_null());
+    assert!(finals[1]["timings"]["cacheReadMs"].is_u64());
+    // Millisecond rounding cannot establish containment or invocation counts;
+    // no subtraction/comparison pretends admission is wholly inside finish.
+}

@@ -55,6 +55,7 @@ fun FlowListScreen(
     onRunFlow: (FlowInfo) -> Unit,
     onInstall: () -> Unit,
     onConnections: () -> Unit,
+    onMoray: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -135,6 +136,7 @@ fun FlowListScreen(
         item { ScreenHeader("trollm", subtitle = "Choose a flow to get started.") }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onMoray, shape = MaterialTheme.shapes.medium) { Text("Moray source") }
                 OutlinedButton(onClick = onInstall, shape = MaterialTheme.shapes.medium) { Text("Install flow") }
                 OutlinedButton(onClick = onConnections, shape = MaterialTheme.shapes.medium) { Text("Connections") }
             }

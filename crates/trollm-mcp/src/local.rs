@@ -9,6 +9,12 @@ use crate::ToolDescriptor;
 pub const SERVER: &str = "local";
 pub const TOOL: &str = "calculate";
 pub const EXTRACT_TOOL: &str = "extract_decimal";
+pub const SELECT_TOOL: &str = "select_unique";
+pub const ASSERT_TOOL: &str = "assert_equal";
+pub const PREPARE_TOOL: &str = "prepare_worklist";
+pub const COLLECTION_TOOL: &str = "collection_total";
+pub(crate) const SELECT_ITEMS_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const SELECT_ARGUMENT_BYTES: usize = 33 * 1024 * 1024;
 
 const SCALE: i128 = 1_000_000;
 const MAX_SCALED: i128 = 999_999_999_999_999_999;
@@ -33,25 +39,323 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         descriptor(),
         ToolDescriptor {
             server: SERVER.into(),
+            name: PREPARE_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-prepare-worklist.v1.input.schema.json"
+            ))
+            .expect("bundled worklist schema"),
+        },
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: COLLECTION_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-collection-total.v1.input.schema.json"
+            ))
+            .expect("bundled collection total schema"),
+        },
+        ToolDescriptor {
+            server: SERVER.into(),
             name: EXTRACT_TOOL.into(),
             input_schema: serde_json::from_str(include_str!(
                 "../../../schemas/local-extract-decimal.v1.input.schema.json"
             ))
             .expect("bundled extraction schema"),
         },
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: SELECT_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-select-unique.v1.input.schema.json"
+            ))
+            .expect("bundled unique selection schema"),
+        },
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: ASSERT_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-assert-equal.v1.input.schema.json"
+            ))
+            .expect("bundled equality schema"),
+        },
     ]
 }
 
 pub fn supports(tool: &str) -> bool {
-    matches!(tool, TOOL | EXTRACT_TOOL)
+    matches!(
+        tool,
+        TOOL | EXTRACT_TOOL | SELECT_TOOL | ASSERT_TOOL | PREPARE_TOOL | COLLECTION_TOOL
+    )
 }
 
 pub fn invoke(tool: &str, args: &Value) -> Result<Value> {
     match tool {
         TOOL => calculate(args),
         EXTRACT_TOOL => extract_decimal(args),
+        SELECT_TOOL => select_unique(args),
+        ASSERT_TOOL => assert_equal(args),
+        PREPARE_TOOL => prepare_worklist(args),
+        COLLECTION_TOOL => collection_total(args),
         _ => bail!("unknown builtin local tool"),
     }
+}
+
+/// Freeze a prepared envelope without interpreting the domain-specific entries.
+pub fn prepare_worklist(args: &Value) -> Result<Value> {
+    let (input, envelope) = prepare_arguments(args)?;
+    let items = envelope["items"].as_array().expect("validated array");
+    let records = items
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut hash = Sha256::new();
+            hash.update(b"trollm.local.prepare_worklist.v1\0");
+            hash.update(input.as_bytes());
+            hash.update((index as u64).to_be_bytes());
+            let id: String = hash
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            json!({"id":id,"value":value})
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"format":"trollm.local.prepare_worklist.v1","context":envelope["context"],"items":records}),
+    )
+}
+
+pub(crate) fn validate_prepare_arguments(args: &Value) -> Result<()> {
+    prepare_arguments(args).map(|_| ())
+}
+
+fn prepare_arguments(args: &Value) -> Result<(&str, Value)> {
+    const INVALID: &str = "local.prepare_worklist: invalid-arguments";
+    crate::schema::check_limits(args, crate::schema::ARG_BYTES, 64, "worklist arguments")?;
+    let object = args
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    let input = object
+        .get("input")
+        .and_then(Value::as_str)
+        .filter(|input| !input.is_empty() && input.len() <= 48 * 1024)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    // serde_json's recursion guard also bounds parsing before the explicit depth check.
+    let envelope: Value = serde_json::from_str(input).map_err(|_| anyhow!(INVALID))?;
+    crate::schema::check_limits(&envelope, 48 * 1024, 32, "worklist envelope")?;
+    let object = envelope
+        .as_object()
+        .filter(|object| object.len() == 2)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    object
+        .get("context")
+        .and_then(Value::as_str)
+        .filter(|context| context.len() <= 4096)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .filter(|items| (1..=8).contains(&items.len()))
+        .ok_or_else(|| anyhow!(INVALID))?;
+    for item in items {
+        if !item.is_object() {
+            bail!(INVALID);
+        }
+        crate::schema::check_limits(item, 4096, 32, "worklist item")?;
+    }
+    Ok((input, envelope))
+}
+
+/// Sum exactly one successful original decimal term for each expected identity.
+pub fn collection_total(args: &Value) -> Result<Value> {
+    validate_collection_arguments(args)?;
+    const INVALID: &str = "local.collection_total: invalid-arguments";
+    let pointer = |key: &str| args[key].as_str().expect("validated pointer");
+    let text_at = |value: &Value, key: &str| -> Result<String> {
+        value
+            .pointer(pointer(key))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty() && text.len() <= 4096)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!(INVALID))
+    };
+    let mut expected = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in args["expected"].as_array().expect("validated array") {
+        let id = text_at(item, "expectedId")?;
+        if !seen.insert(id.clone()) {
+            bail!("local.collection_total: duplicate-expected");
+        }
+        expected.push(id);
+    }
+    let mut results = std::collections::BTreeMap::new();
+    for item in args["results"].as_array().expect("validated array") {
+        let id = text_at(item, "resultId")?;
+        if results.contains_key(&id) {
+            bail!("local.collection_total: duplicate-result");
+        }
+        if !seen.contains(&id) {
+            bail!("local.collection_total: coverage-mismatch");
+        }
+        if item.pointer(pointer("outcome")).and_then(Value::as_str) != Some("succeeded") {
+            bail!("local.collection_total: unsuccessful-result");
+        }
+        let amount = text_at(item, "amount")?;
+        let scaled = parse_decimal(&amount).map_err(|_| anyhow!(INVALID))?;
+        results.insert(id, (amount, scaled));
+    }
+    if expected.len() != results.len() {
+        bail!("local.collection_total: coverage-mismatch");
+    }
+    let mut sum = 0_i128;
+    let mut terms = Vec::new();
+    for id in expected {
+        let (amount, scaled) = results
+            .get(&id)
+            .ok_or_else(|| anyhow!("local.collection_total: coverage-mismatch"))?;
+        sum += scaled;
+        terms.push(json!({"id":id,"amount":amount}));
+    }
+    if !(-MAX_SCALED..=MAX_SCALED).contains(&sum) {
+        bail!("local.collection_total: out-of-range");
+    }
+    Ok(
+        json!({"format":"trollm.local.collection_total.v1","count":terms.len(),"sum":format_decimal(sum),"terms":terms}),
+    )
+}
+
+pub(crate) fn validate_collection_arguments(args: &Value) -> Result<()> {
+    const INVALID: &str = "local.collection_total: invalid-arguments";
+    crate::schema::check_limits(args, crate::schema::ARG_BYTES, 64, "collection arguments")?;
+    let object = args
+        .as_object()
+        .filter(|object| object.len() == 6)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    for name in ["expected", "results"] {
+        object
+            .get(name)
+            .and_then(Value::as_array)
+            .filter(|items| (1..=8).contains(&items.len()))
+            .ok_or_else(|| anyhow!(INVALID))?;
+    }
+    for name in ["expectedId", "resultId", "outcome", "amount"] {
+        let pointer = object
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| text.len() <= 4096)
+            .ok_or_else(|| anyhow!(INVALID))?;
+        if !pointer.is_empty() && !pointer.starts_with('/') {
+            bail!(INVALID);
+        }
+        let mut bytes = pointer.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+                bail!(INVALID);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compare parsed JSON values without coercion or semantic interpretation.
+pub fn assert_equal(args: &Value) -> Result<Value> {
+    const INVALID: &str = "local.assert_equal: invalid-arguments";
+    let object = args.as_object().ok_or_else(|| anyhow!(INVALID))?;
+    if object.len() != 2 {
+        bail!(INVALID);
+    }
+    let left = object.get("left").ok_or_else(|| anyhow!(INVALID))?;
+    let right = object.get("right").ok_or_else(|| anyhow!(INVALID))?;
+    crate::schema::check_limits(
+        args,
+        crate::schema::ARG_BYTES,
+        crate::schema::ARG_DEPTH,
+        "tool arguments",
+    )?;
+    if left != right {
+        bail!("local.assert_equal: mismatch");
+    }
+    Ok(json!({"equal":true}))
+}
+
+/// Select one original object using only a literal string equality predicate.
+pub fn select_unique(args: &Value) -> Result<Value> {
+    let (items, field, equals, prefix) = select_arguments(args)?;
+    let mut found = None;
+    for (index, item) in items.iter().enumerate() {
+        let matches = item
+            .pointer(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| equals.strip_prefix(prefix) == Some(value));
+        if matches {
+            if found.is_some() {
+                bail!("local.select_unique: ambiguous");
+            }
+            found = Some(index);
+        }
+    }
+    let index = found.ok_or_else(|| anyhow!("local.select_unique: no-match"))?;
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut hash = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut hash, &args["items"])?;
+    let source_sha256 = hash
+        .0
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(json!({"selected":items[index], "index":index, "sourceSha256":source_sha256}))
+}
+
+pub(crate) fn validate_select_arguments(args: &Value) -> Result<()> {
+    select_arguments(args).map(|_| ())
+}
+
+fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str)> {
+    const INVALID: &str = "local.select_unique: invalid-arguments";
+    let object = args.as_object().ok_or_else(|| anyhow!(INVALID))?;
+    if object.len() != 4 {
+        bail!(INVALID);
+    }
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!(INVALID))?;
+    if items.len() > 100_000 || !items.iter().all(Value::is_object) {
+        bail!(INVALID);
+    }
+    let text = |name: &str, bound: usize| -> Result<&str> {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| value.len() <= bound)
+            .ok_or_else(|| anyhow!(INVALID))
+    };
+    let field = text("field", 4096)?;
+    let equals = text("equals", 16384)?;
+    let prefix = text("prefix", 16384)?;
+    if !field.is_empty() && !field.starts_with('/') {
+        bail!(INVALID);
+    }
+    let mut bytes = field.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+            bail!(INVALID);
+        }
+    }
+    // Same complete-query byte allowance as the gateway, with no truncation.
+    crate::schema::check_limits(&args["items"], SELECT_ITEMS_BYTES, 64, "selection items")?;
+    crate::schema::check_limits(args, SELECT_ARGUMENT_BYTES, 64, "selection arguments")?;
+    Ok((items, field, equals, prefix))
 }
 
 /// Bounded literal text processing only. All content boundaries, numeric prefix,

@@ -262,9 +262,10 @@ fn local_calculator_never_discovers_unrelated_remote_catalogs() {
 }
 
 #[test]
-fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
+fn required_argument_hints_preserve_open_and_closed_decoder_contracts() {
     struct CaptureGateway {
         cached: bool,
+        field_type: &'static str,
     }
     impl ToolGateway for CaptureGateway {
         fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
@@ -278,7 +279,7 @@ fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
                 server: "browser".into(),
                 name: "capture".into(),
                 input_schema: serde_json::json!({
-                    "type":"object", "properties":{"tabId":{"type":"number"}, "browser":{"type":"string"}, "forceFresh":{"type":"boolean"}}
+                    "type":"object", "properties":{"tabId":{"type":self.field_type}, "browser":{"type":"string"}, "forceFresh":{"type":"boolean"}}
                 }),
             }]
         }
@@ -289,7 +290,12 @@ fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
             trollm_mcp::policy::ToolClass::Read
         }
         fn validate_call(&self, call: &ToolCall) -> Result<()> {
-            anyhow::ensure!(call.args["tabId"].is_number(), "required tabId");
+            let expected = if self.field_type == "string" {
+                serde_json::json!("observed")
+            } else {
+                serde_json::json!(2)
+            };
+            anyhow::ensure!(call.args["tabId"] == expected, "required tabId value");
             anyhow::ensure!(call.args["browser"] == "selected", "injected browser");
             anyhow::ensure!(call.args["forceFresh"] == true, "injected forceFresh");
             Ok(())
@@ -303,16 +309,63 @@ fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
             })
         }
     }
-    for cached in [true, false] {
-        let base = common::tmp_dir("required-open-capture");
+    for (cached, closed, field_type) in [
+        (true, false, "number"),
+        (false, false, "number"),
+        (true, true, "string"),
+        (false, true, "string"),
+    ] {
+        let base = common::tmp_dir("required-capture-hint");
         std::fs::write(base.join("work.md"), "Observe.").unwrap();
         let plan = ExecutionPlan::from_yaml_str("schemaVersion: ledger.execution-plan.v1\nid: capture\nversion: 1\nlimits: { maxSteps: 4, maxReasonerCalls: 0, maxTokensTotal: 10000, timeoutS: 60, artifactMaxMb: 1 }\nonLimit: abort\nmodels: { coder: { ctx: 2048 } }\nentryStep: work\nnodes:\n  work: { kind: task, taskRef: work, onVerified: done }\n  done: { kind: end, outcome: succeeded }\n").unwrap();
         let registry = TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: work.md\n    completion: tool-result\n    tools: [browser.capture]\n    toolArguments:\n      browser.capture:\n        fixed: { browser: selected, forceFresh: true }\n", &base).unwrap();
+        let registry = if closed {
+            let mut registry = registry;
+            registry
+                .tasks
+                .get_mut("work")
+                .unwrap()
+                .tool_arguments
+                .as_mut()
+                .unwrap()
+                .get_mut("browser.capture")
+                .unwrap()
+                .model_fields = Some(vec!["tabId".into()]);
+            registry
+        } else {
+            registry
+        };
+        let value = if field_type == "string" {
+            serde_json::json!("observed")
+        } else {
+            serde_json::json!(2)
+        };
+        let args = if closed {
+            serde_json::json!({"tabId":value})
+        } else {
+            serde_json::json!({"tabId":value, "extra":true})
+        };
+        let response = format!(
+            "<tool_call>{}</tool_call>",
+            serde_json::json!({"server":"browser", "tool":"capture", "args":args})
+        );
         let requests = Arc::new(Mutex::new(Vec::new()));
         let dir = RunDir::under(&base);
-        let mut executor = Executor::new(plan, registry, String::new(), SlotMap::new().with("coder", RecordingModel {
-        model: MockModel::scripted([r#"<tool_call>{"server":"browser","tool":"capture","args":{"tabId":2,"extra":true}}</tool_call>"#]), requests: requests.clone()
-    }), CaptureGateway { cached }, dir).unwrap();
+        let mut executor = Executor::new(
+            plan,
+            registry,
+            String::new(),
+            SlotMap::new().with(
+                "coder",
+                RecordingModel {
+                    model: MockModel::scripted([response]),
+                    requests: requests.clone(),
+                },
+            ),
+            CaptureGateway { cached, field_type },
+            dir,
+        )
+        .unwrap();
         assert_eq!(executor.run_until_blocked().unwrap(), RunStatus::Succeeded);
         let requests = requests.lock().unwrap();
         let grammar = requests[0].grammar_gbnf.as_ref().unwrap();
@@ -322,7 +375,11 @@ fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
             .unwrap();
         assert!(required_rule.contains("tabId"));
         assert!(required_rule.contains(if cached {
-            "ws number tail-a0-1"
+            if field_type == "string" {
+                "ws string tail-a0-1"
+            } else {
+                "ws number tail-a0-1"
+            }
         } else {
             "ws value tail-a0-1"
         }));
@@ -330,13 +387,30 @@ fn setup_required_open_capture_arguments_reach_decoder_after_bindings() {
             !required_rule.contains(" | "),
             "empty arguments cannot skip tabId"
         );
-        assert!(
+        assert_eq!(
             grammar.contains("tail-a0-1 ::= (\",\" ws member)*"),
-            "additional arguments remain legal"
+            !closed,
+            "only open contracts allow additional arguments"
         );
-        assert!(requests[0]
-            .prompt
-            .contains("Required model arguments for browser.capture"));
+        let mut schema = serde_json::json!({
+            "type":"object", "properties":{"tabId":if cached { serde_json::json!({"type":field_type}) } else { serde_json::json!({}) }},
+            "required":["tabId"]
+        });
+        if closed {
+            schema["additionalProperties"] = serde_json::json!(false);
+        }
+        let expected = tool_call_grammar_with_argument_schemas(
+            &[("browser".into(), "capture".into())],
+            &std::collections::BTreeMap::from([(("browser".into(), "capture".into()), schema)]),
+            ToolCallGrammarMode::SingleToolCall,
+        );
+        assert_eq!(grammar, &expected, "hint must not change decoder schema");
+        let expected_type = if cached { field_type } else { "JSON value" };
+        assert!(requests[0].prompt.contains(&format!(
+            "[Required argument names and types for browser.capture (types are not values)] tabId ({expected_type})"
+        )));
+        assert!(!requests[0].prompt.contains("[Required model arguments"));
+        assert!(!requests[0].prompt.contains(r#"{"tabId":"string"}"#));
         drop(executor);
         std::fs::remove_dir_all(base).unwrap();
     }

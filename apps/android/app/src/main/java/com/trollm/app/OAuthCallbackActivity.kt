@@ -18,7 +18,8 @@ class OAuthCallbackActivity : ComponentActivity() {
         setContentView(TextView(this).apply { text = "Completing sign-in…" })
         lifecycleScope.launch {
             val message = try {
-                val oauth = withContext(Dispatchers.IO) { OAuthConnections.get(applicationContext) }
+                val oauth = withContext(Dispatchers.IO) { if (intent.getBooleanExtra(OAuthConnections.EXTRA_SOURCE, false))
+                    OAuthConnections.moray(applicationContext) else OAuthConnections.get(applicationContext) }
                 if (oauth.complete(intent)) "Signed in." else OAuthProblem.FAILED.message
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { classifyOAuthProblem(error).message }

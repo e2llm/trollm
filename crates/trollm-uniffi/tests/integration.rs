@@ -409,11 +409,23 @@ fn llama_selection_without_weights_fails_asynchronously_even_with_stub_enabled()
         let id = rt.start_run(flow.flow_sha256, "hello".into()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match rt.poll_status(id.clone()).unwrap().phase {
+            let status = rt.poll_status(id.clone()).unwrap();
+            match status.phase {
                 trollm_uniffi::RunPhaseApi::Failed { reason } => {
+                    assert!(
+                        status.final_report.is_none(),
+                        "failure fabricated a final report"
+                    );
+                    let events = rt.tail_events(id.clone(), 0).unwrap();
+                    assert!(
+                        events.iter().all(|event| {
+                            event.event_type != "tool_call_intent"
+                                && event.event_type != "tool_call_result"
+                        }),
+                        "unexpected tool dispatch: {events:?}"
+                    );
                     if manifest_present {
                         assert_eq!(reason, "model-error");
-                        let events = rt.tail_events(id.clone(), 0).unwrap();
                         assert!(
                             events.iter().any(|event| {
                                 if event.event_type != "error" {
@@ -430,17 +442,51 @@ fn llama_selection_without_weights_fails_asynchronously_even_with_stub_enabled()
                             }),
                             "missing first-use weights diagnostic: {events:?}"
                         );
-                        assert!(
-                            events.iter().all(|event| {
-                                event.event_type != "model_call"
-                                    && event.event_type != "tool_call_intent"
-                            }),
-                            "unexpected inference or tool dispatch: {events:?}"
+                        let model_calls: Vec<serde_json::Value> = events
+                            .iter()
+                            .filter(|event| event.event_type == "model_call")
+                            .map(|event| serde_json::from_str(&event.json).unwrap())
+                            .collect();
+                        assert_eq!(
+                            model_calls.len(),
+                            1,
+                            "unexpected model attempts: {events:?}"
                         );
+                        let failed = &model_calls[0];
+                        assert_eq!(failed["failed"], true);
+                        assert_eq!(failed["slot"], "coder");
+                        assert_eq!(failed["node"], "greet");
+                        assert_eq!(failed["modelCallOrdinal"], 1);
+                        assert!(failed["ms"].as_u64().is_some());
+                        // Verification was entered, but absent weights never
+                        // loaded a native context or produced a model response.
+                        for field in ["tokensIn", "tokensOut", "finishReason"] {
+                            assert_eq!(
+                                failed.get(field),
+                                Some(&serde_json::Value::Null),
+                                "{field}"
+                            );
+                        }
+                        let diagnostics = &failed["diagnostics"];
+                        assert_eq!(diagnostics["totalMs"], failed["ms"]);
+                        assert!(diagnostics["weightVerifyMs"].as_u64().is_some());
+                        for field in ["loadMs", "prepareMs", "prefillMs", "generationMs"] {
+                            assert_eq!(
+                                diagnostics.get(field),
+                                Some(&serde_json::Value::Null),
+                                "{field}"
+                            );
+                        }
                     } else {
                         assert!(
                             reason.contains("no SHA-256 manifest for model slot 'coder'"),
                             "{reason}"
+                        );
+                        // Missing metadata fails during worker setup, before
+                        // executor/model entry, so even a failed call is absent.
+                        assert!(
+                            events.is_empty(),
+                            "unexpected execution before manifest capture: {events:?}"
                         );
                     }
                     break;
@@ -584,6 +630,256 @@ mod lifecycle {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn source_resume_keeps_original_dependency_revision_and_report_identity() {
+        let base = temp_base("source-resume");
+        let (id, first);
+        {
+            let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+            first = rt.install_source_bundle(pausing_bundle()).unwrap();
+            let association = serde_json::json!({
+                "installation": { "installationSha256": first.installation_sha256,
+                    "flowSha256": first.flow_sha256, "archiveSha256": first.archive_sha256 },
+                "descriptor": { "identity": { "manifestSha256": first.installation_sha256,
+                    "entryFlowSha256": first.flow_sha256, "sha256": first.archive_sha256 } }
+            });
+            id = rt
+                .start_source_run(
+                    first.flow_sha256.clone(),
+                    first.installation_sha256.clone(),
+                    "original".into(),
+                    association.to_string(),
+                )
+                .unwrap();
+            wait_for(&rt, &id, |p| matches!(p, RunPhaseApi::Paused { .. }));
+            assert!(rt
+                .prepare_source_report(id.clone(), "controlled-device".into())
+                .is_err());
+            let stored: serde_json::Value =
+                serde_json::from_str(&rt.source_run_association(id.clone()).unwrap()).unwrap();
+            assert_eq!(stored["nativeRunId"], id);
+            assert_eq!(stored["nativeAttemptId"], format!("{id}-source-1"));
+        }
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let files: Vec<(&str, &[u8])> = vec![
+            ("pause-flow.flow.yaml", PAUSING_FLOW.as_bytes()),
+            ("pauser.tasks.yaml", PAUSING_REGISTRY.as_bytes()),
+            ("prompts/work.md", b"Changed {{ user_input }}"),
+        ];
+        let manifest = manifest("pause-flow.flow.yaml", "pauser.tasks.yaml", &files);
+        let mut archive = vec![("manifest.json", manifest.as_slice())];
+        archive.extend(files);
+        let second = rt.install_source_bundle(build_tar(&archive)).unwrap();
+        assert_eq!(first.flow_sha256, second.flow_sha256);
+        assert_ne!(first.installation_sha256, second.installation_sha256);
+        let before = rt.source_run_association(id.clone()).unwrap();
+        rt.resume(id.clone()).unwrap();
+        wait_for(&rt, &id, |p| {
+            matches!(p, RunPhaseApi::Paused { .. })
+                && rt
+                    .tail_events(id.clone(), 0)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.event_type == "resumed")
+        });
+        assert_eq!(rt.source_run_association(id.clone()).unwrap(), before);
+        drop(rt);
+        // A valid new revision never substitutes for a corrupted retained one.
+        std::fs::write(
+            std::path::Path::new(&first.bundle_dir).join("prompts/work.md"),
+            b"corrupt",
+        )
+        .unwrap();
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        assert!(rt.resume(id.clone()).is_err());
+        assert_eq!(rt.source_run_association(id).unwrap(), before);
+    }
+
+    #[test]
+    fn declared_source_input_admission_retains_original_and_refuses_drift() {
+        let base = temp_base("source-input-admission");
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let mut setup = setup_fixture();
+        setup["title"] = serde_json::json!("Declared text");
+        setup["input"] = serde_json::json!({"fields":[
+            {"key":"text","label":"Text","required":true,"maxLength":16}
+        ]});
+        let setup = setup.to_string();
+        let text_flow = GOOD_FLOW
+            .lines()
+            .filter(|line| !line.starts_with("sourceBaseline:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace(
+                "maxSteps: 4, maxReasonerCalls: 2",
+                "maxSteps: 1, maxReasonerCalls: 0",
+            );
+        let flow = text_flow.replace(
+            "input:",
+            &format!(
+                "setup: {{ path: setup.json, sha256: \"{}\" }}\ninput:",
+                sha256_hex(setup.as_bytes())
+            ),
+        );
+        let registry = GOOD_REGISTRY.replace("    loop: { maxSteps: 1 }\n", "");
+        let files = vec![
+            ("hello-flow.flow.yaml", flow.as_bytes()),
+            ("hello.tasks.yaml", registry.as_bytes()),
+            ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+            ("setup.json", setup.as_bytes()),
+        ];
+        let manifest = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+        let mut archive = vec![("manifest.json", manifest.as_slice())];
+        archive.extend(files);
+        let installed = rt.install_source_bundle(build_tar(&archive)).unwrap();
+        let raw = "{\"text\":\" \u{2003}hello 😀 \"}";
+        let normalized = "{\"text\":\"hello 😀\"}";
+        let receipt = rt
+            .admit_source_input(
+                installed.installation_sha256.clone(),
+                raw.into(),
+                normalized.into(),
+            )
+            .unwrap();
+        assert!(rt
+            .admit_source_input(
+                installed.installation_sha256.clone(),
+                r#"{"text":"first","text":"second"}"#.into(),
+                normalized.into()
+            )
+            .is_err());
+        assert!(rt
+            .admit_source_input(
+                installed.installation_sha256.clone(),
+                raw.into(),
+                raw.into()
+            )
+            .is_err());
+        let mut association = serde_json::json!({
+            "installation":{"installationSha256":installed.installation_sha256,
+                "flowSha256":installed.flow_sha256,"archiveSha256":installed.archive_sha256},
+            "descriptor":{"publicationId":"declared-fixture", "source":{"schemaVersion":"moray.declared-native-text.v1","origin":"DECLARED"},
+                "identity":{"manifestSha256":installed.installation_sha256,
+                    "entryFlowSha256":installed.flow_sha256,"sha256":installed.archive_sha256}}});
+        assert!(rt
+            .start_source_run(
+                installed.flow_sha256.clone(),
+                installed.installation_sha256.clone(),
+                raw.into(),
+                association.to_string()
+            )
+            .is_err());
+        association["inputAdmission"] = serde_json::from_str(&receipt).unwrap();
+        assert!(rt
+            .start_source_run(
+                installed.flow_sha256.clone(),
+                installed.installation_sha256.clone(),
+                r#"{"text":"changed"}"#.into(),
+                association.to_string()
+            )
+            .is_err());
+        let id = rt
+            .start_source_run(
+                installed.flow_sha256,
+                installed.installation_sha256,
+                raw.into(),
+                association.to_string(),
+            )
+            .unwrap();
+        wait_for(&rt, &id, |phase| matches!(phase, RunPhaseApi::Succeeded));
+        let until = Instant::now() + Duration::from_secs(5);
+        while rt.poll_status(id.clone()).unwrap().worker_active {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let directory = base.join("trollm/runs").join(&id);
+        assert_eq!(
+            std::fs::read(directory.join("input.original.json")).unwrap(),
+            raw.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(directory.join("input.normalized.json")).unwrap(),
+            normalized.as_bytes()
+        );
+        let events = rt.tail_events(id.clone(), 0).unwrap().len();
+        let package: serde_json::Value = serde_json::from_str(
+            &rt.prepare_source_report(id.clone(), "controlled-device".into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            package["observation"]["inputAdmission"],
+            association["inputAdmission"]
+        );
+        assert_eq!(package["report"]["outcome"], "unknown");
+        assert_eq!(rt.tail_events(id.clone(), 0).unwrap().len(), events);
+        std::fs::write(directory.join("input.original.json"), b"{}").unwrap();
+        assert!(rt
+            .prepare_source_report(id, "controlled-device".into())
+            .is_err());
+    }
+
+    #[test]
+    fn retained_source_report_uses_native_snapshot_and_never_executes_again() {
+        let base = temp_base("native-report");
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let installed = rt.install_source_bundle(good_bundle()).unwrap();
+        let association = serde_json::json!({
+            "installation": {"installationSha256":installed.installation_sha256,
+                "flowSha256":installed.flow_sha256,"archiveSha256":installed.archive_sha256},
+            "descriptor": {"publicationId":"controlled-publication","identity":{
+                "manifestSha256":installed.installation_sha256,"entryFlowSha256":installed.flow_sha256,
+                "sha256":installed.archive_sha256}}
+        });
+        let id = rt
+            .start_source_run(
+                installed.flow_sha256,
+                installed.installation_sha256,
+                "controlled input".into(),
+                association.to_string(),
+            )
+            .unwrap();
+        wait_for(&rt, &id, |phase| matches!(phase, RunPhaseApi::Succeeded));
+        // Terminal publication may precede worker cleanup; wait for ownership.
+        let until = Instant::now() + Duration::from_secs(5);
+        while rt.poll_status(id.clone()).unwrap().worker_active {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let before = rt.tail_events(id.clone(), 0).unwrap().len();
+        let first = rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .unwrap();
+        let second = rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(rt.tail_events(id.clone(), 0).unwrap().len(), before);
+        let package: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(package["report"]["runId"], id);
+        assert_eq!(package["report"]["outcome"], "unknown");
+        assert_eq!(package["observation"]["nativeStatus"], "succeeded");
+        assert_eq!(
+            package["observation"]["businessVerification"],
+            "not-assessed"
+        );
+        assert!(package["report"]["items"].as_array().unwrap().is_empty());
+        let raw = std::fs::read(
+            base.join("trollm/runs")
+                .join(&id)
+                .join("source-reports")
+                .join(format!(
+                    "{}.json",
+                    package["observationSha256"].as_str().unwrap()
+                )),
+        )
+        .unwrap();
+        assert_eq!(
+            sha256_hex(&raw),
+            package["observationSha256"].as_str().unwrap()
+        );
     }
 
     #[test]
@@ -1304,5 +1600,46 @@ fn routing_bundle_import_rejects_invalid_routes_and_control_grants() {
         assert!(rt.list_flows().unwrap().is_empty());
     }
     drop(rt);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn owned_installation_pins_dependency_revision_without_replacing_legacy() {
+    let base = temp_base("source-revisions");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let legacy = rt.install_flow_bundle(good_bundle()).unwrap();
+    let first = rt.install_source_bundle(good_bundle()).unwrap();
+    let changed_prompt = b"Changed task instructions for {{ user_input }}";
+    let files: Vec<(&str, &[u8])> = vec![
+        ("hello-flow.flow.yaml", GOOD_FLOW.as_bytes()),
+        ("hello.tasks.yaml", GOOD_REGISTRY.as_bytes()),
+        ("prompts/greet.md", changed_prompt),
+    ];
+    let manifest = manifest("hello-flow.flow.yaml", "hello.tasks.yaml", &files);
+    let mut archive = vec![("manifest.json", manifest.as_slice())];
+    archive.extend(files);
+    let bytes = build_tar(&archive);
+    let changed = rt.install_source_bundle(bytes.clone()).unwrap();
+    assert_eq!(legacy.flow_sha256, first.flow_sha256);
+    assert_eq!(first.flow_sha256, changed.flow_sha256);
+    assert_ne!(first.installation_sha256, changed.installation_sha256);
+    assert_eq!(changed.installation_sha256, sha256_hex(&manifest));
+    assert_eq!(changed.archive_sha256, sha256_hex(&bytes));
+    assert_eq!(
+        rt.install_source_bundle(bytes).unwrap().bundle_dir,
+        changed.bundle_dir
+    );
+    assert_ne!(first.bundle_dir, changed.bundle_dir);
+    assert_ne!(legacy.bundle_dir, first.bundle_dir);
+    assert_eq!(
+        std::fs::read(std::path::Path::new(&changed.bundle_dir).join("prompts/greet.md")).unwrap(),
+        changed_prompt
+    );
+    assert!(
+        std::fs::read(std::path::Path::new(&first.bundle_dir).join("prompts/greet.md")).unwrap()
+            != changed_prompt
+    );
+    // Source revisions do not publish an ambiguous root-only discovery entry.
+    assert_eq!(rt.list_flows().unwrap().len(), 1);
     std::fs::remove_dir_all(base).unwrap();
 }

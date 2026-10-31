@@ -18,6 +18,7 @@ pub use cache::{CacheMeta, CacheStore};
 pub use events::ProxyEvent;
 pub use gateway::{EventSink, McpGateway, ServerConfig};
 pub use policy::{PolicySet, ToolPolicy};
+pub use schema::ArtifactSchema;
 pub use transport::{RootCertificates, TokenGetter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +50,18 @@ pub struct ToolResult {
     pub provenance: Provenance,
 }
 
+/// Disposable correlation only. Never used to authorize or replay a call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallContext {
+    pub epoch: String,
+    pub attempt: u64,
+    pub call: u32,
+}
+
 pub trait ToolGateway: Send {
+    /// Forward this through adapters so main and proxy observations can be joined.
+    fn set_call_context(&mut self, _context: Option<CallContext>) {}
     /// Absolute cooperative deadline for the next dispatch, including pagination.
     fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
     fn list_tools(&self) -> Result<Vec<ToolDescriptor>>;
@@ -75,4 +87,26 @@ pub trait ToolGateway: Send {
     /// Executes a tool call, applying gateway policies (cache/paginate/serveFrom/
     /// shape/mutation). Implementations must be the ONLY path models have to tools.
     fn call(&mut self, call: &ToolCall) -> Result<ToolResult>;
+    /// Begin a static producer attempt before model generation. Unsupported adapters
+    /// must reject rather than leave an earlier complete destination usable.
+    fn begin_result_artifact_attempt(
+        &mut self,
+        _server: &str,
+        _tool: &str,
+        _name: &str,
+    ) -> Result<()> {
+        anyhow::bail!("gateway does not support task resultArtifact");
+    }
+    /// A per-dispatch storage choice, never wire arguments or correlation context.
+    fn call_with_result_artifact(
+        &mut self,
+        call: &ToolCall,
+        name: Option<&str>,
+    ) -> Result<ToolResult> {
+        anyhow::ensure!(
+            name.is_none(),
+            "gateway does not support task resultArtifact"
+        );
+        self.call(call)
+    }
 }

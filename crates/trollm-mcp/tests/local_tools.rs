@@ -51,10 +51,22 @@ fn builtin_discovery_and_dispatch_need_no_remote_configuration() {
     )
     .unwrap();
     let tools = gw.list_tools().unwrap();
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0].server, "local");
-    assert_eq!(tools[0].name, "calculate");
-    assert_eq!(tools[0].input_schema["type"], "object");
+    let mut names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "assert_equal",
+            "calculate",
+            "collection_total",
+            "extract_decimal",
+            "prepare_worklist",
+            "select_unique",
+        ]
+    );
+    assert!(tools.iter().all(|tool| tool.server == "local"));
+    let calculator = tools.iter().find(|tool| tool.name == "calculate").unwrap();
+    assert_eq!(calculator.input_schema["type"], "object");
     assert_eq!(gw.tool_class("local", "calculate"), ToolClass::Read);
     let result = gw.call(&call("add", "0.1", "0.2")).unwrap();
     assert_eq!(result.provenance, Provenance::Local);

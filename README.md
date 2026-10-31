@@ -27,8 +27,10 @@ The app prepares checksum-pinned models and connections, supports per-flow
 settings, browser OAuth and manual Bearer credentials, and shows persistent run
 history. The coder calls granted built-in or MCP tools; the tool-free reasoner
 supplies prose. A deterministic executor controls progress and artifacts. Models
-load on first slot use after checksum verification; interrupted work requires
-explicit Resume rather than restarting when the app opens.
+prepare after an explicit Start/Resume, with checksum verification and at most
+two parallel preparations; plans using more than two slots remain lazy. Interrupted work requires
+explicit Resume. Opening the app never preloads models or replays a run. See
+[model preparation](docs/MODEL-PREPARATION.md) for controls and measurement limits.
 
 **Check a total** uses the phone's [built-in calculator](docs/BUILTIN-TOOLS.md)
 to add two amounts selected from text and compare the result with your budget,
@@ -39,10 +41,12 @@ to be established on an APK containing it.
 
 ## Current evidence and limits
 
-Current source prepares **0.1.0-rc.6 / Android code 7**, adding `local.calculate`
-and **Check a total**. Coverage includes scripted executor/gateway tests, bundle
-checks and native tool-fence grammar tests. These checks do not establish
-real-model operand selection or acceptance of an rc.6 APK.
+Current source prepares **0.1.0-rc.8 / Android code 43**, adding prepared
+worklists, complete-collection arithmetic, reusable child returns with original
+evidence retained, bounded live progress and correlated timing/size observations.
+[The contracts and implementation record](docs/amazon-generalization/README.md)
+describe the scripted checks and limits. These changes do not establish
+real-model selection accuracy or acceptance of an rc.8 APK.
 
 On 2026-10-19, the signed **0.1.0-rc.5 / Android code 6** candidate completed
 email-OTP OAuth login and callback, retained the connection after cold reopen,
@@ -71,6 +75,8 @@ ready; source updates do not renew acceptance of different APK bytes.
 - [Coder-directed flows](docs/ADAPTIVE-FLOWS.md): authored routes, control tools
   and step context, with a scripted source example
 - [Android development](apps/android/README.md): build, setup and device guidance
+- [Owned Moray source connector](docs/MORAY-SOURCE-CONNECTOR.md): separate source
+  authentication, complete installation identity and durable report custody
 - [Premise](docs/PREMISE.md) and [current architecture](docs/ARCHITECTURE-ANDROID.md)
 - [Flow references](flows/README.md) and [execution-plan schema](schemas/execution-plan.v1.schema.json)
 - [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md) and

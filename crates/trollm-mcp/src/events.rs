@@ -19,6 +19,12 @@ pub enum ProxyEvent {
         source: String,
         compact_json_utf8_bytes: Option<u64>,
         page: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_context: Option<crate::CallContext>,
+        /// Cumulative phase milliseconds at this boundary. Subphases overlap
+        /// total; absent phases were not entered. These are not wire timings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timings: Option<serde_json::Value>,
     },
     CacheHit {
         server: String,

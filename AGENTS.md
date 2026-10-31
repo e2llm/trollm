@@ -107,7 +107,9 @@ For a first session, read in this order:
 | --- | --- |
 | Flow control, step instructions or generation limits | [ADAPTIVE-FLOWS.md](docs/ADAPTIVE-FLOWS.md); the executable `flows/examples/adaptive-routing.flow.yaml` and its registry |
 | Built-in tools and calculator arguments/results | [BUILTIN-TOOLS.md](docs/BUILTIN-TOOLS.md) |
+| Prepared lists, repeated item subflows, compact returns or run measurements | [Count-independent workflow contracts](docs/amazon-generalization/README.md), especially [child returns](docs/amazon-generalization/G2-CONTRACT.md) and [measurement boundaries](docs/amazon-generalization/PERFORMANCE.md) |
 | Runtime behavior or formats | [ARCHITECTURE-ANDROID.md](docs/ARCHITECTURE-ANDROID.md), including its later implementation qualifications; relevant `schemas/`, reader and tests |
+| Preserve separate native results from the same remote read tool | [Task-specific result artifacts](docs/TASK-RESULT-ARTIFACTS.md); names are static destinations, not per-iteration archives |
 | Android | [Android guide](apps/android/README.md) |
 | Security | [SECURITY.md](SECURITY.md) and [enterprise security](docs/SECURITY-ENTERPRISE.md) |
 | Human flow review / self-hosted viewer | [Flow review design and implementation plan](docs/flow-review/README.md); isolated application in `apps/flow-review/` |
@@ -117,6 +119,10 @@ host checks and phone-owner handoff. Keep its business logic in the flow.
 If `docs/AMAZON-PORT-PLAN.md` exists, it records the current aligned port and
 remaining checks. [Small-model flow practices](docs/FLOW-PRACTICES.md) explains
 how to apply browser-run lessons without adding special cases to the runtime.
+Its [repeated step groups](docs/FLOW-PRACTICES.md#repeated-step-groups) describe
+preparing intent once, selecting from original evidence, then acting, observing
+and assessing through existing tasks. Apply fixes across corresponding item and
+recovery paths; do not patch only the latest recorded failure.
 
 `docs/ADAPTIVE-FLOWS.md` describes **implemented** routing.
 `docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` contain
@@ -139,8 +145,10 @@ scripted tests; procurement is an incomplete design sketch.
   model files pinned by SHA-256 checksums. Preserve original results through bindings.
 - A failed or interrupted write may already have taken effect. Preserve mutation
   journaling and conservative recovery; observe before attempting another write.
-- Models load on first use. Opening the app does not preload models or replay
-  runs. Lost workers require explicit Resume; Android owns foreground execution,
+- After explicit Start/Resume, up to two task-referenced models prepare in
+  parallel within that run; plans using more than two slots remain lazy. See
+  [model preparation](docs/MODEL-PREPARATION.md). Opening the app does not preload
+  models or replay runs. Lost workers require explicit Resume; Android owns foreground execution,
   credentials and persistent app data.
 
 ## Make and check a change

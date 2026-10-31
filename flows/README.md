@@ -6,6 +6,14 @@ the sources of the installable bundles shipped with the Android app.
 
 New to the format? Start with [Anatomy of a flow](../docs/ANATOMY-OF-A-FLOW.md),
 which connects the minimal plan, registry, prompt and scripted executor test.
+For larger procedures, use the [repeated step groups](../docs/FLOW-PRACTICES.md#repeated-step-groups)
+to prepare intent once, select from original evidence, and act/observe/assess.
+They are authoring patterns using existing tasks and routes, not new node types.
+
+To keep separate results from the same remote read tool, use the implemented
+[task-specific result artifact](../docs/TASK-RESULT-ARTIFACTS.md) field. It names
+native results without model copying; the guide explains restrictions, replacement
+and the difference between a cached result and a fresh observation.
 
 In the current v1 runtime, `input.promptTemplate` is reserved metadata and is not
 rendered. Task-registry `prompt` files supply model instructions and can reference

@@ -47,6 +47,25 @@ fn validate_plan_into(plan: &ExecutionPlan, problems: &mut Vec<String>) {
 fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
     let at = |node: &str| format!("plan '{}' node '{node}'", plan.id);
 
+    if let Some(exports) = &plan.exports {
+        let identifier = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        };
+        if exports.is_empty()
+            || exports.len() > 32
+            || exports.iter().any(|(name, binding)| {
+                !identifier(name)
+                    || binding.from.len() > 256
+                    || !binding.from.split('.').all(identifier)
+            })
+        {
+            problems.push(format!("plan '{}': exports requires 1 through 32 named static dotted bindings (names <=64, paths <=256 bytes)", plan.id));
+        }
+    }
+
     // Policies are opaque in the plan model, but their authored keys are closed
     // by the gateway's typed model, including when a custom gateway is supplied.
     let policies = serde_yaml::to_value(&plan.mcp.policies)
@@ -108,12 +127,8 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
             {
                 problems.push(format!("{}: routes requires 1 through 16 ASCII identifier names, at most 64 characters", at(name)));
             }
-            if node.on_verified.is_some() {
-                problems.push(format!(
-                    "{}: routes and onVerified are mutually exclusive",
-                    at(name)
-                ));
-            }
+            // Whether both exit forms are legal depends on the registry's
+            // completion mode; tool-or-route explicitly requires both.
             for target in routes.values() {
                 if matches!(
                     target,
@@ -252,7 +267,21 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
                         "{}: foreach node missing 'outputs' aggregation (§4.6)",
                         at(name)
                     )),
-                    Some(NodeOutputs::Foreach(_)) => {}
+                    Some(NodeOutputs::Foreach(spec)) => {
+                        if spec.values().any(|collect| collect.view.is_some()) && spec.len() > 8 {
+                            problems.push(format!(
+                                "{}: collection views permit at most 8 named collections",
+                                at(name)
+                            ));
+                        }
+                        for collect in spec.values() {
+                            if let Some(view) = &collect.view {
+                                if let Err(error) = view.validate() {
+                                    problems.push(format!("{}: {error}", at(name)));
+                                }
+                            }
+                        }
+                    }
                     Some(NodeOutputs::Task(_)) => problems.push(format!(
                         "{}: foreach 'outputs' must be collect specs (§4.6), not task bindings",
                         at(name)
@@ -395,6 +424,11 @@ pub fn validate_with_registry(
     }
     visit(plan, registry, &mut problems);
     if let Err(error) =
+        validate_task_result_artifacts(plan, registry, |_, _| trollm_mcp::policy::ToolClass::Read)
+    {
+        problems.push(error.to_string());
+    }
+    if let Err(error) =
         validate_mutation_safety(plan, registry, |_, _| trollm_mcp::policy::ToolClass::Read)
     {
         problems.push(error.to_string());
@@ -427,16 +461,51 @@ fn check_plan_against_registry(
             ));
             continue;
         };
+        if let Some(NodeOutputs::Task(outputs)) = &node.outputs {
+            for (output, binding) in outputs {
+                if matches!(binding, NodeOutputBinding::FromModel { .. })
+                    && matches!(
+                        task.output_contract.outputs.get(output),
+                        Some(crate::registry::OutputSpec::FromArtifact {
+                            schema: Some(_),
+                            ..
+                        })
+                    )
+                {
+                    problems.push(format!("plan '{}' node '{name}': schema-bearing artifact output '{output}' cannot be overridden by model output", plan.id));
+                }
+                if matches!(binding, NodeOutputBinding::FromArtifact { .. })
+                    && matches!(
+                        task.output_contract.outputs.get(output),
+                        Some(crate::registry::OutputSpec::FromModel {
+                            schema: Some(_),
+                            ..
+                        })
+                    )
+                {
+                    problems.push(format!("plan '{}' node '{name}': schema-bearing model output '{output}' cannot be overridden by artifact output", plan.id));
+                }
+            }
+        }
         if matches!(
             task.completion,
             crate::registry::TaskCompletion::FlowRoute
                 | crate::registry::TaskCompletion::ToolResult
+                | crate::registry::TaskCompletion::ToolOrRoute
         ) && matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.values().any(|o| matches!(o, NodeOutputBinding::FromModel { .. })))
         {
             problems.push(format!("plan '{}' node '{name}': tool-result/flow-route completion cannot bind model outputs", plan.id));
         }
-        if (task.completion == crate::registry::TaskCompletion::FlowRoute) != node.routes.is_some()
-        {
+        let exits_valid = match task.completion {
+            crate::registry::TaskCompletion::ToolOrRoute => {
+                node.routes.is_some() && node.on_verified.is_some()
+            }
+            crate::registry::TaskCompletion::FlowRoute => {
+                node.routes.is_some() && node.on_verified.is_none()
+            }
+            _ => node.routes.is_none() && node.on_verified.is_some(),
+        };
+        if !exits_valid {
             problems.push(format!("plan '{}' node '{name}': flow-route requires routes, other completions require onVerified", plan.id));
         }
         if !plan.models.contains_key(&task.model) {
@@ -455,6 +524,93 @@ fn check_plan_against_registry(
         if let Err(e) = registry.prompt_template(task) {
             problems.push(format!("task '{task_ref}': {e}"));
         }
+    }
+}
+
+/// Root storage policies govern every child and cannot be downgraded by adapters.
+pub(crate) fn validate_task_result_artifacts(
+    root: &ExecutionPlan,
+    registry: &TaskRegistry,
+    class: impl Fn(&str, &str) -> trollm_mcp::policy::ToolClass,
+) -> Result<(), ValidationError> {
+    fn visit(
+        plan: &ExecutionPlan,
+        root: &ExecutionPlan,
+        registry: &TaskRegistry,
+        class: &impl Fn(&str, &str) -> trollm_mcp::policy::ToolClass,
+        owners: &mut std::collections::BTreeMap<String, String>,
+        problems: &mut Vec<String>,
+    ) {
+        let policies = serde_yaml::to_value(&root.mcp.policies)
+            .map_err(anyhow::Error::from)
+            .and_then(|v| trollm_mcp::PolicySet::from_yaml_value(&v));
+        for (id, node) in &plan.nodes {
+            let Some(task) = node.task_ref.as_deref().and_then(|n| registry.task(n)) else {
+                continue;
+            };
+            let Some(name) = &task.result_artifact else {
+                continue;
+            };
+            let Some(tool) = task.tools.first() else {
+                continue;
+            };
+            let Some((server, method)) = tool.split_once('.') else {
+                continue;
+            };
+            let result = policies
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .and_then(|p| p.task_result_policy(server, method, name));
+            if let Err(e) = result {
+                problems.push(format!("plan '{}' node '{id}': {e:#}", plan.id));
+            }
+            if class(server, method) != trollm_mcp::policy::ToolClass::Read {
+                problems.push(format!(
+                    "task resultArtifact '{name}' requires actual gateway read classification"
+                ));
+            }
+            if owners
+                .insert(name.clone(), tool.clone())
+                .is_some_and(|old| old != *tool)
+            {
+                problems.push(format!(
+                    "task resultArtifact '{name}' is owned by unrelated tools"
+                ));
+            }
+            let valid_binding = task.output_contract.outputs.iter().any(|(output, spec)| {
+                if let Some(NodeOutputs::Task(overrides)) = &node.outputs {
+                    if let Some(value) = overrides.get(output) {
+                        return matches!(value, NodeOutputBinding::FromArtifact { from_artifact, .. } if from_artifact == name);
+                    }
+                }
+                matches!(spec, crate::registry::OutputSpec::FromArtifact { from_artifact, .. } if from_artifact == name)
+            });
+            if !valid_binding
+                || !task
+                    .output_contract
+                    .require_artifact_complete
+                    .contains(name)
+            {
+                problems.push(format!("task resultArtifact '{name}' requires a matching artifact output and completeness requirement"));
+            }
+        }
+        for sub in plan.subflows.values() {
+            visit(sub, root, registry, class, owners, problems);
+        }
+    }
+    let mut problems = Vec::new();
+    visit(
+        root,
+        root,
+        registry,
+        &class,
+        &mut std::collections::BTreeMap::new(),
+        &mut problems,
+    );
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::new("task resultArtifact", problems))
     }
 }
 

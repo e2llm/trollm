@@ -1,10 +1,14 @@
 //! Optional, content-pinned setup defaults. Runtime overrides are resolved elsewhere.
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use trollm_core::plan::hex_sha256;
 use trollm_core::ExecutionPlan;
@@ -95,6 +99,40 @@ pub struct ToolArguments {
 pub(crate) struct ResolvedInput {
     pub canonical: String,
     pub argument_constraints: BTreeMap<String, Value>,
+}
+
+/// Read retained input evidence under its original independent byte bound.
+pub(crate) fn read_input_evidence(directory: &Path, name: &str, maximum: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(directory.join(name))?
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        bail!("retained input evidence exceeds bound");
+    }
+    Ok(bytes)
+}
+
+/// Native-authoritative normalization with an independently serialized APK value.
+/// Equality is exact UTF-8 bytes, not parsed JSON equivalence.
+pub(crate) fn admit_source_input(
+    input: &SetupInput,
+    raw: &str,
+    apk_normalized: &str,
+) -> Result<Value> {
+    if input.fields.is_none() || apk_normalized.len() > 65536 {
+        bail!("source admission requires bounded structured input");
+    }
+    let resolved = input.resolve(raw)?;
+    if resolved.canonical != apk_normalized {
+        bail!("APK/native input normalization or serialization disagreement");
+    }
+    Ok(json!({"schema":"trollm.source-input-admission.v1",
+        "raw":{"sha256":hex_sha256(raw.as_bytes()),"sizeBytes":raw.len()},
+        "normalized":{"sha256":hex_sha256(resolved.canonical.as_bytes()),"sizeBytes":resolved.canonical.len()},
+        "basis":"raw-bytes","normalization":"rust-str-trim-unicode-scalars",
+        "serialization":"serde-json-btree-string-object",
+        "apkNormalized":apk_normalized}))
 }
 
 fn input_key(key: &str) -> bool {
@@ -192,11 +230,35 @@ impl SetupInput {
             bail!("structured input exceeds 64 KiB");
         }
         // Never format serde errors: their diagnostics can include supplied values.
-        let value: Value = serde_json::from_str(raw)
-            .map_err(|_| anyhow::anyhow!("structured input must be a JSON object of strings"))?;
-        let object = value
-            .as_object()
-            .context("structured input must be a JSON object of strings")?;
+        // Decode the original object before collecting it: Value would silently
+        // collapse duplicate names, including escaped aliases of the same key.
+        struct StringObject;
+        impl<'de> Visitor<'de> for StringObject {
+            type Value = BTreeMap<String, String>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("one object of unique string fields")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut values = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if values.contains_key(&key) {
+                        return Err(serde::de::Error::custom("duplicate input field"));
+                    }
+                    values.insert(key, map.next_value::<String>()?);
+                }
+                Ok(values)
+            }
+        }
+        let mut decoder = serde_json::Deserializer::from_str(raw);
+        let object = decoder
+            .deserialize_map(StringObject)
+            .map_err(|_| anyhow::anyhow!("structured input requires unique string fields"))?;
+        decoder
+            .end()
+            .map_err(|_| anyhow::anyhow!("invalid structured input suffix"))?;
         if object
             .keys()
             .any(|key| !fields.iter().any(|field| &field.key == key))
@@ -206,9 +268,7 @@ impl SetupInput {
         let mut normalized = BTreeMap::new();
         for field in fields {
             let text = match object.get(&field.key) {
-                Some(value) => value
-                    .as_str()
-                    .context("structured input values must be strings")?,
+                Some(value) => value.as_str(),
                 None => "",
             }
             .trim();
@@ -920,5 +980,24 @@ tasks:
         fs::write(dir.join("setup.json"), b"{}").unwrap();
         assert!(load_flow_setup(&root, &dir, &verified).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn source_admission_rejects_duplicate_aliases_and_keeps_raw_identity() {
+        let input = setup_with_input(structured_input()).input.unwrap();
+        for raw in [
+            r#"{"browser":"a","browser":"b","url":"https://example.org"}"#,
+            r#"{"browser":"a","\u0062rowser":"b","url":"https://example.org"}"#,
+            r#"{"browser":true,"url":"https://example.org"}"#,
+            r#"{"browser":"a","url":"https://example.org"} {}"#,
+        ] {
+            assert!(input.resolve(raw).is_err());
+        }
+        let raw = r#"{"url":" https://example.org ","browser":" chosen "}"#;
+        let normalized = input.resolve(raw).unwrap().canonical;
+        let receipt = admit_source_input(&input, raw, &normalized).unwrap();
+        assert_ne!(receipt["raw"]["sha256"], receipt["normalized"]["sha256"]);
+        assert_eq!(receipt["raw"]["sizeBytes"], raw.len());
+        assert!(admit_source_input(&input, raw, raw).is_err());
+        assert!(admit_source_input(&input, &" ".repeat(65537), &normalized).is_err());
     }
 }
