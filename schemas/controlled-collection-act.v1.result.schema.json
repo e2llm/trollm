@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Controlled collection returned action observation subset",
+  "description": "A returned observation only, never a business predicate or resend permit. Preview and uncertain dispatch are refused.",
+  "type": "object",
+  "required": [
+    "result",
+    "actionClassification"
+  ],
+  "not": {
+    "required": [
+      "approvalRequired"
+    ]
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "result": {
+          "const": "mutation"
+        },
+        "actionClassification": {
+          "const": "mutation-observed"
+        }
+      }
+    },
+    {
+      "properties": {
+        "result": {
+          "const": "recapture"
+        },
+        "actionClassification": {
+          "const": "recapture-triggered"
+        }
+      }
+    },
+    {
+      "properties": {
+        "result": {
+          "const": "no-change"
+        },
+        "actionClassification": {
+          "const": "dispatched-no-dom-change"
+        }
+      }
+    },
+    {
+      "properties": {
+        "result": {
+          "const": "navigation"
+        },
+        "actionClassification": {
+          "const": "navigation"
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

@@ -34,6 +34,7 @@ export interface Plan extends RecordValue {
   path: string;
   id: string;
   entryStep: string;
+  exports?: Record<string, { from: string }>;
   nodes: Record<string, RecordValue>;
   limits: RecordValue;
 }

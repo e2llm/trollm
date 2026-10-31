@@ -29,9 +29,9 @@ import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 /** App-owned OAuth only. Legacy manually provisioned bearer tokens remain separate. */
-class OAuthConnections private constructor(private val context: Context) {
-    private val grants = storage { SecretsStore(context).oauthGrants }
-    private val connections = OAuthConnectionBuilder(context.filesDir)
+class OAuthConnections private constructor(private val context: Context, private val source: Boolean = false) {
+    private val grants = storage { SecretsStore(context, source).oauthGrants }
+    private val connections = OAuthConnectionBuilder(context.filesDir, source)
     private val main = Handler(Looper.getMainLooper())
     private val persistence = Executors.newSingleThreadExecutor()
     private val pinnedServers = ConcurrentHashMap<String, String>()
@@ -136,6 +136,16 @@ class OAuthConnections private constructor(private val context: Context) {
 
     /** Browser PKCE: RFC8414 metadata is mapped explicitly, never parsed as OIDC discovery. */
     suspend fun signIn(server: String, endpointInput: String) {
+        require(!source)
+        beginSignIn(server, endpointInput, null)
+    }
+
+    suspend fun signInMoray(profile: MorayProfile) {
+        require(source)
+        beginSignIn("moray-${profile.key}", profile.api, profile)
+    }
+
+    private suspend fun beginSignIn(server: String, endpointInput: String, profile: MorayProfile?) {
         if (!ConnectionInput.validServer(server)) throw OAuthProblemException(OAuthProblem.CONFIGURATION)
         val endpoint = configuration { ConnectionInput.canonicalEndpoint(endpointInput) }
         withPendingOAuthGrant(
@@ -144,13 +154,13 @@ class OAuthConnections private constructor(private val context: Context) {
         ) { grant ->
             refresh.clearServer(server)
             val metadata = withContext(Dispatchers.IO) {
-                try { metadata(endpoint) } catch (cancelled: CancellationException) { throw cancelled }
+                try { if (profile == null) metadata(endpoint) else sourceMetadata(profile) } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) { throw OAuthProblemException(classifyOAuthProblem(failure)) }
             }
             val sdkConfiguration = configuration {
                 AuthorizationServiceConfiguration(metadata.authorization, metadata.token, metadata.registration)
             }
-            val registration = withContext(Dispatchers.Main) {
+            val registration = if (profile != null) null else withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<RegistrationResponse> { continuation ->
                     try {
                         service.performRegistrationRequest(
@@ -173,14 +183,14 @@ class OAuthConnections private constructor(private val context: Context) {
                 }
             }
             val request = configuration {
-                AuthorizationRequest.Builder(sdkConfiguration, registration.clientId, ResponseTypeValues.CODE, REDIRECT)
+                AuthorizationRequest.Builder(sdkConfiguration, profile?.clientId ?: checkNotNull(registration).clientId, ResponseTypeValues.CODE, REDIRECT)
                     .setScope(metadata.scope)
                     .setCodeVerifier(CodeVerifierUtil.generateRandomCodeVerifier())
                     .build()
             }
             withContext(Dispatchers.IO) {
                 val saved = storage { grants.prepare(server, grant.id, endpoint,
-                    configuration { AuthState(registration).jsonSerializeString() }, request.jsonSerializeString()) }
+                    configuration { (if (registration != null) AuthState(registration) else AuthState(sdkConfiguration)).jsonSerializeString() }, request.jsonSerializeString()) }
                 if (!saved) throw OAuthProblemException(OAuthProblem.RECONNECT)
             }
             withContext(Dispatchers.Main) {
@@ -248,13 +258,13 @@ class OAuthConnections private constructor(private val context: Context) {
             .setAction(if (cancelled) "com.trollm.app.OAUTH_CANCEL" else "com.trollm.app.OAUTH_COMPLETE")
             .setData(Uri.parse("com.trollm.app:oauth-result/${grant.id}"))
             .putExtra(EXTRA_SERVER, grant.server).putExtra(EXTRA_GRANT, grant.id)
-            .putExtra(EXTRA_CANCEL, cancelled)
+            .putExtra(EXTRA_CANCEL, cancelled).putExtra(EXTRA_SOURCE, source)
         // AppAuth must fill in its response; the destination is explicit and non-exported.
         return PendingIntent.getActivity(context, 0, intent,
             PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ONE_SHOT)
     }
 
-    private data class Metadata(val authorization: Uri, val token: Uri, val registration: Uri, val scope: String)
+    private data class Metadata(val authorization: Uri, val token: Uri, val registration: Uri?, val scope: String)
 
     private fun metadata(endpoint: String): Metadata = try {
         readMetadata(endpoint)
@@ -302,12 +312,35 @@ class OAuthConnections private constructor(private val context: Context) {
             endpointUri("registration_endpoint"), scope)
     }
 
+    private fun sourceMetadata(profile: MorayProfile): Metadata {
+        val connection = connections.openConnection(Uri.parse(profile.issuer + "/.well-known/openid-configuration"))
+        val value = try {
+            require(connection.responseCode == 200)
+            JSONObject(connection.inputStream.use { BundleInput.read(it, 64 * 1024) }.toString(Charsets.UTF_8))
+        } finally { connection.disconnect() }
+        require(value.getString("issuer") == profile.issuer)
+        val methods = value.getJSONArray("code_challenge_methods_supported")
+        require((0 until methods.length()).any { methods.getString(it) == "S256" })
+        fun endpoint(name: String): Uri {
+            val text = ConnectionInput.canonicalEndpoint(value.getString(name))
+            require(URI(text).rawAuthority == URI(profile.issuer).rawAuthority)
+            return Uri.parse(text)
+        }
+        return Metadata(endpoint("authorization_endpoint"), endpoint("token_endpoint"), null,
+            "moray:bundle:read moray:edge-report:write offline_access")
+    }
+
     companion object {
         val REDIRECT: Uri = Uri.parse("com.trollm.app://oauth/callback")
         private const val EXTRA_SERVER = "oauth_server"
         private const val EXTRA_GRANT = "oauth_grant"
         private const val EXTRA_CANCEL = "oauth_cancel"
+        const val EXTRA_SOURCE = "oauth_source"
         @Volatile private var instance: OAuthConnections? = null
+        @Volatile private var sourceInstance: OAuthConnections? = null
+        fun moray(context: Context): OAuthConnections = sourceInstance ?: synchronized(this) {
+            sourceInstance ?: OAuthConnections(context.applicationContext, true).also { sourceInstance = it }
+        }
         fun get(context: Context): OAuthConnections = instance ?: synchronized(this) {
             instance ?: OAuthConnections(context.applicationContext).also { instance = it }
         }

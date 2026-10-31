@@ -48,6 +48,8 @@ pub struct ManifestFile {
 }
 
 pub struct InstallOutcome {
+    pub installation_sha256: String,
+    pub archive_sha256: String,
     pub flow_sha256: String,
     pub flow_id: String,
     pub flow_version: u32,
@@ -58,6 +60,16 @@ pub struct InstallOutcome {
 
 /// Verify and install a bundle under `base` (the `trollm/` dir, §8).
 pub fn install_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
+    install_bundle_revision(base, bytes, false)
+}
+
+/// Owned-source imports retain a dependency-complete manifest identity. Legacy
+/// manual installations remain addressed by their original entry-flow hash.
+pub fn install_source_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
+    install_bundle_revision(base, bytes, true)
+}
+
+fn install_bundle_revision(base: &Path, bytes: &[u8], source: bool) -> Result<InstallOutcome> {
     let entries = tar::extract(bytes)?;
     let by_path: BTreeMap<String, &[u8]> = entries
         .iter()
@@ -124,8 +136,15 @@ pub fn install_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
     }
 
     // --- Stage, validate, publish. ---
-    let bundles_dir = base.join("bundles");
-    let final_dir = bundles_dir.join(&root_sha);
+    let installation_sha = hex_sha256(manifest_bytes);
+    let archive_sha = hex_sha256(bytes);
+    let bundles_dir = base.join(if source {
+        "bundle-revisions"
+    } else {
+        "bundles"
+    });
+    let address = if source { &installation_sha } else { &root_sha };
+    let final_dir = bundles_dir.join(address);
     if final_dir.exists() {
         // Content-addressed idempotency: an identical bundle reinstalls fine;
         // a different bundle for the same root flow sha is a conflict.
@@ -134,15 +153,24 @@ pub fn install_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
             validate_materialized_bundle(&final_dir, &manifest)?;
             // Publishing the directory and publishing discovery pins are
             // separate crash boundaries. Reinstall reconciles every pin.
-            publish_pins(base, &by_path)?;
-            let mut out = outcome(base, &final_dir, &root_sha, manifest.files.len())?;
+            if !source {
+                publish_pins(base, &by_path)?;
+            }
+            let mut out = outcome(
+                base,
+                &final_dir,
+                &root_sha,
+                manifest.files.len(),
+                &installation_sha,
+                &archive_sha,
+            )?;
             out.signature_status = verify_bundle_signatures(&by_path)?;
             return Ok(out);
         }
         bail!("a different bundle is already installed for flow sha256 {root_sha}");
     }
 
-    let staging = bundles_dir.join(format!(".staging-{root_sha}"));
+    let staging = bundles_dir.join(format!(".staging-{address}"));
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
@@ -187,9 +215,18 @@ pub fn install_bundle(base: &Path, bytes: &[u8]) -> Result<InstallOutcome> {
     fs::create_dir_all(&bundles_dir)?;
     fs::rename(&staging, &final_dir)?;
 
-    publish_pins(base, &by_path)?;
+    if !source {
+        publish_pins(base, &by_path)?;
+    }
 
-    let mut out = outcome(base, &final_dir, &root_sha, manifest.files.len())?;
+    let mut out = outcome(
+        base,
+        &final_dir,
+        &root_sha,
+        manifest.files.len(),
+        &installation_sha,
+        &archive_sha,
+    )?;
     out.flow_id = plan.id;
     out.flow_version = plan.version;
     out.signature_status = signature_status;
@@ -322,6 +359,32 @@ pub fn inspect_materialized_bundle(
     Ok((plan, registry, setup))
 }
 
+/// Resolve an explicit full installation identity without changing legacy root pins.
+pub(crate) fn revision_dir(base: &Path, installation: &str) -> Result<PathBuf> {
+    if installation.len() != 64
+        || !installation
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!("installation sha256 must be 64 lowercase hexadecimal characters");
+    }
+    let dir = base.join("bundle-revisions").join(installation);
+    if hex_sha256(&fs::read(dir.join(MANIFEST_NAME))?) != installation {
+        bail!("installed manifest does not match installation identity");
+    }
+    Ok(dir)
+}
+
+pub(crate) fn revision_setup(
+    base: &Path,
+    installation: &str,
+) -> Result<Option<crate::setup::FlowSetup>> {
+    let dir = revision_dir(base, installation)?;
+    let manifest: BundleManifest = serde_json::from_slice(&fs::read(dir.join(MANIFEST_NAME))?)?;
+    let (_, _, setup) = inspect_materialized_bundle(&dir, &manifest)?;
+    Ok(setup)
+}
+
 /// Inspect setup using the same verified boundary as installation and startup.
 pub(crate) fn installed_flow_setup(
     base: &Path,
@@ -358,7 +421,14 @@ pub(crate) fn installed_flow_setup(
     crate::setup::load_flow_setup(&plan, &dir, &verified)
 }
 
-fn outcome(base: &Path, bundle_dir: &Path, root_sha: &str, files: usize) -> Result<InstallOutcome> {
+fn outcome(
+    base: &Path,
+    bundle_dir: &Path,
+    root_sha: &str,
+    files: usize,
+    installation_sha: &str,
+    archive_sha: &str,
+) -> Result<InstallOutcome> {
     // Re-read the installed entry flow for id/version (cheap; YAML is small).
     let manifest: BundleManifest = serde_json::from_slice(
         &fs::read(bundle_dir.join(MANIFEST_NAME)).context("reading installed manifest")?,
@@ -366,6 +436,8 @@ fn outcome(base: &Path, bundle_dir: &Path, root_sha: &str, files: usize) -> Resu
     let plan = ExecutionPlan::from_yaml_file(&bundle_dir.join(&manifest.entry_flow))?;
     let _ = base;
     Ok(InstallOutcome {
+        installation_sha256: installation_sha.to_string(),
+        archive_sha256: archive_sha.to_string(),
         flow_sha256: root_sha.to_string(),
         flow_id: plan.id,
         flow_version: plan.version,

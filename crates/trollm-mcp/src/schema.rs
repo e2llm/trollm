@@ -10,14 +10,35 @@ use std::io::{self, Write};
 
 const SCHEMA_BYTES: usize = 64 * 1024;
 const SCHEMA_DEPTH: usize = 32;
-const ARG_BYTES: usize = 256 * 1024;
-const ARG_DEPTH: usize = 64;
+pub(crate) const ARG_BYTES: usize = 256 * 1024;
+pub(crate) const ARG_DEPTH: usize = 64;
 const PATH_CHARS: usize = 128;
 const REGEX_BACKTRACKS: usize = 10_000;
 const REGEX_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct ToolSchema {
     validator: Validator,
+}
+
+/// Offline, bounded JSON Schema validation for full artifact output values.
+/// Callers supply their artifact-byte budget rather than a tool-argument limit.
+pub struct ArtifactSchema(ToolSchema);
+
+impl ArtifactSchema {
+    pub fn compile(schema: &Value) -> Result<Self> {
+        if !schema.is_object() {
+            bail!("artifact output schema must be a JSON object");
+        }
+        Ok(Self(ToolSchema::compile_labelled(
+            schema,
+            "artifact output schema",
+        )?))
+    }
+
+    pub fn validate(&self, value: &Value, max_bytes: usize) -> Result<()> {
+        check_limits(value, max_bytes, ARG_DEPTH, "artifact output")?;
+        self.0.validate_labelled(value, "artifact output")
+    }
 }
 
 impl ToolSchema {
@@ -58,7 +79,11 @@ impl ToolSchema {
     }
 
     pub(crate) fn validate(&self, args: &Value) -> Result<()> {
-        check_limits(args, ARG_BYTES, ARG_DEPTH, "tool arguments")?;
+        self.validate_with_byte_limit(args, ARG_BYTES)
+    }
+
+    pub(crate) fn validate_with_byte_limit(&self, args: &Value, max_bytes: usize) -> Result<()> {
+        check_limits(args, max_bytes, ARG_DEPTH, "tool arguments")?;
         self.validate_labelled(args, "tool argument")
     }
 
@@ -98,7 +123,12 @@ fn bounded_path(path: String) -> String {
     result
 }
 
-fn check_limits(value: &Value, max_bytes: usize, max_depth: usize, label: &str) -> Result<()> {
+pub(crate) fn check_limits(
+    value: &Value,
+    max_bytes: usize,
+    max_depth: usize,
+    label: &str,
+) -> Result<()> {
     // Reject excessive nesting before serialization; recursion is bounded by
     // max_depth even when the caller constructed the Value programmatically.
     fn walk(value: &Value, depth: usize, max: usize) -> bool {

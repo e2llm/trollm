@@ -168,8 +168,10 @@ validation. Other slot names do not acquire an inferred semantic role.
 ### 4.2 Transition keys — closed set
 
 `onVerified`, `onComplete`, `onEmpty`, `onLimit`, `onError`, and the authored
-`routes` map for `completion: flow-route` tasks. Routes replace `onVerified` on
-those nodes. Values are node ids or inline `{ status: paused|failed, reason: string }`.
+`routes` map for `completion: flow-route` or `tool-or-route` tasks. `flow-route`
+uses routes instead of `onVerified`; `tool-or-route` requires both ordinary
+success and authored control exits. Values are node ids or inline
+`{ status: paused|failed, reason: string }`.
 A paused route also supplies `resumeAt`, an existing continuation node persisted
 with the paused state. It resumes there without replaying the completed chooser.
 Legacy inline pauses outside routes can omit this field and keep their existing
@@ -280,6 +282,32 @@ tasks:
       allowNoop: true
 ```
 
+### Task-specific result artifact names
+
+A single-generation `tool-result` task granting exactly one non-paginated remote
+read tool may declare `resultArtifact: selected-original`. Its root tool policy
+must already declare a result artifact; `serveFrom`, local/control tools and
+mutations are excluded. The optional task field changes only this dispatch's
+native storage destination. The model does not supply it and wire arguments,
+credentials, validation, cache identity, deadlines and classification are unchanged.
+Names use existing safe basename bounds and cannot collide with reserved native
+artifacts or another tool's destination. Same-tool producers may deliberately
+share a name across authored branches.
+
+Core clears old producer outputs and invalidates the target before generation.
+Failure to invalidate ends the run, bypassing authored retries/error routes that
+could otherwise read a still-complete old file. Normal success requires the named
+artifact from the current call. Gateway direct
+calls invalidate before transport/cache access and publish through existing
+validation, hash and completeness paths. Unsupported adapters fail closed. An
+alias published from cache retains Cache provenance; publication is not recapture
+or proof of freshness. Original and narrow reads can therefore retain separate
+artifacts without copying prose, interpreting DOM, adding a model call or changing
+mutation recovery. Omission preserves old task behavior. Runtimes predating this
+field reject it; an APK containing the updated Rust code is required. See the
+[authoring guide and limits](TASK-RESULT-ARTIFACTS.md) and
+[local schema](../schemas/task-result-artifact.v1.schema.json).
+
 Task loop semantics (`completion: model-prose`, the default): render prompt → generate → if output contains a tool-call
 fence → gateway executes → append result → repeat → else the text is the node's prose output
 → verify contract → transition. Loop exit without prose after `maxSteps` =
@@ -291,6 +319,71 @@ acceptance or tool-call parsing/dispatch, even if their text contains a complete
 fence. No automatic continuation is added. Token use is still counted; if that
 response also exceeds its frame's token budget, the existing `onLimit` policy
 takes precedence and cannot consume the rejected response as a valid result.
+
+Artifact outputs may include an optional inline JSON Schema object:
+
+```yaml
+outputContract:
+  outputs:
+    data:
+      fromArtifact: observation
+      format: json
+      type: object
+      schema:
+        type: object
+        required: [metadata]
+        properties:
+          metadata:
+            type: object
+            required: [url]
+            properties:
+              url: {type: string, minLength: 1}
+```
+
+The registry validates authored schemas when loaded, using the existing offline
+JSON Schema engine and its 64 KiB/schema-depth-32/regex bounds. External references
+are not fetched. Schemas are JSON objects, not null or boolean values, and are
+accepted on `fromArtifact` and `from: model` outputs. There is no interpolation or expression
+evaluation inside a schema.
+
+Verification checks the complete original parsed JSON value (or the complete array
+parsed from JSONL) before a `view`, output binding or successful transition. Its
+byte allowance follows the active plan's artifact budget, with the existing
+schema-engine depth-64 limit; the 256 KiB tool-argument limit does not apply.
+Schema mismatches report a redacted `verification-failed` error and follow the
+node's existing `onError`. No output from the failed node is bound; original
+artifacts remain available as evidence. Existing completeness and coarse output
+type checks still apply.
+
+If a node overrides an output's artifact binding, its schema checks the effective
+original artifact before that node's view. A schema-bearing artifact output cannot
+be overridden by a model output. Omitting `schema` preserves earlier behavior.
+
+Model outputs can use the same optional schema object:
+
+```yaml
+outputContract:
+  outputs:
+    query: {from: model, type: string, schema: {type: string, minLength: 1}}
+```
+
+Validation checks the exact trimmed model string that will be published. It does
+not parse prose as JSON, extract fields, interpret query meaning or modify the
+string beyond the existing outer trim. Empty or whitespace-only responses fail
+the example contract. A same-source node-level model override still validates
+that string; an artifact override of a schema-bearing model output is rejected
+when the plan and registry are validated.
+
+The check runs while the original generation request and response are available,
+before model output binding or transition. A mismatch returns a redacted
+`verification-failed` error through existing `onError`. The existing private
+diagnostic writer may retain the original untrimmed failed response, prompt and
+decoder constraints, subject to its existing bounds and artifact allowance.
+Failure to save diagnostics cannot replace the contract failure. Successful
+model schema validation needs no artifact allocation and adds no value-byte cap
+to the existing generation limits; schemas still use the bounded offline engine.
+Model outputs without a schema keep their previous behavior, including accepting
+an empty string.
 
 Tasks may opt into `completion: tool-result` to finish an attempt after one
 successful tool call, without a follow-up model generation. This mode requires a
@@ -313,6 +406,19 @@ dispatch. Model-derived outputs are forbidden; artifact verification still runs.
 The control call never goes to the MCP gateway. See the
 [adaptive-flow contract](ADAPTIVE-FLOWS.md) for the complete interface, prompt
 supplements, runtime context and persisted recovery information.
+
+Tasks may use `completion: tool-or-route` for one coder generation that either
+invokes an ordinary tool or chooses an authored route. The node declares both
+`onVerified` and `routes`, the task grants `flow.choose` and an ordinary tool,
+and `loop.maxSteps` is one. Ordinary tool success must publish the current-call
+artifacts and pass output verification before `onVerified`. An authored route
+publishes no ordinary success outputs; previous output aliases for this node
+are cleared before a new attempt and stay absent after decline and Resume.
+Bound ordinary arguments remain supported; bound `flow.choose` arguments,
+model-derived outputs, prose completion and mixed or multiple calls are forbidden.
+A failed tool call follows `onError`, not a semantic decline. Mutation journaling,
+unknown-outcome handling and retry restrictions still apply. See the
+[complete mode contract](ADAPTIVE-FLOWS.md#one-tool-result-or-one-authored-route).
 
 Optional task `maxOutputTokens` (1 through 2048) and `generationTimeoutS`
 (1 through 600) bound each generation. Omission preserves the original token
@@ -350,7 +456,7 @@ toolArguments:
       tabId: open_page.outputs.opened.tabId
 ```
 
-This optional task field requires `completion: tool-result` and names only
+This optional task field requires `completion: tool-result` or `tool-or-route` and names only
 granted tools. `fromVars` uses dotted frame-variable paths, without expressions
 or filters. `fromInput` reads exact top-level keys from a JSON-object user input;
 it does not interpret dotted paths. `fixed` contains literal typed JSON values,
@@ -583,7 +689,8 @@ pub struct GenerationCapacity { pub context_tokens: u32, pub context_remaining: 
                                 pub effective_max_tokens: u32 }
 pub struct GenerateResponse { pub text: String, pub tokens_in: u32,
                               pub tokens_out: u32, pub finish: FinishReason,
-                              pub capacity: Option<GenerationCapacity> }
+                              pub capacity: Option<GenerationCapacity>,
+                              pub diagnostics: Option<GenerationDiagnostics> }
 pub trait ModelSlot: Send {
     fn generate(&mut self, req: GenerateRequest) -> anyhow::Result<GenerateResponse>;
 }
@@ -657,7 +764,8 @@ they are not synthetic journal events or evidence of task completion.
 - Secrets (MCP bearer tokens) in Android Keystore-backed EncryptedSharedPreferences;
   TLS-only egress to plan-declared MCP server hosts (network security config allowlist).
 - Model downloads are size/SHA-256 verified before publication. Native model
-  construction independently rechecks SHA-256 on first use of each slot. Opening
+  construction independently rechecks SHA-256 during run-scoped preparation or
+  first use of a lazy slot. Opening
   the app, history, or setup does not load models; there is no boot-time preload.
 - App never parses prose. It renders durable event entries and current worker
   activity. Notification permission is requested on the first user Start/Resume;
@@ -884,9 +992,15 @@ IDs and removes identifiable orphaned partial transfers on return.
 `start_run_configured` accepts app-resolved JSON with `version: 1`, a `models`
 map (`path`, `sha256`, `ctx`, `temperature`, `topP`) and a `connections` map
 (`url`). The bridge persists normalized effective settings in the run's
-`configuration.json`; cold resume reloads them. Each model slot verifies weight
-hashes and applies the recorded sampling settings when first used. Unused slots
-are not hashed or loaded. Loaded slots are reused within that executor and
+`configuration.json`; cold resume reloads them. After explicit Start/Resume and
+executor reconstruction, up to two task-referenced slots verify and load in
+parallel, with coder scheduled first. Plans referencing more than two distinct
+slots retain all-slot lazy loading to bound concurrent preparation. A referenced
+slot may be prepared even if the chosen route never uses it; an unused slot's
+preparation failure does not abort unrelated work. Checksum verification always
+precedes construction and recorded sampling settings still apply. See
+[model preparation](MODEL-PREPARATION.md) for worker ownership, controls and limits.
+Loaded slots are reused within that executor and
 released when it terminates; a reconstructed executor verifies and loads again.
 Pausing does not proactively evict a loaded model, and ordinary backgrounding
 does not launch a second worker or reload a model still owned by the first.
@@ -1035,7 +1149,7 @@ measures the value bound after `fromArtifact.view`; it does not assert that a
 later prompt used it. Numeric size metadata contains no result contents. Raw
 artifacts remain preserved independently.
 
-Generation follows the task completion contract: `tool-result` uses one tool-call
+Generation follows the task completion contract: `tool-result` and `tool-or-route` use one tool-call
 fence, `flow-route` uses tool calls, and a route-only task uses one call with a
 `route` from that node's declared exits. Ordinary `model-prose` tasks retain prose
 and permitted tool batches. Tool-free reasoners have no tool grammar. Decoding
@@ -1048,6 +1162,47 @@ the selected remote tool normally. Runtime-bound fields are omitted from the mod
 argument schema, while required unbound fields and explicit `modelFields` are
 retained. Complex schemas retain conservative fallback and final wire validation.
 
+Model-call events retain their existing outer `ms`, slot, token counts and finish
+reason. `requestPromptSha256` and nullable `grammarSha256` identify the exact
+request strings supplied to the model adapter, not native chat serialization;
+these digests log no additional content. Optional numeric `diagnostics` subdivides monotonic wall-clock time into
+`weightVerifyMs` and `loadMs` when a slot verifies/loads its weights. With
+`preparationAsync: true`, these intervals can overlap other calls and are not
+subdivisions of the consuming call's outer duration. `preparationWaitMs` measures
+only that call's wait (also reported if it times out before preparation finishes).
+Lazy synchronous loading retains its previous accounting. The native
+`prepareMs`, `prefillMs` and `generationMs` phases are disjoint. Preparation includes
+fresh context creation, chat formatting, tokenization and sampler/grammar setup.
+Prefill spans prompt batch construction and all prompt decode calls; generation
+spans sampling, output token decoding and stop checks, ending before normal
+response assembly/context teardown. These are wall times, not CPU times; verification includes any pause within its
+chunked read/check loop. Wrapper
+holds, teardown and rounding can leave outer time unattributed; phases must not be
+added to outer `ms`. Each phase is nullable: null means unentered/unmeasured, while
+zero means a measured interval shorter than one millisecond. Warm calls do not
+re-report earlier verification/load costs. Existing token-count semantics remain
+unchanged (including full tokenized prompt size after a partial prefill timeout).
+
+Native diagnostic settings identify the engine and configured context/thread
+counts. Batch/microbatch sizes are read from the established native context.
+Configured thread counts do not establish effective worker utilization; an unknown
+device/backend is null. Diagnostics change no sampling, threading, batching,
+cache or model settings. Length/Timeout responses retain their partial timings
+and existing bounded private response evidence. Genuine errors retain available
+partial timings and measured outer duration in the existing private diagnostic,
+with unavailable token counts/finish null. A numeric `model_call` observation
+with `failed: true` now records the attempted call with those null fields; it is
+not a model response or successful task output. Numeric evidence is available in exported
+`events.jsonl` and `model-failure-*.json` artifacts for a separately authorized
+phone comparison on the same saved capture/model configuration.
+
+The decoder grammar permits zero to four JSON whitespace characters at each
+syntax whitespace site, preventing unbounded indentation from consuming a tool
+call's generation budget. Adjacent sites can combine, but remain finite. This
+restriction does not change whitespace inside argument strings or ordinary prose,
+and the post-generation JSON parser still accepts arbitrary valid JSON whitespace.
+It does not bound argument content or guarantee semantic correctness.
+
 Failures may save bounded `model-failure-*.json` artifacts containing the prompt,
 grammar and available partial response. They are private diagnostics, not reports
 or successful task output: no truncated or timed-out call is dispatched. Files
@@ -1057,3 +1212,35 @@ boundaries with their original sizes and truncation flags; the event records the
 complete diagnostic artifact's hash. Failure to save diagnostics cannot
 replace the original failure. Run deletion removes these with the other artifacts;
 there is no automatic upload. Sanitize any manually shared run data.
+
+## 18. Bounded repeated workflows and live observations
+
+`local.prepare_worklist` freezes a bounded upstream-prepared context/item
+envelope; `local.collection_total` requires complete unique successful numeric
+coverage before summing exact decimals. Both are explicitly granted coder tools,
+with bound input rather than model-produced arrays. See
+[BUILTIN-TOOLS.md](BUILTIN-TOOLS.md) for their input, output and rejection rules.
+
+Optional plan `exports` selects named saved values at child return. Optional
+foreach collection `view` uses the same structural field mask as artifact views.
+Legacy returns remain unchanged. Explicit returns archive the child's complete
+bound node-output map before popping its frame; previously projected values
+are not magically restored to full remote payloads. Archives, exports and
+collections have independent hard limits. Missing/oversized values stop rather
+than truncate. [Child-return contracts](amazon-generalization/G2-CONTRACT.md)
+define the shape, persistence boundaries and exact caps.
+
+Android screen/service now use `observe_run(run_id, from_seq)`: a bounded
+disposable live view with batch cursor and omission indicator. Cold views
+strictly reconstruct once and are bounded/evictable; explicit inactive
+`invalidate_observation` requests revalidation. Existing `poll_status` and
+`tail_events` still strictly read the authoritative journal. Neither view nor
+metrics can authorize dispatch or change conservative recovery.
+
+Optional timing/correlation fields identify worker epoch, dispatch attempt and
+call across main/proxy observations. Failure observations do not masquerade as
+successful tool results. `run_ended` remains the terminal event. The terminal
+attempt measurement ends before its final event append and snapshot; it does
+not claim a complete terminal wall time. See the
+[measurement contract](amazon-generalization/PERFORMANCE.md) for phase overlap,
+unknown/zero coverage and the one-pass offline numeric summary.

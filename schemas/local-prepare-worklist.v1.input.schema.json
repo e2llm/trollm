@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "input"
+  ],
+  "properties": {
+    "input": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 49152,
+      "description": "Serialized JSON exactly {context:string,items:object[1..8]}; 48KiB UTF8 input, context 4KiB UTF8, compact item 4KiB, envelope depth 32. Runtime enforces decoded structure and byte bounds."
+    }
+  }
+}

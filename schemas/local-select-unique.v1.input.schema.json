@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.select_unique v1 arguments",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "field", "equals", "prefix"],
+  "properties": {
+    "items": {"type": "array", "maxItems": 100000, "items": {"type": "object"}, "description": "Complete original objects; at most 32 MiB of compact serialized JSON, no truncation."},
+    "field": {"type": "string", "maxLength": 4096, "pattern": "^(?:/(?:[^~]|~[01])*)?$", "description": "JSON pointer, at most 4096 UTF-8 bytes; no URI-fragment decoding."},
+    "equals": {"type": "string", "maxLength": 16384, "description": "Literal comparison value, at most 16384 UTF-8 bytes."},
+    "prefix": {"type": "string", "maxLength": 16384, "description": "Literal prefix, at most 16384 UTF-8 bytes; empty is allowed."}
+  }
+}

@@ -197,6 +197,7 @@ impl trollm_models::ModelSlot for CrashAfterWrites {
             tokens_out: 1,
             finish: trollm_models::FinishReason::Stop,
             capacity: None,
+            diagnostics: None,
         })
     }
 }

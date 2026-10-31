@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 schema = json.loads((ROOT / "schemas/execution-plan.v1.schema.json").read_text())
 Draft202012Validator.check_schema(schema)
 validator = Draft202012Validator(schema)
+task_result_schema = json.loads((ROOT / "schemas/task-result-artifact.v1.schema.json").read_text())
+Draft202012Validator.check_schema(task_result_schema)
+task_result_validator = Draft202012Validator(task_result_schema)
 plans = {}
 starter_plans = sorted((ROOT / "flows/starters").glob("*/*.flow.yaml"))
 for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")) + starter_plans:
@@ -48,16 +51,24 @@ references = [(name, ROOT / "flows/tasks" / registry) for name, registry in (
     ("prose-calculation", "prose-calculation.tasks.yaml"),
     ("adaptive-routing", "adaptive-routing.tasks.yaml"),
 )]
-references.extend((path.name.removesuffix(".flow.yaml"),
-                   path.with_name(path.name.replace(".flow.yaml", ".tasks.yaml")))
-                  for path in starter_plans)
+# A starter package can contain reusable child plans sharing its root registry.
+# Validate every plan above, then resolve each package from its named root.
+references.extend((directory.name,
+                   directory / f"{directory.name}.tasks.yaml")
+                  for directory in sorted((ROOT / "flows/starters").iterdir())
+                  if directory.is_dir() and (directory / f"{directory.name}.flow.yaml").is_file())
 for root_flow, registry_path in references:
     registry = yaml.safe_load(registry_path.read_text())
     assert registry["schemaVersion"] == "ledger.task-registry.v1"
     for name, task in registry["tasks"].items():
+        task_result_validator.validate(task)
         for output in task.get("outputContract", {}).get("outputs", {}).values():
+            if "schema" in output:
+                if not ("fromArtifact" in output or output.get("from") == "model") or not isinstance(output["schema"], dict):
+                    raise ValueError(f"{name}: schema requires a model/artifact output and JSON object")
+                Draft202012Validator.check_schema(output["schema"])
             if "view" in output:
-                binding = {key: value for key, value in output.items() if key != "type"}
+                binding = {key: value for key, value in output.items() if key not in ("type", "schema")}
                 Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/nodeOutputBinding"}).validate(binding)
         prompt = (registry_path.parent / task["prompt"]).resolve()
         if not prompt.is_relative_to(registry_path.parent.resolve()) or not prompt.is_file():
@@ -78,8 +89,9 @@ for root_flow, registry_path in references:
                 raise ValueError(f"{flow_id}: missing task {node['taskRef']}")
             if node["kind"] == "task":
                 task = registry["tasks"][node["taskRef"]]
-                routing = task.get("completion", "model-prose") == "flow-route"
-                if routing != ("routes" in node):
+                completion = task.get("completion", "model-prose")
+                routing = completion in ("flow-route", "tool-or-route")
+                if routing != ("routes" in node) or (("onVerified" in node) != (completion != "flow-route")):
                     raise ValueError(f"{flow_id}: routes require flow-route completion")
                 if routing and (task["model"] != "coder" or "flow.choose" not in task.get("tools", [])):
                     raise ValueError(f"{flow_id}: routing requires coder and flow.choose")

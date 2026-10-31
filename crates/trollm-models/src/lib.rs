@@ -10,6 +10,8 @@ pub mod llama;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+#[cfg(any(feature = "llama", test))]
+use std::time::Instant;
 
 #[cfg(any(feature = "llama", test))]
 mod deadline;
@@ -48,6 +50,143 @@ pub struct GenerateResponse {
     pub finish: FinishReason,
     /// Native tokenized context/output capacity; absent for models without this measurement.
     pub capacity: Option<GenerationCapacity>,
+    /// Numeric measurements only; unavailable for models without instrumentation.
+    pub diagnostics: Option<GenerationDiagnostics>,
+}
+
+/// Wall-clock phases, measured with a monotonic clock. Async preparation can
+/// overlap other run work and need not fall inside this call's total. Null means the
+/// phase was not entered/measured; zero is a measured sub-millisecond phase.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationDiagnostics {
+    /// Outer executor measurement, including wrappers and teardown when known.
+    pub total_ms: Option<u64>,
+    pub weight_verify_ms: Option<u64>,
+    pub load_ms: Option<u64>,
+    /// Verification/loading ran on a run-owned background worker. Reported on
+    /// first consumption; those phase durations may overlap other run work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_async: Option<bool>,
+    /// Time this generation call spent awaiting background preparation. Also
+    /// reported if its allowance expires before preparation completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_wait_ms: Option<u64>,
+    pub prepare_ms: Option<u64>,
+    pub prefill_ms: Option<u64>,
+    pub generation_ms: Option<u64>,
+    pub settings: GenerationSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationSettings {
+    pub engine: Option<String>,
+    /// Actual device/backend selection is not inferred from build defaults.
+    pub backend: Option<String>,
+    pub configured_context_tokens: Option<u32>,
+    pub configured_threads: Option<i32>,
+    pub configured_batch_threads: Option<i32>,
+    /// Read from an established native context, not inferred from defaults.
+    pub batch_tokens: Option<u32>,
+    pub micro_batch_tokens: Option<u32>,
+}
+
+impl GenerationDiagnostics {
+    /// Preparation phases are separate from inner generation phases.
+    pub fn include_loading(&mut self, loading: &Self) {
+        self.weight_verify_ms = loading.weight_verify_ms;
+        self.load_ms = loading.load_ms;
+        self.preparation_async = loading.preparation_async;
+        self.preparation_wait_ms = loading.preparation_wait_ms;
+    }
+}
+
+/// Preserve numeric partial measurements without converting a genuine error
+/// into a successful/zero-token model response. Display/source stay unchanged.
+#[derive(Debug)]
+pub struct ModelDiagnosticError {
+    source: anyhow::Error,
+    pub diagnostics: GenerationDiagnostics,
+}
+
+impl ModelDiagnosticError {
+    pub fn attach(source: anyhow::Error, diagnostics: GenerationDiagnostics) -> anyhow::Error {
+        Self {
+            source,
+            diagnostics,
+        }
+        .into()
+    }
+}
+
+impl std::fmt::Display for ModelDiagnosticError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for ModelDiagnosticError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[cfg(any(feature = "llama", test))]
+#[derive(Clone, Copy)]
+pub(crate) enum GenerationPhase {
+    Prepare,
+    Prefill,
+    Generation,
+}
+
+/// Small clock helper shared by native instrumentation and deterministic tests.
+#[cfg(any(feature = "llama", test))]
+pub(crate) struct GenerationTimer {
+    pub diagnostics: GenerationDiagnostics,
+    active: Option<(GenerationPhase, Instant)>,
+}
+
+#[cfg(any(feature = "llama", test))]
+impl GenerationTimer {
+    pub(crate) fn new() -> Self {
+        Self {
+            diagnostics: GenerationDiagnostics::default(),
+            active: Some((GenerationPhase::Prepare, Instant::now())),
+        }
+    }
+
+    pub(crate) fn advance(&mut self, phase: GenerationPhase) {
+        self.advance_at(Some(phase), Instant::now());
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.advance_at(None, Instant::now());
+    }
+
+    /// Stop before `?` unwinds native locals; teardown is not phase work.
+    pub(crate) fn checked<T, E>(
+        &mut self,
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        if result.is_err() {
+            self.stop();
+        }
+        result
+    }
+
+    fn advance_at(&mut self, next: Option<GenerationPhase>, now: Instant) {
+        if let Some((phase, started)) = self.active.take() {
+            let elapsed = now.saturating_duration_since(started).as_millis() as u64;
+            let field = match phase {
+                GenerationPhase::Prepare => &mut self.diagnostics.prepare_ms,
+                GenerationPhase::Prefill => &mut self.diagnostics.prefill_ms,
+                GenerationPhase::Generation => &mut self.diagnostics.generation_ms,
+            };
+            *field = Some(elapsed);
+        }
+        self.active = next.map(|phase| (phase, now));
+    }
 }
 
 pub trait ModelSlot: Send {
@@ -101,6 +240,7 @@ impl ModelSlot for MockModel {
             tokens_out,
             finish: FinishReason::Stop,
             capacity: None,
+            diagnostics: None,
         })
     }
 }
@@ -117,6 +257,99 @@ mod tests {
             max_duration: None,
             stop: vec![],
         }
+    }
+
+    #[test]
+    fn phase_clock_partitions_intervals_and_retains_partial_phase() {
+        let started = Instant::now();
+        let mut timer = GenerationTimer {
+            diagnostics: GenerationDiagnostics::default(),
+            active: Some((GenerationPhase::Prepare, started)),
+        };
+        timer.advance_at(
+            Some(GenerationPhase::Prefill),
+            started + Duration::from_millis(2),
+        );
+        timer.advance_at(None, started + Duration::from_millis(5));
+        assert_eq!(timer.diagnostics.prepare_ms, Some(2));
+        assert_eq!(timer.diagnostics.prefill_ms, Some(3));
+        assert_eq!(timer.diagnostics.generation_ms, None);
+        timer.advance_at(None, started + Duration::from_millis(99));
+        assert_eq!(timer.diagnostics.prefill_ms, Some(3));
+        let mut partition = GenerationTimer {
+            diagnostics: GenerationDiagnostics::default(),
+            active: Some((GenerationPhase::Prepare, started)),
+        };
+        partition.advance_at(
+            Some(GenerationPhase::Prefill),
+            started + Duration::from_millis(2),
+        );
+        partition.advance_at(
+            Some(GenerationPhase::Generation),
+            started + Duration::from_millis(5),
+        );
+        partition.advance_at(None, started + Duration::from_millis(9));
+        assert_eq!(partition.diagnostics.prepare_ms, Some(2));
+        assert_eq!(partition.diagnostics.prefill_ms, Some(3));
+        assert_eq!(partition.diagnostics.generation_ms, Some(4));
+        assert_eq!(
+            partition.diagnostics.prepare_ms.unwrap()
+                + partition.diagnostics.prefill_ms.unwrap()
+                + partition.diagnostics.generation_ms.unwrap(),
+            9
+        );
+        let mut complete = GenerationTimer::new();
+        complete.advance(GenerationPhase::Prefill);
+        complete.advance(GenerationPhase::Generation);
+        complete.stop();
+        assert!(complete.diagnostics.prepare_ms.is_some());
+        assert!(complete.diagnostics.prefill_ms.is_some());
+        assert!(complete.diagnostics.generation_ms.is_some());
+    }
+
+    #[test]
+    fn typed_failure_retains_partial_measurements_and_original_error() {
+        let error = ModelDiagnosticError::attach(
+            anyhow::anyhow!("native prefill failed"),
+            GenerationDiagnostics {
+                prepare_ms: Some(2),
+                prefill_ms: Some(3),
+                ..Default::default()
+            },
+        );
+        assert_eq!(error.to_string(), "native prefill failed");
+        let diagnostic = &error
+            .downcast_ref::<ModelDiagnosticError>()
+            .unwrap()
+            .diagnostics;
+        assert_eq!(diagnostic.prefill_ms, Some(3));
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert!(value["generationMs"].is_null());
+        assert!(value["settings"]["backend"].is_null());
+        assert!(error
+            .chain()
+            .any(|source| source.to_string() == "native prefill failed"));
+    }
+
+    #[test]
+    fn error_boundary_stops_active_clock_before_caller_teardown() {
+        let mut timer = GenerationTimer::new();
+        timer.advance(GenerationPhase::Prefill);
+        assert_eq!(timer.checked(Ok::<_, &str>(7)), Ok(7));
+        assert!(timer.active.is_some());
+        assert_eq!(
+            timer.checked(Err::<(), _>("decode failed")),
+            Err("decode failed")
+        );
+        assert!(
+            timer.active.is_none(),
+            "clock must stop before native locals unwind"
+        );
+        let captured = timer.diagnostics.prefill_ms;
+        assert!(captured.is_some());
+        timer.advance_at(None, Instant::now() + Duration::from_secs(1));
+        assert_eq!(timer.diagnostics.prefill_ms, captured);
+        assert!(timer.diagnostics.generation_ms.is_none());
     }
 
     #[test]
@@ -164,5 +397,6 @@ mod tests {
         assert_eq!(resp.tokens_in, 2);
         assert_eq!(resp.tokens_out, 3);
         assert_eq!(resp.finish, FinishReason::Stop);
+        assert!(resp.diagnostics.is_none());
     }
 }

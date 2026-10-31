@@ -1,6 +1,8 @@
 //! Compact JSON size accounting without allocating a serialized copy.
 
-pub(crate) fn compact_json_bytes(value: &serde_json::Value) -> serde_json::Result<usize> {
+pub(crate) fn compact_json_bytes<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<usize> {
     struct Counter(usize);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

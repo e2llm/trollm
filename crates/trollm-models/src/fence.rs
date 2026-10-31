@@ -330,7 +330,9 @@ pub fn tool_call_grammar_with_mode(
         }
     }
 
-    // Generic JSON rules for `args` (shape-only, per §5.1).
+    // Bound syntax whitespace so indentation cannot exhaust a call's budget.
+    // String contents, ordinary prose and post-generation JSON parsing retain
+    // their own rules. Adjacent ws sites can combine but remain finite.
     g.push_str(
         "object ::= \"{\" ws (member (\",\" ws member)*)? \"}\" ws\n\
          member ::= string \":\" ws value\n\
@@ -341,7 +343,7 @@ pub fn tool_call_grammar_with_mode(
          escape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\n\
          hex ::= [0-9a-fA-F]\n\
          number ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)? ws\n\
-         ws ::= [ \\t\\n\\r]*\n",
+         ws ::= [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]?\n",
     );
 
     // Prose alternative (§14 item 5): any text that never completes the
@@ -599,6 +601,37 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let parsed = calls[0].as_ref().unwrap();
         assert_eq!(parsed.args["id"], 42);
+    }
+
+    #[test]
+    fn parser_keeps_valid_json_whitespace_and_argument_strings_unrestricted() {
+        let spacing = " \t\n\r".repeat(250);
+        let payload = format!("leading {}\n\ttrailing", " ".repeat(995));
+        let text = format!(
+            "<tool_call>{{{spacing}\"server\":\"local\",{spacing}\"tool\":\"assert_equal\",{spacing}\"args\":{{\"value\":{}}}{spacing}}}</tool_call>",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let calls = extract_tool_calls(&text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].as_ref().unwrap().args["value"], payload);
+    }
+
+    #[test]
+    fn all_decoder_modes_share_bounded_syntax_whitespace() {
+        for mode in [
+            ToolCallGrammarMode::ProseOrToolCalls,
+            ToolCallGrammarMode::SingleToolCall,
+            ToolCallGrammarMode::ToolCallsOnly,
+        ] {
+            let grammar =
+                tool_call_grammar_with_mode(&[("local".into(), "assert_equal".into())], mode);
+            let rule = grammar
+                .lines()
+                .find(|line| line.starts_with("ws ::="))
+                .unwrap();
+            assert_eq!(rule, r"ws ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?");
+            assert!(grammar.contains("prose ::= prose-item+"));
+        }
     }
 
     #[test]

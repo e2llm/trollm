@@ -233,13 +233,25 @@ impl ServerEntry {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct DispatchTimings {
+    transport: Option<Duration>,
+    cache_read: Option<Duration>,
+    prepare_result: Option<Duration>,
+    finish_result: Option<Duration>,
+}
+
 pub struct McpGateway {
+    call_context: Option<crate::CallContext>,
+    timings: std::cell::Cell<DispatchTimings>,
+    dispatch_started: Option<std::time::Instant>,
     dispatch_id: u64,
     dispatch_args_hash: String,
     deadline: Option<std::time::Instant>,
     servers: HashMap<String, ServerEntry>,
     local_tools: HashMap<String, CatalogTool>,
     policies: PolicySet,
+    task_artifact_owners: HashMap<String, String>,
     result_validators: HashMap<String, ToolSchema>,
     argument_constraints: HashMap<String, ToolSchema>,
     argument_constraint_schemas: std::collections::BTreeMap<String, Value>,
@@ -334,6 +346,9 @@ impl McpGateway {
             })
             .collect();
         Ok(Self {
+            call_context: None,
+            timings: std::cell::Cell::new(DispatchTimings::default()),
+            dispatch_started: None,
             dispatch_id: 0,
             dispatch_args_hash: String::new(),
             deadline: None,
@@ -351,6 +366,7 @@ impl McpGateway {
                 })
                 .collect::<Result<HashMap<_, _>>>()?,
             policies,
+            task_artifact_owners: HashMap::new(),
             result_validators,
             argument_constraints: HashMap::new(),
             argument_constraint_schemas: Default::default(),
@@ -455,9 +471,10 @@ impl McpGateway {
         self.require_audit()?;
         self.validate_arguments(server, tool, args)?;
         let timeout = Some(self.bounded_timeout(Duration::from_secs(timeout_s.unwrap_or(30)))?);
-        let result = self
-            .server(server)?
-            .with_client(|client| client.call_tool(tool, args, timeout))?;
+        let result = self.measured("transport", || {
+            self.server(server)?
+                .with_client(|client| client.call_tool(tool, args, timeout))
+        })?;
         let payload = extract_tool_payload(&result);
         self.response_size(
             server,
@@ -472,7 +489,11 @@ impl McpGateway {
 
     fn validate_argument_constraints(&self, server: &str, tool: &str, args: &Value) -> Result<()> {
         if let Some(constraint) = self.argument_constraints.get(&format!("{server}.{tool}")) {
-            constraint.validate(args)?;
+            if server == local::SERVER && tool == local::SELECT_TOOL {
+                constraint.validate_with_byte_limit(args, local::SELECT_ARGUMENT_BYTES)?;
+            } else {
+                constraint.validate(args)?;
+            }
         }
         Ok(())
     }
@@ -490,7 +511,20 @@ impl McpGateway {
                 .local_tools
                 .get(tool)
                 .context("unknown builtin local tool")?;
-            entry.schema.validate(args)?;
+            if tool == local::SELECT_TOOL {
+                entry
+                    .schema
+                    .validate_with_byte_limit(args, local::SELECT_ARGUMENT_BYTES)?;
+                local::validate_select_arguments(args)?;
+            } else {
+                entry.schema.validate(args)?;
+            }
+            if tool == local::PREPARE_TOOL {
+                local::validate_prepare_arguments(args)?;
+            }
+            if tool == local::COLLECTION_TOOL {
+                local::validate_collection_arguments(args)?;
+            }
             if tool == local::EXTRACT_TOOL {
                 local::validate_extract_arguments(args)?;
             }
@@ -505,6 +539,10 @@ impl McpGateway {
 }
 
 impl ToolGateway for McpGateway {
+    fn set_call_context(&mut self, context: Option<crate::CallContext>) {
+        self.call_context = context;
+    }
+
     fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
         self.deadline = deadline;
     }
@@ -596,12 +634,45 @@ impl ToolGateway for McpGateway {
         self.validate_arguments(&call.server, &call.tool, &call.args)
     }
 
+    fn begin_result_artifact_attempt(
+        &mut self,
+        server: &str,
+        tool: &str,
+        name: &str,
+    ) -> Result<()> {
+        self.policies.task_result_policy(server, tool, name)?;
+        let owner = crate::policy::policy_key(server, tool);
+        anyhow::ensure!(
+            self.task_artifact_owners
+                .get(name)
+                .is_none_or(|previous| previous == &owner),
+            "task resultArtifact collides with another producer tool"
+        );
+        self.task_artifact_owners.insert(name.to_owned(), owner);
+        let path = self.artifact_dir.join(format!("{name}.json.meta.json"));
+        write_file_atomic(&path, &serde_json::to_vec(&json!({"complete": false}))?)?;
+        Ok(())
+    }
+
     fn call(&mut self, call: &ToolCall) -> Result<ToolResult> {
+        self.call_with_result_artifact(call, None)
+    }
+
+    fn call_with_result_artifact(
+        &mut self,
+        call: &ToolCall,
+        name: Option<&str>,
+    ) -> Result<ToolResult> {
+        if let Some(name) = name {
+            self.begin_result_artifact_attempt(&call.server, &call.tool, name)?;
+        }
         // Invalid calls never cross the dispatch/audit boundary.
         self.validate_call(call)?;
+        self.timings.set(DispatchTimings::default());
+        self.dispatch_started = Some(std::time::Instant::now());
         self.dispatch_id += 1;
         self.dispatch_args_hash = CacheStore::hash_args(&call.args, None, None);
-        let result = self.dispatch(call);
+        let result = self.dispatch(call, name);
         // Preserve the original audit I/O failure; the sink is already closed.
         if self.audit_failed.load(Ordering::SeqCst) {
             return result;
@@ -643,6 +714,22 @@ impl ToolGateway for McpGateway {
 }
 
 impl McpGateway {
+    fn measured<T>(&self, phase: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let started = std::time::Instant::now();
+        let result = f();
+        let mut metrics = self.timings.get();
+        let target = match phase {
+            "transport" => &mut metrics.transport,
+            "cache" => &mut metrics.cache_read,
+            "admission" => &mut metrics.prepare_result,
+            "finish" => &mut metrics.finish_result,
+            _ => unreachable!("internal timing phase"),
+        };
+        *target = Some(target.unwrap_or_default().saturating_add(started.elapsed()));
+        self.timings.set(metrics);
+        result
+    }
+
     fn response_size(
         &self,
         server: &str,
@@ -661,11 +748,30 @@ impl McpGateway {
             source: source.to_string(),
             compact_json_utf8_bytes: bytes,
             page,
+            call_context: self.call_context.clone(),
+            timings: self.dispatch_started.map(|start| {
+                let timing = self.timings.get();
+                let ms =
+                    |d: Option<Duration>| d.map(|v| v.as_millis().min(u64::MAX as u128) as u64);
+                json!({
+                    "elapsedMs": ms(Some(start.elapsed())),
+                    "transportMs": ms(timing.transport),
+                    "cacheReadMs": ms(timing.cache_read),
+                    "resultAdmissionMs": ms(timing.prepare_result),
+                    "resultFinishMs": ms(timing.finish_result),
+                })
+            }),
         })
     }
 
-    fn dispatch(&mut self, call: &ToolCall) -> Result<ToolResult> {
-        let policy = self.policies.get(&call.server, &call.tool).cloned();
+    fn dispatch(&mut self, call: &ToolCall, name: Option<&str>) -> Result<ToolResult> {
+        let policy = match name {
+            Some(name) => Some(
+                self.policies
+                    .task_result_policy(&call.server, &call.tool, name)?,
+            ),
+            None => self.policies.get(&call.server, &call.tool).cloned(),
+        };
         match &policy {
             Some(p) if p.class == ToolClass::Mutation => self.call_mutation(call, p),
             Some(p) if p.serve_from.is_some() => self.call_serve_from(call, p),
@@ -741,7 +847,9 @@ impl McpGateway {
             .ok_or_else(|| anyhow!("args missing match field '{}'", serve.match_field))?;
 
         for entry in self.cache.fresh_entries_for_tool(src_server, src_tool)? {
-            for item in self.cache.read_items(src_server, src_tool, &entry.hash)? {
+            for item in self.measured("cache", || {
+                self.cache.read_items(src_server, src_tool, &entry.hash)
+            })? {
                 if item.get(&serve.match_field) == Some(&match_value) {
                     self.emit(ProxyEvent::ServedFromFile {
                         server: call.server.clone(),
@@ -824,9 +932,10 @@ impl McpGateway {
                 let timeout = self.bounded_timeout(
                     Duration::from_secs(policy.timeout_s.unwrap_or(30)).min(remaining),
                 )?;
-                let result = self
-                    .server(&call.server)?
-                    .with_client(|client| client.call_tool(&call.tool, &args, Some(timeout)))?;
+                let result = self.measured("transport", || {
+                    self.server(&call.server)?
+                        .with_client(|client| client.call_tool(&call.tool, &args, Some(timeout)))
+                })?;
                 let payload = extract_tool_payload(&result);
                 self.response_size(
                     &call.server,
@@ -940,8 +1049,10 @@ impl McpGateway {
             })?;
         }
         let (items, index, has_next, collection_bytes) = self
-            .cache
-            .read_page_with_size(&call.server, &call.tool, &hash, requested_page)?
+            .measured("cache", || {
+                self.cache
+                    .read_page_with_size(&call.server, &call.tool, &hash, requested_page)
+            })?
             .context("requested pagination page is outside the completed dataset")?;
         let mut payload = json!({ index.field: items });
         payload[param] = if has_next {
@@ -1024,7 +1135,9 @@ impl McpGateway {
             .fresh_entry(&call.server, &call.tool, &hash)?
             .is_some()
         {
-            let items = self.cache.read_items(&call.server, &call.tool, &hash)?;
+            let items = self.measured("cache", || {
+                self.cache.read_items(&call.server, &call.tool, &hash)
+            })?;
             if let Some(payload) = items.into_iter().next() {
                 self.emit(ProxyEvent::CacheHit {
                     server: call.server.clone(),
@@ -1070,25 +1183,27 @@ impl McpGateway {
         policy: Option<&ToolPolicy>,
         payload: &Value,
     ) -> Result<Option<PathBuf>> {
-        self.require_tool_credentials(&call.server, &call.tool)?;
-        let result_path = policy
-            .and_then(|p| p.result_artifact.as_ref())
-            .map(|name| self.artifact_dir.join(format!("{name}.json")));
-        if let Some(path) = &result_path {
-            let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
-            // A failed replacement must never leave new data marked complete.
-            write_file_atomic(
-                &meta_path,
-                &serde_json::to_vec(&json!({"complete": false}))?,
-            )?;
-        }
-        if let Some(validation) = policy.and_then(|p| p.result_validation.as_ref()) {
-            self.result_validators
-                .get(&crate::policy::policy_key(&call.server, &call.tool))
-                .context("missing compiled tool result schema")?
-                .validate_result(payload, validation.max_bytes)?;
-        }
-        Ok(result_path)
+        self.measured("admission", || {
+            self.require_tool_credentials(&call.server, &call.tool)?;
+            let result_path = policy
+                .and_then(|p| p.result_artifact.as_ref())
+                .map(|name| self.artifact_dir.join(format!("{name}.json")));
+            if let Some(path) = &result_path {
+                let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
+                // A failed replacement must never leave new data marked complete.
+                write_file_atomic(
+                    &meta_path,
+                    &serde_json::to_vec(&json!({"complete": false}))?,
+                )?;
+            }
+            if let Some(validation) = policy.and_then(|p| p.result_validation.as_ref()) {
+                self.result_validators
+                    .get(&crate::policy::policy_key(&call.server, &call.tool))
+                    .context("missing compiled tool result schema")?
+                    .validate_result(payload, validation.max_bytes)?;
+            }
+            Ok(result_path)
+        })
     }
 
     /// Preserve the parsed payload independently of the model-facing shape.
@@ -1099,42 +1214,44 @@ impl McpGateway {
         payload: Value,
         provenance: Provenance,
     ) -> Result<ToolResult> {
-        if provenance != Provenance::Live {
-            self.response_size(
-                &call.server,
-                &call.tool,
-                "raw_payload",
-                provenance_source(provenance),
-                Some(crate::json_size::compact_bytes(&payload)?),
-                None,
-            )?;
-        }
-        let mut artifacts = Vec::new();
-        let result_path = self.prepare_result(call, policy, &payload)?;
-        if let Some(path) = &result_path {
-            write_file_atomic(path, &serde_json::to_vec(&payload)?)?;
-        }
-        let content = match policy.and_then(|p| p.shape.as_ref()) {
-            Some(shape) => {
-                self.shape_in_place(payload, shape, &call.server, &call.tool, &mut artifacts)?
+        self.measured("finish", || {
+            if provenance != Provenance::Live {
+                self.response_size(
+                    &call.server,
+                    &call.tool,
+                    "raw_payload",
+                    provenance_source(provenance),
+                    Some(crate::json_size::compact_bytes(&payload)?),
+                    None,
+                )?;
             }
-            None => payload,
-        };
-        if let Some(path) = result_path {
-            let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
-            write_file_atomic(
-                &meta_path,
-                &serde_json::to_vec(&json!({
-                    "complete": true, "fetchedAt": crate::cache::now_secs(),
-                }))?,
-            )?;
-            artifacts.push(path);
-        }
-        self.require_tool_credentials(&call.server, &call.tool)?;
-        Ok(ToolResult {
-            content_for_model: content,
-            artifacts,
-            provenance,
+            let mut artifacts = Vec::new();
+            let result_path = self.prepare_result(call, policy, &payload)?;
+            if let Some(path) = &result_path {
+                write_file_atomic(path, &serde_json::to_vec(&payload)?)?;
+            }
+            let content = match policy.and_then(|p| p.shape.as_ref()) {
+                Some(shape) => {
+                    self.shape_in_place(payload, shape, &call.server, &call.tool, &mut artifacts)?
+                }
+                None => payload,
+            };
+            if let Some(path) = result_path {
+                let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
+                write_file_atomic(
+                    &meta_path,
+                    &serde_json::to_vec(&json!({
+                        "complete": true, "fetchedAt": crate::cache::now_secs(),
+                    }))?,
+                )?;
+                artifacts.push(path);
+            }
+            self.require_tool_credentials(&call.server, &call.tool)?;
+            Ok(ToolResult {
+                content_for_model: content,
+                artifacts,
+                provenance,
+            })
         })
     }
 

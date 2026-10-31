@@ -66,6 +66,7 @@ fun FlowSetupScreen(
     flowSha: String,
     onReady: (configurationJson: String) -> Unit,
     onBack: () -> Unit,
+    sourceInstallation: String? = null,
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -91,7 +92,7 @@ fun FlowSetupScreen(
 
     LaunchedEffect(runtime, flowSha) {
         try {
-            val json = withContext(Dispatchers.IO) { runtime.flowSetup(flowSha) }
+            val json = withContext(Dispatchers.IO) { if (sourceInstallation == null) runtime.flowSetup(flowSha) else runtime.sourceBundleSetup(sourceInstallation) }
             val pinned = json?.let { FlowSetup.parse(it) }
             defaults = pinned
             if (pinned != null) {

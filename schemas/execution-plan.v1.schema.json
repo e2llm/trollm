@@ -91,6 +91,28 @@
         "policies": { "type": "object", "additionalProperties": { "type": "object", "properties": { "paginate": { "$ref": "#/$defs/paginatePolicy" } } }, "description": "Per-tool policy keyed '<server>.<tool>' (§6); consumed by trollm-mcp's policy engine. Pagination metadata pointers are validated here; other policy fields are consumed by the policy engine." }
       }
     },
+    "exports": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "from"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_-]{1,64}(\\.[A-Za-z0-9_-]{1,64})*$"
+          }
+        }
+      }
+    },
     "entryStep": { "type": "string", "minLength": 1 },
     "nodes": {
       "type": "object",
@@ -240,6 +262,10 @@
             {
               "required": ["routes"],
               "not": { "required": ["onVerified"] }
+            },
+            {
+              "description": "Both exits require tool-or-route completion in the registry.",
+              "required": ["routes", "onVerified"]
             }
           ]
         },
@@ -268,7 +294,8 @@
                 "additionalProperties": false,
                 "properties": {
                   "collect": { "const": "body.outputs" },
-                  "indexBy": { "type": "string", "minLength": 1 }
+                  "indexBy": { "type": "string", "minLength": 1 },
+                  "view": { "$ref": "#/$defs/artifactView" }
                 }
               }
             },

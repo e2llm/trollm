@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trollm.local/schemas/task-result-artifact.v1.schema.json",
+  "title": "Additive task resultArtifact constraints",
+  "description": "Applies to a registry task. Rust admission additionally checks effective remote read policy, destination ownership and output contracts.",
+  "type": "object",
+  "properties": {
+    "resultArtifact": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "not": {
+        "anyOf": [
+          {
+            "enum": [
+              "calculation",
+              "price-extraction",
+              "unique-selection",
+              "equality-proof",
+              "prepared-worklist",
+              "collection-total"
+            ]
+          },
+          {
+            "pattern": "^model-failure-"
+          }
+        ]
+      }
+    }
+  },
+  "if": {
+    "required": [
+      "resultArtifact"
+    ]
+  },
+  "then": {
+    "required": [
+      "completion",
+      "tools"
+    ],
+    "properties": {
+      "completion": {
+        "const": "tool-result"
+      },
+      "tools": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+          "type": "string",
+          "pattern": "^(?!(?:local|flow)\\.)[A-Za-z_][A-Za-z0-9_-]*\\.[A-Za-z_][A-Za-z0-9_-]*$"
+        }
+      },
+      "loop": {
+        "type": "object",
+        "properties": {
+          "maxSteps": {
+            "const": 1
+          }
+        }
+      }
+    }
+  }
+}

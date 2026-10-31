@@ -9,15 +9,24 @@ struct ResponseModel {
     text: String,
     finish: FinishReason,
     capacity: Option<trollm_models::GenerationCapacity>,
+    diagnostics: Option<trollm_models::GenerationDiagnostics>,
+    fail: bool,
 }
 impl ModelSlot for ResponseModel {
     fn generate(&mut self, _: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        if self.fail {
+            return Err(trollm_models::ModelDiagnosticError::attach(
+                anyhow::anyhow!("synthetic native prefill failure"),
+                self.diagnostics.clone().unwrap(),
+            ));
+        }
         Ok(GenerateResponse {
             text: self.text.clone(),
             tokens_in: 1,
             tokens_out: 2048,
             finish: self.finish,
             capacity: self.capacity,
+            diagnostics: self.diagnostics.clone(),
         })
     }
 }
@@ -178,6 +187,26 @@ fn run_configured(
     artifact_budget: u64,
     capacity: Option<trollm_models::GenerationCapacity>,
 ) -> (RunStatus, Vec<serde_json::Value>) {
+    run_instrumented(
+        text,
+        finish,
+        completion,
+        artifact_budget,
+        capacity,
+        None,
+        false,
+    )
+}
+
+fn run_instrumented(
+    text: &str,
+    finish: FinishReason,
+    completion: &str,
+    artifact_budget: u64,
+    capacity: Option<trollm_models::GenerationCapacity>,
+    diagnostics: Option<trollm_models::GenerationDiagnostics>,
+    fail: bool,
+) -> (RunStatus, Vec<serde_json::Value>) {
     let base = common::tmp_dir("finish");
     std::fs::write(base.join("prompt.md"), "go").unwrap();
     let tool = completion == "tool-result";
@@ -234,6 +263,8 @@ tasks:
                 text: text.into(),
                 finish,
                 capacity,
+                diagnostics: diagnostics.clone(),
+                fail,
             },
         ),
         ScriptGateway::default(),
@@ -259,7 +290,35 @@ tasks:
                 && !path.to_string_lossy().ends_with(".meta.json")
         })
         .collect();
-    if matches!(finish, FinishReason::Length | FinishReason::Timeout) && artifact_budget > 0 {
+    if fail {
+        assert_eq!(diagnostic_files.len(), 1);
+        let diagnostic: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&diagnostic_files[0]).unwrap()).unwrap();
+        assert_eq!(diagnostic["responseAvailable"], false);
+        assert!(diagnostic["response"].is_null());
+        assert!(diagnostic["failure"]["ms"].is_u64());
+        assert!(diagnostic["failure"]["tokensIn"].is_null());
+        assert!(diagnostic["failure"]["tokensOut"].is_null());
+        assert!(diagnostic["failure"]["finishReason"].is_null());
+        assert_eq!(diagnostic["failure"]["diagnostics"]["prefillMs"], 0);
+        assert!(diagnostic["failure"]["diagnostics"]["generationMs"].is_null());
+        let calls: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "model_call")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        let call = calls[0];
+        assert_eq!(call["failed"], true);
+        assert!(call["ms"].is_u64());
+        assert!(call["tokensIn"].is_null());
+        assert!(call["tokensOut"].is_null());
+        assert!(call["finishReason"].is_null());
+        assert_eq!(call["diagnostics"], diagnostic["failure"]["diagnostics"]);
+        assert_eq!(call["diagnostics"]["totalMs"], call["ms"]);
+        assert!(call.get("response").is_none());
+        assert!(call.get("text").is_none());
+    } else if matches!(finish, FinishReason::Length | FinishReason::Timeout) && artifact_budget > 0
+    {
         assert_eq!(diagnostic_files.len(), 1);
         let file_bytes = std::fs::metadata(&diagnostic_files[0]).unwrap().len();
         assert!(file_bytes <= 256 * 1024);
@@ -288,6 +347,31 @@ tasks:
         assert_eq!(
             diagnostic["response"]["text"]["truncated"],
             text.len() > 48 * 1024
+        );
+        if diagnostics.is_some() {
+            let call = events
+                .iter()
+                .find(|event| event["type"] == "model_call")
+                .unwrap();
+            assert_eq!(diagnostic["response"]["diagnostics"], call["diagnostics"]);
+        }
+        use sha2::Digest;
+        let call = events
+            .iter()
+            .find(|event| event["type"] == "model_call")
+            .unwrap();
+        let request_prompt = diagnostic["request"]["prompt"]["text"].as_str().unwrap();
+        assert_eq!(
+            call["requestPromptSha256"],
+            format!("{:x}", sha2::Sha256::digest(request_prompt.as_bytes()))
+        );
+        let grammar = diagnostic["request"]["grammarGbnf"]["text"].as_str();
+        assert_eq!(
+            call["grammarSha256"],
+            serde_json::to_value(
+                grammar.map(|text| format!("{:x}", sha2::Sha256::digest(text.as_bytes())))
+            )
+            .unwrap()
         );
         assert_eq!(diagnostic["response"]["tokensIn"], 1);
         assert_eq!(diagnostic["response"]["tokensOut"], 2048);
@@ -342,4 +426,67 @@ tasks:
     drop(exec);
     std::fs::remove_dir_all(base).unwrap();
     (status, events)
+}
+
+#[test]
+fn measured_phases_survive_length_and_partial_prefill_timeout_without_dispatch() {
+    for finish in [FinishReason::Length, FinishReason::Timeout] {
+        let diagnostics = trollm_models::GenerationDiagnostics {
+            prepare_ms: Some(0),
+            prefill_ms: Some(0),
+            generation_ms: (finish == FinishReason::Length).then_some(0),
+            ..Default::default()
+        };
+        let (status, events) = run_instrumented(
+            "partial",
+            finish,
+            "tool-result",
+            1,
+            None,
+            Some(diagnostics),
+            false,
+        );
+        assert!(matches!(status, RunStatus::Failed { .. }));
+        let call = events
+            .iter()
+            .find(|event| event["type"] == "model_call")
+            .unwrap();
+        assert_eq!(call["diagnostics"]["totalMs"], call["ms"]);
+        assert_eq!(call["diagnostics"]["prepareMs"], 0);
+        assert_eq!(call["diagnostics"]["prefillMs"], 0);
+        assert_eq!(
+            call["diagnostics"]["generationMs"].is_null(),
+            finish == FinishReason::Timeout
+        );
+        assert!(call["diagnostics"]["settings"]["backend"].is_null());
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "tool_call_intent"));
+    }
+}
+
+#[test]
+fn genuine_model_error_retains_only_available_timing_without_fabricated_response() {
+    let diagnostics = trollm_models::GenerationDiagnostics {
+        prepare_ms: Some(0),
+        prefill_ms: Some(0),
+        ..Default::default()
+    };
+    let (status, events) = run_instrumented(
+        "not returned",
+        FinishReason::Stop,
+        "tool-result",
+        1,
+        None,
+        Some(diagnostics),
+        true,
+    );
+    assert!(matches!(status, RunStatus::Failed { .. }));
+    assert!(!events
+        .iter()
+        .any(|event| event["type"] == "tool_call_intent"));
+    assert!(events.iter().any(|event| event["type"] == "error"
+        && event["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("synthetic native prefill failure"))));
 }

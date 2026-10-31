@@ -49,6 +49,13 @@ pub struct TaskDef {
     /// What completes this task: model prose, or one successful tool result.
     #[serde(default)]
     pub completion: TaskCompletion,
+    /// Static destination for a single remote read's native result.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::plan::deserialize_present_option"
+    )]
+    pub result_artifact: Option<String>,
     /// Owned arguments resolved from frame variables, typed input keys or fixed JSON values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_arguments: Option<BTreeMap<String, TaskToolArguments>>,
@@ -69,6 +76,8 @@ pub enum TaskCompletion {
     ModelProse,
     ToolResult,
     FlowRoute,
+    /// One ordinary bound call, or one explicit flow.choose without success outputs.
+    ToolOrRoute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +121,31 @@ impl TaskDef {
                 .is_none_or(|n| (1..=600).contains(&n)),
             "generationTimeoutS must be 1 through 600"
         );
+        if let Some(name) = &self.result_artifact {
+            trollm_mcp::policy::validate_task_result_artifact_name(name)?;
+            anyhow::ensure!(self.completion == TaskCompletion::ToolResult && self.tools.len() == 1
+                && self.loop_spec.as_ref().map_or(1, |spec| spec.max_steps) == 1,
+                "task resultArtifact requires single-tool, single-generation tool-result completion");
+            let (server, _) = self.tools[0]
+                .split_once('.')
+                .ok_or_else(|| anyhow::anyhow!("task resultArtifact requires server.tool"))?;
+            anyhow::ensure!(
+                server != "local" && server != "flow",
+                "task resultArtifact requires a remote read tool"
+            );
+        }
         for output in self.output_contract.outputs.values() {
+            if let OutputSpec::FromArtifact {
+                schema: Some(schema),
+                ..
+            }
+            | OutputSpec::FromModel {
+                schema: Some(schema),
+                ..
+            } = output
+            {
+                trollm_mcp::ArtifactSchema::compile(schema)?;
+            }
             if let OutputSpec::FromArtifact {
                 view: Some(view), ..
             } = output
@@ -123,7 +156,11 @@ impl TaskDef {
         for tool in &self.tools {
             if tool.starts_with("flow.") {
                 anyhow::ensure!(
-                    tool == "flow.choose" && self.completion == TaskCompletion::FlowRoute,
+                    tool == "flow.choose"
+                        && matches!(
+                            self.completion,
+                            TaskCompletion::FlowRoute | TaskCompletion::ToolOrRoute
+                        ),
                     "flow.choose requires flow-route completion; unknown flow tools are forbidden"
                 );
             }
@@ -134,13 +171,28 @@ impl TaskDef {
                 "flow-route completion requires coder and flow.choose"
             );
         }
+        if self.completion == TaskCompletion::ToolOrRoute {
+            anyhow::ensure!(
+                self.model == "coder"
+                    && self.tools.iter().any(|tool| tool == "flow.choose")
+                    && self.tools.iter().any(|tool| !tool.starts_with("flow.")),
+                "tool-or-route requires coder, flow.choose and an ordinary tool"
+            );
+        }
         if let Some(bindings) = &self.tool_arguments {
             anyhow::ensure!(
-                self.completion == TaskCompletion::ToolResult,
+                matches!(
+                    self.completion,
+                    TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute
+                ),
                 "toolArguments requires tool-result completion"
             );
             anyhow::ensure!(!bindings.is_empty(), "toolArguments must not be empty");
             for (tool, rule) in bindings {
+                anyhow::ensure!(
+                    tool != "flow.choose",
+                    "flow.choose arguments cannot be bound"
+                );
                 anyhow::ensure!(
                     tool.split('.').count() == 2
                         && tool.split('.').all(identifier)
@@ -196,7 +248,7 @@ impl TaskDef {
         }
         if matches!(
             self.completion,
-            TaskCompletion::ToolResult | TaskCompletion::FlowRoute
+            TaskCompletion::ToolResult | TaskCompletion::FlowRoute | TaskCompletion::ToolOrRoute
         ) {
             anyhow::ensure!(
                 !self.tools.is_empty(),
@@ -277,10 +329,24 @@ pub enum OutputSpec {
         from: ModelFrom,
         #[serde(rename = "type")]
         type_: OutputType,
+        /// Validate the trimmed model string without parsing it as JSON.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::plan::deserialize_present_option"
+        )]
+        schema: Option<Value>,
     },
     FromArtifact {
         #[serde(rename = "fromArtifact")]
         from_artifact: String,
+        /// Validate the complete original artifact before any projection.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::plan::deserialize_present_option"
+        )]
+        schema: Option<Value>,
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

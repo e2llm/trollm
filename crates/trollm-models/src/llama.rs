@@ -129,183 +129,233 @@ impl LlamaCppSlot {
 
 impl ModelSlot for LlamaCppSlot {
     fn generate(&mut self, req: GenerateRequest) -> Result<GenerateResponse> {
-        let deadline = crate::deadline::GenerationDeadline::new(req.max_duration);
-        deadline.check()?;
-        let vocab = self.model.vocab();
-        // Raw ledger/MCP content is one user message. Reserved vocabulary
-        // controls inside it could otherwise close that message after the
-        // template's control tokens are recognized by the tokenizer.
-        if vocab
-            .tokenize(req.prompt.as_bytes(), false, true)
-            .iter()
-            .any(|token| vocab.is_control(*token))
-        {
-            bail!("rendered prompt contains a reserved model CONTROL token; message boundaries cannot be preserved");
-        }
-        let ctx_size =
-            NonZeroU32::new(self.ctx_size).context("llama context size must be positive")?;
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(ctx_size));
-        let mut ctx = self
-            .model
-            .new_context(&self.backend, ctx_params)
-            .context("failed to create llama context")?;
-
-        let template = self.model.chat_template(None)
-            .context("GGUF model has no usable chat template; provide an instruction model with a supported template")?;
-        let template = template
-            .as_c_str()
-            .to_str()
-            .context("GGUF chat template is not UTF-8")?;
-        let bos = String::from_utf8(if vocab.bos().0 >= 0 {
-            vocab.token_to_piece(vocab.bos(), true, None)
-        } else {
-            Vec::new()
-        })
-        .context("GGUF BOS token is not UTF-8")?;
-        let eos = String::from_utf8(if vocab.eos().0 >= 0 {
-            vocab.token_to_piece(vocab.eos(), true, None)
-        } else {
-            Vec::new()
-        })
-        .context("GGUF EOS token is not UTF-8")?;
-        let prompt = crate::chat::render_chat(template, &req.prompt, &bos, &eos)?;
-        // Templates can already include BOS (e.g. Gemma). Recognize their
-        // control tokens, then add BOS only if the vocabulary requires it and
-        // the template did not supply it. Never append EOS to the open reply.
-        let mut prompt_tokens = vocab.tokenize(prompt.as_bytes(), false, true);
-        ensure_bos(&mut prompt_tokens, vocab.bos(), vocab.should_add_bos());
-        if prompt_tokens.is_empty() {
-            bail!("prompt tokenizes to zero tokens");
-        }
-        if prompt_tokens.len() as u32 >= self.ctx_size {
-            bail!(
-                "prompt ({} tokens) does not fit context ({} tokens)",
-                prompt_tokens.len(),
-                self.ctx_size
-            );
-        }
-
-        // Sampler chain: optional GBNF constraint first, then temperature
-        // shaping, then the draw. Grammar-constrained decode is the whole point
-        // of the coder slot, so the grammar sampler leads the chain.
-        let mut samplers = Vec::new();
-        if let Some(grammar) = &req.grammar_gbnf {
-            samplers.push(
-                LlamaSampler::grammar(&self.model, grammar, "root")
-                    .context("invalid GBNF grammar")?,
-            );
-        }
-        samplers.push(LlamaSampler::top_p(self.options.top_p, 1));
-        samplers.push(LlamaSampler::temp(self.options.temperature));
-        samplers.push(LlamaSampler::dist(self.options.seed));
-        let mut sampler = LlamaSampler::chain(samplers, true);
-
-        let capacity = crate::GenerationCapacity {
-            context_tokens: self.ctx_size,
-            context_remaining: self.ctx_size - prompt_tokens.len() as u32,
-            effective_max_tokens: req
-                .max_tokens
-                .min(self.ctx_size - prompt_tokens.len() as u32),
-        };
-        let batch_size = NonZeroU32::new(ctx.n_batch())
-            .context("llama context has zero batch capacity")?
-            .get() as usize;
-        let mut batch = LlamaBatch::new(batch_size, 1);
-        for (chunk_index, chunk) in prompt_tokens.chunks(batch_size).enumerate() {
-            if deadline.check().is_err() {
-                return Ok(GenerateResponse {
-                    text: String::new(),
-                    tokens_in: prompt_tokens.len() as u32,
-                    tokens_out: 0,
-                    finish: FinishReason::Timeout,
-                    capacity: Some(capacity),
-                });
-            }
-            batch.clear();
-            let start = chunk_index * batch_size;
-            for (offset, token) in chunk.iter().enumerate() {
-                let position = start + offset;
-                let is_last = position == prompt_tokens.len() - 1;
-                batch.add(*token, position as i32, &[0], is_last)?;
-            }
-            ctx.decode(&mut batch)
-                .context("llama prompt prefill failed")?;
-            if deadline.check().is_err() {
-                return Ok(GenerateResponse {
-                    text: String::new(),
-                    tokens_in: prompt_tokens.len() as u32,
-                    tokens_out: 0,
-                    finish: FinishReason::Timeout,
-                    capacity: Some(capacity),
-                });
-            }
-        }
-
-        let tokens_in = prompt_tokens.len() as u32;
-        let max_out = req.max_tokens.min(self.ctx_size - tokens_in);
-        let mut text_bytes: Vec<u8> = Vec::new();
-        let mut tokens_out = 0u32;
-        let mut n_cur = prompt_tokens.len() as i32;
-        let finish;
-
-        loop {
-            if deadline.check().is_err() {
-                finish = FinishReason::Timeout;
-                break;
-            }
-            if tokens_out >= max_out {
-                finish = FinishReason::Length;
-                break;
-            }
-            // sample() also accepts the token, advancing grammar/sampler state.
-            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
-            let timed_out = deadline.check().is_err();
-            if vocab.is_eog(token) {
-                finish = if timed_out {
-                    FinishReason::Timeout
-                } else {
-                    FinishReason::Stop
-                };
-                break;
-            }
-            text_bytes.extend_from_slice(&vocab.token_to_piece(token, false, None));
-            tokens_out += 1;
-            if timed_out {
-                finish = FinishReason::Timeout;
-                break;
-            }
-
-            // Stop-string check on the accumulated text (stop strings may span
-            // token boundaries). Truncate at the earliest stop string.
-            let text = String::from_utf8_lossy(&text_bytes);
-            if let Some((cut, _)) = req
-                .stop
+        let mut timer = crate::GenerationTimer::new();
+        let result = (|| -> Result<GenerateResponse> {
+            let deadline = crate::deadline::GenerationDeadline::new(req.max_duration);
+            timer.checked(deadline.check())?;
+            let vocab = self.model.vocab();
+            // Raw ledger/MCP content is one user message. Reserved vocabulary
+            // controls inside it could otherwise close that message after the
+            // template's control tokens are recognized by the tokenizer.
+            if vocab
+                .tokenize(req.prompt.as_bytes(), false, true)
                 .iter()
-                .filter_map(|s| text.find(s).map(|i| (i, s.len())))
-                .min_by_key(|(i, _)| *i)
+                .any(|token| vocab.is_control(*token))
             {
-                text_bytes.truncate(cut);
-                finish = FinishReason::Stop;
-                break;
+                timer.stop();
+                bail!("rendered prompt contains a reserved model CONTROL token; message boundaries cannot be preserved");
+            }
+            let ctx_size = timer.checked(
+                NonZeroU32::new(self.ctx_size).context("llama context size must be positive"),
+            )?;
+            let ctx_params = LlamaContextParams::default().with_n_ctx(Some(ctx_size));
+            timer.diagnostics.settings = crate::GenerationSettings {
+                engine: Some("llama.cpp".into()),
+                configured_context_tokens: Some(self.ctx_size),
+                configured_threads: Some(ctx_params.n_threads()),
+                configured_batch_threads: Some(ctx_params.n_threads_batch()),
+                ..Default::default()
+            };
+            let mut ctx = timer.checked(
+                self.model
+                    .new_context(&self.backend, ctx_params)
+                    .context("failed to create llama context"),
+            )?;
+            timer.diagnostics.settings.batch_tokens = Some(ctx.n_batch());
+            timer.diagnostics.settings.micro_batch_tokens = Some(ctx.n_ubatch());
+
+            let template = timer.checked(self.model.chat_template(None)
+            .context("GGUF model has no usable chat template; provide an instruction model with a supported template"))?;
+            let template = timer.checked(
+                template
+                    .as_c_str()
+                    .to_str()
+                    .context("GGUF chat template is not UTF-8"),
+            )?;
+            let bos = timer.checked(
+                String::from_utf8(if vocab.bos().0 >= 0 {
+                    vocab.token_to_piece(vocab.bos(), true, None)
+                } else {
+                    Vec::new()
+                })
+                .context("GGUF BOS token is not UTF-8"),
+            )?;
+            let eos = timer.checked(
+                String::from_utf8(if vocab.eos().0 >= 0 {
+                    vocab.token_to_piece(vocab.eos(), true, None)
+                } else {
+                    Vec::new()
+                })
+                .context("GGUF EOS token is not UTF-8"),
+            )?;
+            let prompt =
+                timer.checked(crate::chat::render_chat(template, &req.prompt, &bos, &eos))?;
+            // Templates can already include BOS (e.g. Gemma). Recognize their
+            // control tokens, then add BOS only if the vocabulary requires it and
+            // the template did not supply it. Never append EOS to the open reply.
+            let mut prompt_tokens = vocab.tokenize(prompt.as_bytes(), false, true);
+            ensure_bos(&mut prompt_tokens, vocab.bos(), vocab.should_add_bos());
+            if prompt_tokens.is_empty() {
+                timer.stop();
+                bail!("prompt tokenizes to zero tokens");
+            }
+            if prompt_tokens.len() as u32 >= self.ctx_size {
+                timer.stop();
+                bail!(
+                    "prompt ({} tokens) does not fit context ({} tokens)",
+                    prompt_tokens.len(),
+                    self.ctx_size
+                );
             }
 
-            batch.clear();
-            batch.add(token, n_cur, &[0], true)?;
-            n_cur += 1;
-            if deadline.check().is_err() {
-                finish = FinishReason::Timeout;
-                break;
+            // Sampler chain: optional GBNF constraint first, then temperature
+            // shaping, then the draw. Grammar-constrained decode is the whole point
+            // of the coder slot, so the grammar sampler leads the chain.
+            let mut samplers = Vec::new();
+            if let Some(grammar) = &req.grammar_gbnf {
+                samplers.push(
+                    timer.checked(
+                        LlamaSampler::grammar(&self.model, grammar, "root")
+                            .context("invalid GBNF grammar"),
+                    )?,
+                );
             }
-            ctx.decode(&mut batch).context("llama decode failed")?;
+            samplers.push(LlamaSampler::top_p(self.options.top_p, 1));
+            samplers.push(LlamaSampler::temp(self.options.temperature));
+            samplers.push(LlamaSampler::dist(self.options.seed));
+            let mut sampler = LlamaSampler::chain(samplers, true);
+
+            let capacity = crate::GenerationCapacity {
+                context_tokens: self.ctx_size,
+                context_remaining: self.ctx_size - prompt_tokens.len() as u32,
+                effective_max_tokens: req
+                    .max_tokens
+                    .min(self.ctx_size - prompt_tokens.len() as u32),
+            };
+            let batch_size = timer
+                .checked(
+                    NonZeroU32::new(ctx.n_batch()).context("llama context has zero batch capacity"),
+                )?
+                .get() as usize;
+            let mut batch = LlamaBatch::new(batch_size, 1);
+            timer.advance(crate::GenerationPhase::Prefill);
+            for (chunk_index, chunk) in prompt_tokens.chunks(batch_size).enumerate() {
+                if deadline.check().is_err() {
+                    timer.stop();
+                    return Ok(GenerateResponse {
+                        text: String::new(),
+                        tokens_in: prompt_tokens.len() as u32,
+                        tokens_out: 0,
+                        finish: FinishReason::Timeout,
+                        capacity: Some(capacity),
+                        diagnostics: None,
+                    });
+                }
+                batch.clear();
+                let start = chunk_index * batch_size;
+                for (offset, token) in chunk.iter().enumerate() {
+                    let position = start + offset;
+                    let is_last = position == prompt_tokens.len() - 1;
+                    timer.checked(batch.add(*token, position as i32, &[0], is_last))?;
+                }
+                timer.checked(
+                    ctx.decode(&mut batch)
+                        .context("llama prompt prefill failed"),
+                )?;
+                if deadline.check().is_err() {
+                    timer.stop();
+                    return Ok(GenerateResponse {
+                        text: String::new(),
+                        tokens_in: prompt_tokens.len() as u32,
+                        tokens_out: 0,
+                        finish: FinishReason::Timeout,
+                        capacity: Some(capacity),
+                        diagnostics: None,
+                    });
+                }
+            }
+
+            timer.advance(crate::GenerationPhase::Generation);
+            let tokens_in = prompt_tokens.len() as u32;
+            let max_out = req.max_tokens.min(self.ctx_size - tokens_in);
+            let mut text_bytes: Vec<u8> = Vec::new();
+            let mut tokens_out = 0u32;
+            let mut n_cur = prompt_tokens.len() as i32;
+            let finish;
+
+            loop {
+                if deadline.check().is_err() {
+                    finish = FinishReason::Timeout;
+                    break;
+                }
+                if tokens_out >= max_out {
+                    finish = FinishReason::Length;
+                    break;
+                }
+                // sample() also accepts the token, advancing grammar/sampler state.
+                let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+                let timed_out = deadline.check().is_err();
+                if vocab.is_eog(token) {
+                    finish = if timed_out {
+                        FinishReason::Timeout
+                    } else {
+                        FinishReason::Stop
+                    };
+                    break;
+                }
+                text_bytes.extend_from_slice(&vocab.token_to_piece(token, false, None));
+                tokens_out += 1;
+                if timed_out {
+                    finish = FinishReason::Timeout;
+                    break;
+                }
+
+                // Stop-string check on the accumulated text (stop strings may span
+                // token boundaries). Truncate at the earliest stop string.
+                let text = String::from_utf8_lossy(&text_bytes);
+                if let Some((cut, _)) = req
+                    .stop
+                    .iter()
+                    .filter_map(|s| text.find(s).map(|i| (i, s.len())))
+                    .min_by_key(|(i, _)| *i)
+                {
+                    text_bytes.truncate(cut);
+                    finish = FinishReason::Stop;
+                    break;
+                }
+
+                batch.clear();
+                timer.checked(batch.add(token, n_cur, &[0], true))?;
+                n_cur += 1;
+                if deadline.check().is_err() {
+                    finish = FinishReason::Timeout;
+                    break;
+                }
+                timer.checked(ctx.decode(&mut batch).context("llama decode failed"))?;
+            }
+
+            timer.stop();
+            Ok(GenerateResponse {
+                text: String::from_utf8_lossy(&text_bytes).into_owned(),
+                tokens_in,
+                tokens_out,
+                finish,
+                capacity: Some(capacity),
+                diagnostics: None,
+            })
+        })();
+        // checked() and explicit returns stop at the boundary, before native
+        // locals are dropped. Teardown stays outside both success/error phases.
+        match result {
+            Ok(mut response) => {
+                response.diagnostics = Some(timer.diagnostics);
+                Ok(response)
+            }
+            Err(error) => Err(crate::ModelDiagnosticError::attach(
+                error,
+                timer.diagnostics,
+            )),
         }
-
-        Ok(GenerateResponse {
-            text: String::from_utf8_lossy(&text_bytes).into_owned(),
-            tokens_in,
-            tokens_out,
-            finish,
-            capacity: Some(capacity),
-        })
     }
 }
 
@@ -447,6 +497,7 @@ mod tests {
             ("files".to_string(), "read".to_string()),
             ("we\"ird\\שרת".to_string(), "t\t工具".to_string()),
             ("local".to_string(), "calculate".to_string()),
+            ("local".to_string(), "assert_equal".to_string()),
             ("generic".to_string(), "operation".to_string()),
             ("generic".to_string(), "bound".to_string()),
             ("generic".to_string(), "optional".to_string()),
@@ -558,6 +609,10 @@ mod tests {
             cases.push((mode, text, expected));
         }
         let argument_schemas = std::collections::BTreeMap::from([
+            (
+                ("local".into(), "assert_equal".into()),
+                serde_json::json!({"type":"object", "properties":{}, "additionalProperties":false}),
+            ),
             (
                 ("flow".into(), "choose".into()),
                 serde_json::json!({"type":"object", "properties":{"route":{"type":"string","enum":["finish", "quote\"slash\\", "line\nשלום"]}}, "required":["route"],"additionalProperties":false}),
@@ -672,6 +727,84 @@ mod tests {
             ),
             false,
         ));
+        // The recorded failure emitted this correct prefix, then one newline
+        // and 994 spaces inside empty args. Reject the whitespace during decode,
+        // rather than merely detecting that its closing fence never arrived.
+        let whitespace_replay = format!(
+            "<tool_call>\n{{\n  \"server\": \"local\",\n  \"tool\": \"assert_equal\",\n  \"args\": {{\n{}",
+            " ".repeat(994)
+        );
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            whitespace_replay.clone(),
+            false,
+        ));
+        let bound = fence("local", "assert_equal", serde_json::json!({}));
+        let string_payload = format!("left{}\n\tright", " ".repeat(995));
+        let nested = fence(
+            "files",
+            "read",
+            serde_json::json!({"nested":[{"value":string_payload},true,null]}),
+        );
+        let dynamic = fence(
+            "generic",
+            "operation",
+            serde_json::json!({"left":1,"nodeId":string_payload}),
+        );
+        let pretty = "<tool_call>\n{\n  \"server\": \"local\",\n  \"tool\": \"assert_equal\",\n  \"args\": { \t\r\n}\n}\n</tool_call>";
+        for mode in [
+            ToolCallGrammarMode::SingleToolCall,
+            ToolCallGrammarMode::ToolCallsOnly,
+            ToolCallGrammarMode::ProseOrToolCalls,
+        ] {
+            for text in [
+                bound.clone(),
+                pretty.to_string(),
+                nested.clone(),
+                dynamic.clone(),
+            ] {
+                cases.push((mode, text, true));
+            }
+            for count in [4, 5, 995] {
+                cases.push((
+                    mode,
+                    bound.replace(
+                        "\"args\":{}",
+                        &format!("\"args\":{{{}}}", " ".repeat(count)),
+                    ),
+                    count == 4,
+                ));
+            }
+            cases.push((mode, format!("{bound}{}", " ".repeat(5)), false));
+            // Two adjacent ws sites allow eight characters before the closing
+            // fence, but cannot make an unbounded whitespace run.
+            cases.push((
+                mode,
+                bound.replace("</tool_call>", &format!("{}</tool_call>", " ".repeat(8))),
+                true,
+            ));
+            cases.push((
+                mode,
+                bound.replace("</tool_call>", &format!("{}</tool_call>", " ".repeat(9))),
+                false,
+            ));
+        }
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            format!("{}{bound}", " ".repeat(4)),
+            true,
+        ));
+        cases.push((
+            ToolCallGrammarMode::SingleToolCall,
+            format!("{}{bound}", " ".repeat(5)),
+            false,
+        ));
+        // Ordinary prose is data, not tool-call syntax whitespace.
+        cases.push((
+            ToolCallGrammarMode::ProseOrToolCalls,
+            format!("Prose{}still prose", " ".repeat(995)),
+            true,
+        ));
         for (mode, text, expected) in cases {
             let grammar = tool_call_grammar_with_argument_schemas(&pairs, &argument_schemas, mode);
             let mut sampler = LlamaSampler::grammar(&model, &grammar, "root").unwrap();
@@ -686,6 +819,7 @@ mod tests {
                 "fixture vocabulary must preserve candidate bytes for {text:?}"
             );
             let mut accepted = true;
+            let mut accepted_bytes = 0;
             for token in tokens.into_iter().chain(std::iter::once(eos)) {
                 let mut candidate =
                     LlamaTokenDataArray::new(vec![LlamaTokenData::new(token, 0.0, 0.0)], false);
@@ -696,6 +830,10 @@ mod tests {
                 }
                 // Never accept rejected tokens: llama.cpp assumes admissibility.
                 sampler.accept(token);
+                accepted_bytes += vocab.token_to_piece(token, false, None).len();
+            }
+            if text == whitespace_replay {
+                assert!(accepted_bytes <= 76, "recorded whitespace loop must be blocked before its long suffix: {accepted_bytes}");
             }
             assert_eq!(
                 accepted, expected,

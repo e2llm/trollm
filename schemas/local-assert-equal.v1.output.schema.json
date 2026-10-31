@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.assert_equal v1 result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["equal"],
+  "properties": {"equal": {"const": true}}
+}

@@ -8,7 +8,11 @@ use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// Disposable observation of a committed record. Never used for execution or recovery.
+pub type CommittedEventSink = Arc<dyn Fn(&Value, &str) + Send + Sync>;
 
 /// Closed set of main-log event types (§7). `fetch_progress`, `cache_hit` and
 /// `served_from_file` are reserved here; core currently does not emit them.
@@ -72,6 +76,22 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Cumulative successful main-journal append costs; intervals are disjoint.
+/// Nanoseconds saturate rather than wrapping. No payloads or identifiers.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EventWriteMetrics {
+    pub records: u64,
+    /// Serialized record bytes, excluding delimiters.
+    pub record_bytes: u64,
+    pub serialize_ns: u64,
+    pub write_flush_ns: u64,
+    pub observer_ns: u64,
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 /// Append-only JSONL writer. Every line is flushed before returning so mutation
 /// intents precede gateway dispatch. This is not an fsync/power-loss guarantee.
 pub struct EventLog {
@@ -82,6 +102,8 @@ pub struct EventLog {
     needs_delimiter: bool,
     bytes: u64,
     failure: Option<(std::io::ErrorKind, String)>,
+    committed_sink: Option<CommittedEventSink>,
+    write_metrics: EventWriteMetrics,
 }
 
 impl EventLog {
@@ -98,7 +120,19 @@ impl EventLog {
             needs_delimiter,
             bytes,
             failure: None,
+            committed_sink: None,
+            write_metrics: EventWriteMetrics::default(),
         })
+    }
+
+    /// Install a best-effort observer. Callback failures cannot change append success,
+    /// mutation ordering or recovery. The callback must not perform execution work.
+    pub fn set_committed_sink(&mut self, sink: CommittedEventSink) {
+        self.committed_sink = Some(sink);
+    }
+
+    pub fn write_metrics(&self) -> EventWriteMetrics {
+        self.write_metrics
     }
 
     pub fn path(&self) -> &Path {
@@ -136,6 +170,7 @@ impl EventLog {
         let next_seq = self.seq.checked_add(1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "event sequence exhausted")
         })?;
+        let serialize_started = Instant::now();
         let mut record = RecordBuffer(Vec::new());
         let mut serializer = serde_json::Serializer::new(&mut record);
         let mut map = serializer.serialize_map(None)?;
@@ -149,6 +184,7 @@ impl EventLog {
             }
         }
         map.end()?;
+        let serialize_ns = elapsed_ns(serialize_started);
         let next_bytes = self.bytes + u64::from(self.needs_delimiter) + record.0.len() as u64 + 1;
         if next_bytes > MAX_EVENT_LOG_BYTES {
             return Err(std::io::Error::new(
@@ -157,15 +193,45 @@ impl EventLog {
             ));
         }
         // Capacity rejection above must not even delimit a previously valid tail.
+        let write_started = Instant::now();
         if self.needs_delimiter {
             self.file.write_all(b"\n")?;
         }
         self.file.write_all(&record.0)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
+        let write_flush_ns = elapsed_ns(write_started);
         self.needs_delimiter = false;
         self.bytes = next_bytes;
         self.seq = next_seq;
+        self.write_metrics.records = self.write_metrics.records.saturating_add(1);
+        self.write_metrics.record_bytes = self
+            .write_metrics
+            .record_bytes
+            .saturating_add(record.0.len() as u64);
+        self.write_metrics.serialize_ns =
+            self.write_metrics.serialize_ns.saturating_add(serialize_ns);
+        self.write_metrics.write_flush_ns = self
+            .write_metrics
+            .write_flush_ns
+            .saturating_add(write_flush_ns);
+        if let Some(sink) = &self.committed_sink {
+            let observer_started = Instant::now();
+            // The serialized record is already committed. A disposable projection
+            // must never convert this success into a failed mutation intent.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let (Ok(value), Ok(line)) = (
+                    serde_json::from_slice::<Value>(&record.0),
+                    std::str::from_utf8(&record.0),
+                ) {
+                    sink(&value, line);
+                }
+            }));
+            self.write_metrics.observer_ns = self
+                .write_metrics
+                .observer_ns
+                .saturating_add(elapsed_ns(observer_started));
+        }
         Ok(self.seq)
     }
 
@@ -392,6 +458,36 @@ pub fn dangling_intents(events: &[Value]) -> Vec<DanglingIntent> {
 #[cfg(test)]
 mod bounds_regressions {
     use super::*;
+
+    #[test]
+    fn committed_observer_is_post_flush_and_panics_do_not_change_success() {
+        let directory =
+            std::env::temp_dir().join(format!("event-observer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("events.jsonl");
+        let mut log = EventLog::open(&path, "run").unwrap();
+        let observe_path = path.clone();
+        log.set_committed_sink(Arc::new(move |value, line| {
+            assert_eq!(value["seq"], 1);
+            assert_eq!(
+                std::fs::read_to_string(&observe_path).unwrap(),
+                format!("{line}\n")
+            );
+            panic!("disposable observer failure");
+        }));
+        assert_eq!(log.append(EventType::Resumed, Value::Null).unwrap(), 1);
+        let metrics = log.write_metrics();
+        assert_eq!(metrics.records, 1);
+        assert_eq!(
+            metrics.record_bytes + 1,
+            std::fs::metadata(&path).unwrap().len()
+        );
+        log.file = File::open(&path).unwrap();
+        assert!(log.append(EventType::Resumed, Value::Null).is_err());
+        assert_eq!(log.write_metrics().records, 1);
+        drop(log);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn failed_io_stays_failed_even_when_file_is_replaced_with_writable_handle() {

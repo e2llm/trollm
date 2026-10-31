@@ -12,6 +12,11 @@ These changes preserve coder-invoked tools and advisory reasoner prose; see the
 [architecture](ARCHITECTURE-ANDROID.md) and [flow practices](FLOW-PRACTICES.md).
 Source checks and companion inspection do not establish APK or model acceptance.
 
+Task-specific native result destinations are also implemented; see
+[result artifacts](TASK-RESULT-ARTIFACTS.md). Broad and narrow reads can retain
+separate results through the same remote method, without model copying or extra
+generations. This source capability requires an APK containing the updated runtime.
+
 ## Intended experience
 
 The approved [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds
@@ -43,20 +48,27 @@ contexts. Setup descriptors pin upstream revisions, sizes and SHA-256 hashes.
 
 The Rust workspace provides explicit execution plans, model slots, an MCP
 gateway, durable artifacts and an Android bridge. The Compose app provides
-bundle installation, checksum-verified sequential model preparation, per-flow
+bundle installation, checksum-verified sequential model downloads, per-flow
 overrides, browser OAuth with grant-bound refresh, manual Bearer setup and
 bundled text/browser summary and **Check a total** starters. Secrets use encrypted
 app storage.
 
-Current source prepares **0.1.0-rc.6 / Android code 7** with built-in
-`local.calculate`. **Check a total** adds two amounts selected from text and
-compares the exact result with a supplied budget, using prepared models without
-an MCP connection. Coverage includes scripted executor/gateway tests, pinned
-bundles and native tool-fence grammar. Arithmetic does not verify model operand
-selection; rc.6 real-model and device acceptance remain open.
+Current source metadata is **0.1.0-rc.8 / Android code 43**. Source-only refreshes
+are identified by their exported source commit; this metadata does not establish
+new APK delivery or device acceptance. See [versioning](VERSIONING.md).
 
-Models load on first slot use after checksum verification and are reused within
-the run. Status shows verification, loading and generation. Models and run data
+The runtime includes prepared worklists, complete-collection arithmetic, reusable
+child returns, retained original results and correlated run measurements.
+**Check a total** uses `local.calculate` to add two amounts selected from text and
+compare the result with a supplied budget, without an MCP connection. Scripted
+executor/gateway tests, bundle checks and native grammar tests cover these
+contracts. Arithmetic does not verify model operand selection; real-model and
+phone acceptance remain separate.
+
+After explicit Start/Resume, up to two task-referenced models prepare in parallel
+after checksum verification and are reused within the run. Plans referencing more
+than two slots retain lazy loading. See [model preparation](MODEL-PREPARATION.md).
+Status shows foreground verification, loading and generation. Models and run data
 use persistent app-specific storage. Lost workers leave saved progress requiring
 explicit Resume; startup never preloads models or replays a run. Interruptible
 retries, durable cancellation, readable history and typed bridge errors are present.
@@ -130,3 +142,7 @@ validation. Remaining validation is distinct from missing implementation.
 
 The backlog is not a delivery-date commitment. Dependency changes should also
 update [third-party notices](../THIRD_PARTY_NOTICES.md).
+
+Prepared-input procedures and bounded repeated item subflows are described in
+the [count-independent workflow record](amazon-generalization/README.md),
+including their scripted test scope and remaining physical acceptance.

@@ -1,4 +1,3 @@
-// Reuse the shared temporary directory without the HTTP server fixture.
 #[allow(dead_code, unused_imports)]
 mod common;
 use common::TempDir;

@@ -7,8 +7,8 @@ import java.net.HttpURLConnection
 import java.net.URI
 import javax.net.ssl.HttpsURLConnection
 
-class OAuthConnectionBuilder(filesDir: File) : ConnectionBuilder {
-    private val roots = File(filesDir, "trollm/trust/mcp-roots.pem").toPath()
+class OAuthConnectionBuilder(filesDir: File, source: Boolean = false) : ConnectionBuilder {
+    private val roots = File(filesDir, if (source) "trollm/trust/moray-roots.pem" else "trollm/trust/mcp-roots.pem").toPath()
 
     override fun openConnection(uri: Uri): HttpURLConnection {
         val endpoint = ConnectionInput.canonicalEndpoint(uri.toString())

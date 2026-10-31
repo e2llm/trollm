@@ -256,17 +256,20 @@ fn capacity_blocks_intent_dispatch_and_preserves_uncertainty_after_effect() {
             break;
         }
     }
-    // Midpoints leave wide margins on either side of the refused record;
-    // scheduler-dependent timing digits cannot decide whether the effect runs.
+    // Leave a margin for scheduler-dependent timing digits on either side of
+    // the refused record. Correlation metadata can make a result much larger
+    // than the recovery Error: an uncapped midpoint could admit that Error
+    // before rejecting RunEnded, contrary to this fixture's full-log recovery
+    // case. Cap the spare bytes so recovery's first record is also refused.
     assert!(through_intent - before_intent >= 128);
     assert!(through_result - through_intent >= 128);
     for after_effect in [false, true] {
         let run = RunDir::under(&base);
         run.create_dirs().unwrap();
         let allowance = if after_effect {
-            through_intent + (through_result - through_intent) / 2
+            through_intent + ((through_result - through_intent) / 2).min(128)
         } else {
-            before_intent + (through_intent - before_intent) / 2
+            before_intent + ((through_intent - before_intent) / 2).min(128)
         };
         let mut file = File::create(run.events_path()).unwrap();
         blank_prefix(&mut file, MAX_EVENT_LOG_BYTES - allowance);

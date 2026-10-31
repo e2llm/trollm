@@ -65,16 +65,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import com.trollm.app.TechnicalEvents
 import com.trollm.app.RunService
 import com.trollm.app.StatusTone
 import com.trollm.app.RunPresentation
 import com.trollm.app.presentRun
 import uniffi.trollm_uniffi.FlowInfo
+import uniffi.trollm_uniffi.RunPhaseApi
 import uniffi.trollm_uniffi.TrollmRuntime
 
 /**
  * Run screen: user input → `start_run` → tail the event log via
- * `tail_events` polling. Progress lines come from event types
+ * `observe_run` polling. Progress lines come from event types
  * ([renderEvent]); current worker activity supplies the live status label.
  * The foreground service holds the wake lock during active execution.
  */
@@ -86,27 +88,31 @@ fun RunScreen(
     existingRunId: String?,
     onRunStarted: (String) -> Unit,
     onBack: () -> Unit,
+    sourceInstallation: String? = null,
+    sourceAssociation: String? = null,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
-    var userInput by rememberSaveable(flow?.sha256) { mutableStateOf("") }
+    var userInput by rememberSaveable(flow?.sha256, sourceInstallation) { mutableStateOf("") }
     val valuesSaver = remember { mapSaver<Map<String, String>>(
         save = { it }, restore = { saved -> saved.mapValues { it.value as? String ?: "" } },
     ) }
-    var structuredValues by rememberSaveable(flow?.sha256, stateSaver = valuesSaver) { mutableStateOf(emptyMap<String, String>()) }
-    var inputAttempted by remember(flow?.sha256) { mutableStateOf(false) }
+    var structuredValues by rememberSaveable(flow?.sha256, sourceInstallation, stateSaver = valuesSaver) { mutableStateOf(emptyMap<String, String>()) }
+    var inputAttempted by remember(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
     val runId = existingRunId
     val scope = rememberCoroutineScope()
-    var starting by remember(flow?.sha256) { mutableStateOf(false) }
-    var setup by remember(flow?.sha256) { mutableStateOf<FlowSetup?>(null) }
-    var setupChecked by remember(flow?.sha256) { mutableStateOf(false) }
-    var preparing by rememberSaveable(flow?.sha256) { mutableStateOf(false) }
-    var configurationJson by rememberSaveable(flow?.sha256) { mutableStateOf<String?>(null) }
+    var starting by remember(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
+    var setup by remember(flow?.sha256, sourceInstallation) { mutableStateOf<FlowSetup?>(null) }
+    var setupChecked by remember(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
+    var preparing by rememberSaveable(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
+    var configurationJson by rememberSaveable(flow?.sha256, sourceInstallation) { mutableStateOf<String?>(null) }
+    var sourceReportTerminal by remember(runId) { mutableStateOf(false) }
     var finalReport by remember(runId) { mutableStateOf<String?>(null) }
+    var olderEventsOmitted by remember(runId) { mutableStateOf(false) }
     var lines by remember(runId) { mutableStateOf<List<String>>(emptyList()) }
     var error by remember(runId, flow?.sha256) { mutableStateOf<UiError?>(null) }
     // Keep post-start warnings when the successful UUID changes the screen state.
-    var startedRunError by remember(flow?.sha256) { mutableStateOf<UiError?>(null) }
+    var startedRunError by remember(flow?.sha256, sourceInstallation) { mutableStateOf<UiError?>(null) }
     var pollingError by remember(runId) { mutableStateOf<UiError?>(null) }
     var showTechnicalEvents by remember(runId) { mutableStateOf(false) }
     var presentation by remember(runId) { mutableStateOf<RunPresentation?>(null) }
@@ -131,10 +137,10 @@ fun RunScreen(
     val listState = rememberLazyListState()
     val inputScroll = rememberScrollState()
 
-    LaunchedEffect(flow?.sha256) {
+    LaunchedEffect(flow?.sha256, sourceInstallation) {
         val selected = flow ?: return@LaunchedEffect
         catchingOperation {
-            withContext(Dispatchers.IO) { runtime.flowSetup(selected.sha256)?.let { FlowSetup.parse(it) } }
+            withContext(Dispatchers.IO) { (sourceInstallation?.let { runtime.sourceBundleSetup(it) } ?: if (sourceInstallation == null) runtime.flowSetup(selected.sha256) else null)?.let { FlowSetup.parse(it) } }
         }.onSuccess {
             setup = it
             setupChecked = true
@@ -144,38 +150,42 @@ fun RunScreen(
     if (preparing && flow != null && runId == null) {
         FlowSetupScreen(
             runtime = runtime,
-            flowSha = flow.sha256,
+            flowSha = sourceInstallation ?: flow.sha256,
+            sourceInstallation = sourceInstallation,
             onReady = { configurationJson = it; preparing = false },
             onBack = { preparing = false },
         )
         return
     }
 
-    // Tail loop: incremental cursor over events.jsonl; status via poll_status.
+    // Bounded worker-owned observation; strict journal APIs remain separate.
     LaunchedEffect(runId, pollingGeneration) {
         val id = runId ?: return@LaunchedEffect
         var cursor = 0uL
         lines = emptyList()
+        olderEventsOmitted = false
         while (isActive) {
             val step = catchingOperation {
                 withContext(Dispatchers.IO) {
-                    val events = runtime.tailEvents(id, cursor)
-                    val status = runtime.pollStatus(id)
-                    events to status
+                    runtime.observeRun(id, cursor)
                 }
             }
-            step.onSuccess { (events, status) ->
+            step.onSuccess { observation ->
+                val status = observation.status
                 pollingError = null
-                if (events.isNotEmpty()) {
-                    lines = lines + events.map(::renderEvent)
-                    cursor = events.last().seq
-                }
+                val incoming = observation.events.map(::renderEvent)
+                val retained = TechnicalEvents.append(lines, incoming)
+                olderEventsOmitted = olderEventsOmitted || observation.olderEventsOmitted ||
+                    retained.size < lines.size + incoming.size
+                lines = retained
+                cursor = observation.nextSeq
                 presentation = presentRun(status.phase, status.workerActive, status.activity)
                 finalReport = status.finalReport
+                sourceReportTerminal = !status.workerActive && (status.phase is RunPhaseApi.Succeeded || status.phase is RunPhaseApi.Failed)
             }.onFailure {
                 pollingError = operationError(UiOperation.OBSERVE_RUN, it)
             }
-            if (presentation?.keepPolling == false) break
+            if (presentation?.keepPolling == false && step.getOrNull()?.hasMore != true) break
             delay(300)
         }
     }
@@ -266,6 +276,14 @@ fun RunScreen(
                     error = operationError(UiOperation.PREPARE_INPUT, failure)
                     return@Button
                 }
+                val declaredSource = sourceInstallation != null && org.json.JSONObject(checkNotNull(sourceAssociation))
+                    .getJSONObject("descriptor").getJSONObject("source").opt("origin") == "DECLARED"
+                val originalInput = try {
+                    if (declaredSource) StructuredInput.serializeOriginal(fields, structuredValues) else submittedInput
+                } catch (failure: Exception) {
+                    error = operationError(UiOperation.PREPARE_INPUT, failure)
+                    return@Button
+                }
                 val submittedConfiguration = configurationJson
                 error = null
                 starting = true
@@ -274,9 +292,19 @@ fun RunScreen(
                     catchingOperation {
                         withContext(Dispatchers.IO) {
                             check(!runtime.hasActiveRun()) { "Finish or cancel the active run before starting another." }
+                            if (sourceInstallation != null) com.trollm.app.MoraySource.authorizeFreshStart(
+                                context, org.json.JSONObject(checkNotNull(sourceAssociation)))
+                            val admittedAssociation = if (declaredSource) {
+                                val admission = runtime.admitSourceInput(checkNotNull(sourceInstallation), originalInput, submittedInput)
+                                org.json.JSONObject(checkNotNull(sourceAssociation))
+                                    .put("inputAdmission", org.json.JSONObject(admission)).toString()
+                            } else sourceAssociation
+                            val executionInput = if (declaredSource) originalInput else submittedInput
                             val id = submittedConfiguration?.let {
-                                runtime.startRunConfigured(flow.sha256, submittedInput, it)
-                            } ?: runtime.startRun(flow.sha256, submittedInput)
+                                if (sourceInstallation == null) runtime.startRunConfigured(flow.sha256, submittedInput, it)
+                                else runtime.startSourceRunConfigured(flow.sha256, sourceInstallation, executionInput, it, checkNotNull(admittedAssociation))
+                            } ?: if (sourceInstallation == null) runtime.startRun(flow.sha256, submittedInput)
+                                else runtime.startSourceRun(flow.sha256, sourceInstallation, executionInput, checkNotNull(admittedAssociation))
                             // Preserve the successful UUID even if storage/service setup fails.
                             val storageError = catchingOperation { RunHistory(context).record(id) }.exceptionOrNull()
                             val serviceError = catchingOperation { RunService.start(context.applicationContext, id) }.exceptionOrNull()
@@ -346,6 +374,8 @@ fun RunScreen(
                 ) { Text("Cancel run") }
             }
 
+            SourceRunReportPanel(runtime, runId, sourceReportTerminal)
+
             finalReport?.let { report ->
                 ContentCard {
                     SectionHeading("Final report")
@@ -365,6 +395,7 @@ fun RunScreen(
                 modifier = Modifier.semantics { stateDescription = if (showTechnicalEvents) "Expanded" else "Collapsed" },
             ) { Text(if (showTechnicalEvents) "Hide technical details" else "Technical details") }
             if (showTechnicalEvents) {
+                if (olderEventsOmitted) Text("Older technical events omitted from this view.")
                 SelectionContainer {
                     Text(
                         "Run ID: $runId" + (flow?.let { "\nFlow ID: ${it.id}\nBundle SHA-256: ${it.sha256}" } ?: ""),

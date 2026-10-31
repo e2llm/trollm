@@ -13,14 +13,14 @@ import org.json.JSONObject
  * Tokens and their canonical endpoint bindings are stored together per MCP server
  * name. Values never touch logs or the event log.
  */
-class SecretsStore(context: Context) {
+class SecretsStore(context: Context, source: Boolean = false) {
     private val masterKey = MasterKey.Builder(context)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
         .build()
 
     private val prefs = EncryptedSharedPreferences.create(
         context,
-        "trollm_mcp_tokens",
+        if (source) "trollm_moray_tokens" else "trollm_mcp_tokens",
         masterKey,
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,

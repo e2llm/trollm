@@ -66,6 +66,12 @@ val releaseSigningComplete = releaseSigning.values.all { !it.isNullOrBlank() }
 val releaseSigningMessage = "Release builds require all TROLLM_RELEASE signing inputs: " +
     releaseSigning.keys.joinToString(", ")
 
+val sourceRevision = System.getenv("TROLLM_SOURCE_REVISION") ?: providers.exec {
+    workingDir(repoDir)
+    commandLine("git", "rev-parse", "HEAD")
+}.standardOutput.asText.get().trim()
+require(sourceRevision.matches(Regex("[a-f0-9]{40}"))) { "Exact source revision is required" }
+
 android {
     namespace = "com.trollm.app"
     ndkVersion = "27.2.12479018"
@@ -77,6 +83,7 @@ android {
         targetSdk = 35
         versionCode = androidVersionCode
         versionName = productVersion
+        buildConfigField("String", "SOURCE_REVISION", "\"$sourceRevision\"")
         ndk {
             abiFilters += androidAbis
         }
@@ -110,6 +117,7 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 

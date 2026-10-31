@@ -1727,3 +1727,54 @@ fn runtime_deadline_stops_discovery_live_calls_and_pagination_before_dispatch() 
         }
     }
 }
+
+#[test]
+fn controlled_collection_action_observation_gate_never_retries_refused_payload() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/controlled-collection-act.v1.result.schema.json"
+    ))
+    .unwrap();
+    for payload in [
+        json!({"approvalRequired":true,"approvalToken":"test-only"}),
+        json!({"result":"dispatched-indeterminate","actionClassification":"dispatched-outcome-indeterminate"}),
+        json!({"result":"dispatched-unconfirmed","actionClassification":"dispatched-unconfirmed"}),
+        json!({"result":"mutation","actionClassification":"navigation"}),
+        json!({"result":"opened","actionClassification":"navigation"}),
+    ] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("collection-action-refusal");
+        server
+            .tool_payloads
+            .lock()
+            .unwrap()
+            .insert("close_issue".into(), payload);
+        let policies = PolicySet::from_yaml_str(
+            &json!({"tracker.close_issue":{
+                "class":"mutation","passthrough":true,"timeoutS":1,
+                "resultValidation":{"maxBytes":262144,"schema":schema}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let mut gw = gateway(&server, policies, &dirs, None);
+        assert!(gw
+            .call(&call("tracker", "close_issue", json!({"id":3})))
+            .is_err());
+        assert_eq!(server.count("call:close_issue"), 1);
+        assert!(!dirs.path().join("cache/tracker/close_issue").exists());
+    }
+    for (result, class) in [
+        ("mutation", "mutation-observed"),
+        ("recapture", "recapture-triggered"),
+        ("no-change", "dispatched-no-dom-change"),
+        ("navigation", "navigation"),
+    ] {
+        let validator = trollm_mcp::ArtifactSchema::compile(&schema).unwrap();
+        validator
+            .validate(
+                &json!({"result":result,"actionClassification":class}),
+                262144,
+            )
+            .unwrap();
+    }
+}
