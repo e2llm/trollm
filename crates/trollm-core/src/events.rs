@@ -26,6 +26,8 @@ pub enum EventType {
     NodeEntered,
     NodeExited,
     ModelCall,
+    ToolCallPrepared,
+    ToolCallOutcomeAcknowledged,
     ToolCallIntent,
     ToolCallResult,
     CacheHit,
@@ -48,6 +50,8 @@ impl EventType {
             Self::NodeEntered => "node_entered",
             Self::NodeExited => "node_exited",
             Self::ModelCall => "model_call",
+            Self::ToolCallPrepared => "tool_call_prepared",
+            Self::ToolCallOutcomeAcknowledged => "tool_call_outcome_acknowledged",
             Self::ToolCallIntent => "tool_call_intent",
             Self::ToolCallResult => "tool_call_result",
             Self::CacheHit => "cache_hit",
@@ -254,6 +258,125 @@ impl EventLog {
     }
 }
 
+/// Exact retained JSON record text (without JSONL delimiters), not regenerated
+/// native events and not a cryptographic signature or business disposition.
+pub struct RetainedCallRecords {
+    pub intent_json: String,
+    pub result_json: String,
+}
+
+/// Validate the original selected preparation and its later retained intent
+/// before a dispatch permit exists. The caller supplies the native-owned path.
+pub fn retained_prepared_intent(
+    path: &Path,
+    context: &trollm_mcp::preparation::PreparationContext,
+    call: &trollm_mcp::ToolCall,
+    evidence: &trollm_mcp::preparation::PreparationEvidence,
+    intent_seq: u64,
+) -> anyhow::Result<(String, String)> {
+    use sha2::{Digest, Sha256};
+    let native = serde_json::to_value(&context.call_context)?;
+    let mut intent = None;
+    let mut prepared = None;
+    let mut duplicate = false;
+    EventLog::visit(path, Some(&context.run_id), |event, raw| {
+        if event["seq"].as_u64() == Some(intent_seq) {
+            intent = Some((event.clone(), raw.to_owned()));
+        }
+        if event["type"] == "tool_call_prepared" && event["callContext"] == native {
+            duplicate |= prepared.is_some();
+            prepared = Some((event.clone(), raw.to_owned()));
+        }
+    })?;
+    anyhow::ensure!(!duplicate, "selected native preparation duplicated");
+    let (prepared, prepared_raw) =
+        prepared.ok_or_else(|| anyhow::anyhow!("selected native preparation unavailable"))?;
+    let (intent, raw) =
+        intent.ok_or_else(|| anyhow::anyhow!("selected retained intent unavailable"))?;
+    anyhow::ensure!(raw.len() <= 16384, "selected intent exceeds evidence bound");
+    for record in [&prepared, &intent] {
+        anyhow::ensure!(
+            record["node"] == context.node
+                && record["taskRef"] == context.task_ref
+                && record["callContext"] == native,
+            "selected native intent context mismatch"
+        );
+    }
+    anyhow::ensure!(
+        prepared["seq"].as_u64().is_some_and(|seq| seq < intent_seq)
+            && prepared["resolvedCall"] == serde_json::to_value(call)?
+            && prepared["nativeContext"] == serde_json::to_value(context.raw()?)?
+            && prepared["evidence"] == serde_json::to_value(evidence)?,
+        "selected intent does not follow its original preparation"
+    );
+    anyhow::ensure!(
+        intent["type"] == "tool_call_intent"
+            && intent["server"] == call.server
+            && intent["tool"] == call.tool
+            && intent["args"] == call.args
+            && intent["argsSha256"]
+                == format!("{:x}", Sha256::digest(serde_json::to_vec(&call.args)?)),
+        "selected retained intent arguments mismatch"
+    );
+    Ok((raw, prepared_raw))
+}
+
+/// Extract from the native-owned journal only after validating its complete
+/// run/sequence stream. External callers must not select an arbitrary journal.
+/// Artifact bytes and definite tool disposition require additional validation.
+pub fn retained_call_records(
+    path: &Path,
+    context: &trollm_mcp::preparation::PreparationContext,
+    call: &trollm_mcp::ToolCall,
+    intent_seq: u64,
+    result_seq: u64,
+) -> anyhow::Result<RetainedCallRecords> {
+    anyhow::ensure!(intent_seq < result_seq, "invalid retained call order");
+    let mut intent = None;
+    let mut result = None;
+    EventLog::visit(path, Some(&context.run_id), |event, raw| {
+        if event["seq"].as_u64() == Some(intent_seq) {
+            intent = Some((event.clone(), raw.to_owned()));
+        }
+        if event["seq"].as_u64() == Some(result_seq) {
+            result = Some((event.clone(), raw.to_owned()));
+        }
+    })?;
+    let (intent, intent_json) =
+        intent.ok_or_else(|| anyhow::anyhow!("retained intent unavailable"))?;
+    let (result, result_json) =
+        result.ok_or_else(|| anyhow::anyhow!("retained result unavailable"))?;
+    anyhow::ensure!(
+        intent_json.len() + result_json.len() <= 16384,
+        "retained call evidence exceeds selected bound"
+    );
+    let native_context = serde_json::to_value(&context.call_context)?;
+    for event in [&intent, &result] {
+        anyhow::ensure!(
+            event["node"] == context.node
+                && event["taskRef"] == context.task_ref
+                && event["server"] == call.server
+                && event["tool"] == call.tool
+                && event["callContext"] == native_context,
+            "retained call association mismatch"
+        );
+    }
+    anyhow::ensure!(
+        intent["type"] == "tool_call_intent" && intent["args"] == call.args,
+        "retained intent arguments mismatch"
+    );
+    anyhow::ensure!(
+        result["type"] == "tool_call_result"
+            && result["intentSeq"].as_u64() == Some(intent_seq)
+            && result["argsHash"] == trollm_mcp::CacheStore::hash_args(&call.args, None, None),
+        "retained result linkage mismatch"
+    );
+    Ok(RetainedCallRecords {
+        intent_json,
+        result_json,
+    })
+}
+
 /// Serialization stops before an oversized event can allocate its full JSON.
 struct RecordBuffer(Vec<u8>);
 
@@ -458,6 +581,64 @@ pub fn dangling_intents(events: &[Value]) -> Vec<DanglingIntent> {
 #[cfg(test)]
 mod bounds_regressions {
     use super::*;
+
+    #[test]
+    fn retained_call_extraction_preserves_native_bytes_and_refuses_association_or_corrupt_tail() {
+        use serde_json::json;
+        let directory =
+            std::env::temp_dir().join(format!("retained-call-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("events.jsonl");
+        let context = trollm_mcp::preparation::PreparationContext {
+            run_id: "run".into(),
+            node: "node".into(),
+            task_ref: "task".into(),
+            model_slot: "coder".into(),
+            model_call_ordinal: 1,
+            frames: vec![],
+            cursors: vec![],
+            argument_bindings: vec![],
+            call_context: trollm_mcp::CallContext {
+                epoch: "original".into(),
+                attempt: u64::MAX,
+                call: 1,
+            },
+        };
+        let call = trollm_mcp::ToolCall {
+            server: "fixture".into(),
+            tool: "act".into(),
+            args: json!({"id":3}),
+        };
+        let mut log = EventLog::open(&path, "run").unwrap();
+        let common = json!({"node":"node","taskRef":"task","server":"fixture","tool":"act","callContext":context.call_context});
+        let mut intent = common.clone();
+        intent["args"] = call.args.clone();
+        let first = log.append(EventType::ToolCallIntent, intent).unwrap();
+        let mut result = common;
+        result["intentSeq"] = json!(first);
+        result["argsHash"] = json!(trollm_mcp::CacheStore::hash_args(&call.args, None, None));
+        let last = log.append(EventType::ToolCallResult, result).unwrap();
+        let retained = retained_call_records(&path, &context, &call, first, last).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original,
+            format!("{}\n{}\n", retained.intent_json, retained.result_json)
+        );
+        assert!(retained.intent_json.contains("18446744073709551615"));
+        let mut wrong = call.clone();
+        wrong.args = json!({"id":4});
+        assert!(retained_call_records(&path, &context, &wrong, first, last).is_err());
+        assert!(retained_call_records(&path, &context, &call, last, first).is_err());
+        drop(log);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{broken\n")
+            .unwrap();
+        assert!(retained_call_records(&path, &context, &call, first, last).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn committed_observer_is_post_flush_and_panics_do_not_change_success() {

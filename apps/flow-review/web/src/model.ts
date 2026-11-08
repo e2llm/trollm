@@ -156,6 +156,9 @@ export function edgesOf(plan: Plan): Edge[] {
   for (const [id, n] of Object.entries(plan.nodes)) {
     for (const key of ["onVerified", "onEmpty", "onComplete", "onLimit"])
       add(id, key, n[key]);
+    if (n.onItemOutcome && typeof n.onItemOutcome === "object" && !Array.isArray(n.onItemOutcome))
+      for (const [outcome, target] of Object.entries(n.onItemOutcome))
+        add(id, `child outcome: ${outcome}`, target);
     if (n.routes && typeof n.routes === "object" && !Array.isArray(n.routes))
       for (const [route, t] of Object.entries(n.routes))
         add(id, `route: ${route}`, t);
@@ -238,6 +241,7 @@ export function compare(before: Inspection, after: Inspection): Change[] {
           "between",
           "onEmpty",
           "onComplete",
+          "onItemOutcome",
           "onLimit",
         ].includes(key)
           ? "Edges / recovery"

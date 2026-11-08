@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 from jsonschema import Draft202012Validator
+from flow_checks import validate_fixed_tool_arguments
 
 ROOT = Path(__file__).resolve().parents[1]
 schema = json.loads((ROOT / "schemas/execution-plan.v1.schema.json").read_text())
@@ -32,6 +33,7 @@ for path in sorted((ROOT / "flows/examples").glob("*.flow.yaml")) + starter_plan
         raise ValueError(f"{path}: missing entry step")
     for node in nodes.values():
         edges = [node.get(key) for key in ("onVerified", "onEmpty", "onComplete", "onLimit")]
+        edges.extend(node.get("onItemOutcome", {}).values())
         edges.append(node.get("onError", {}).get("then"))
         edges.extend(node.get("routes", {}).values())
         for route in node.get("routes", {}).values():
@@ -62,6 +64,7 @@ for root_flow, registry_path in references:
     assert registry["schemaVersion"] == "ledger.task-registry.v1"
     for name, task in registry["tasks"].items():
         task_result_validator.validate(task)
+        validate_fixed_tool_arguments(task, ROOT / "schemas")
         for output in task.get("outputContract", {}).get("outputs", {}).values():
             if "schema" in output:
                 if not ("fromArtifact" in output or output.get("from") == "model") or not isinstance(output["schema"], dict):

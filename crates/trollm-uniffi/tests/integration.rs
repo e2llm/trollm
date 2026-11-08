@@ -883,6 +883,227 @@ mod lifecycle {
     }
 
     #[test]
+    fn passive_report_cancel_preserves_real_failed_snapshot() {
+        let base = temp_base("passive-cancel");
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let installed = rt.install_source_bundle(pausing_bundle()).unwrap();
+        let association = serde_json::json!({"installation":{
+            "installationSha256":installed.installation_sha256,
+            "flowSha256":installed.flow_sha256,"archiveSha256":installed.archive_sha256},
+            "descriptor":{"publicationId":"controlled-cancel","identity":{"sha256":installed.archive_sha256,
+                "manifestSha256":installed.installation_sha256,"entryFlowSha256":installed.flow_sha256}}});
+        let id = rt
+            .start_source_run(
+                installed.flow_sha256,
+                installed.installation_sha256,
+                "original".into(),
+                association.to_string(),
+            )
+            .unwrap();
+        wait_for(&rt, &id, |phase| {
+            matches!(phase, RunPhaseApi::Paused { .. })
+        });
+        rt.cancel(id.clone()).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while rt.poll_status(id.clone()).unwrap().worker_active {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let report: serde_json::Value = serde_json::from_str(
+            &rt.prepare_source_report(id.clone(), "controlled-device".into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["observation"]["snapshotStatus"], "failed");
+        assert_eq!(report["observation"]["terminalReason"], "cancelled");
+        assert_eq!(
+            report["observation"]["cooperativeStopCause"]["cause"],
+            "OPERATOR_CANCELLED"
+        );
+        assert_eq!(
+            report["observation"]["cooperativeStopCause"]["effectDisposition"],
+            "unknown"
+        );
+        assert_eq!(report["observation"]["progressDisposition"], "terminal");
+        assert_eq!(report["report"]["outcome"], "unknown");
+        let cause_path = base
+            .join("trollm/runs")
+            .join(&id)
+            .join("cancellation-cause.json");
+        let original = std::fs::read(&cause_path).unwrap();
+        assert_eq!(
+            report["observation"]["cooperativeStopCauseSha256"],
+            sha256_hex(&original)
+        );
+        let mut foreign: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        foreign["nativeRunId"] = serde_json::json!("foreign-run");
+        std::fs::write(&cause_path, serde_json::to_vec(&foreign).unwrap()).unwrap();
+        assert!(rt
+            .prepare_source_report(id, "controlled-device".into())
+            .is_err());
+        std::fs::write(cause_path, original).unwrap();
+    }
+
+    // Dedicated subprocess gives the parent a real killed worker, not a terminal
+    // label manufactured to make reporting eligible.
+    #[test]
+    fn passive_report_hard_loss_child() {
+        let Some(base) = std::env::var_os("TROLLM_PASSIVE_REPORT_CHILD_BASE") else {
+            return;
+        };
+        let base = std::path::PathBuf::from(base);
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let installed = rt.install_source_bundle(pausing_bundle()).unwrap();
+        let association = serde_json::json!({
+            "installation":{"installationSha256":installed.installation_sha256,
+                "flowSha256":installed.flow_sha256,"archiveSha256":installed.archive_sha256},
+            "descriptor":{"publicationId":"hard-loss-controlled","identity":{
+                "sha256":installed.archive_sha256,"manifestSha256":installed.installation_sha256,
+                "entryFlowSha256":installed.flow_sha256}}
+        });
+        let id = rt
+            .start_source_run(
+                installed.flow_sha256,
+                installed.installation_sha256,
+                "original".into(),
+                association.to_string(),
+            )
+            .unwrap();
+        wait_for(&rt, &id, |phase| {
+            matches!(phase, RunPhaseApi::Paused { .. })
+        });
+        assert!(rt.poll_status(id.clone()).unwrap().worker_active);
+        assert!(rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .is_err());
+        std::fs::write(base.join("child-ready"), id).unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn passive_report_after_real_process_loss_preserves_unknown_and_corrupt_refusals() {
+        let base = temp_base("passive-hard-loss");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lifecycle::passive_report_hard_loss_child",
+                "--nocapture",
+            ])
+            .env("TROLLM_PASSIVE_REPORT_CHILD_BASE", &base)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(15);
+        while !base.join("child-ready").exists() {
+            if let Some(exit) = child.try_wait().unwrap() {
+                panic!("hard-loss child exited: {exit}");
+            }
+            if Instant::now() >= until {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("hard-loss child did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let id = std::fs::read_to_string(base.join("child-ready")).unwrap();
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+        let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+        let dir = base.join("trollm/runs").join(&id);
+        let snapshot_path = dir.join("state.snapshot.json");
+        let snapshot = std::fs::read(&snapshot_path).unwrap();
+        let journal = std::fs::read(dir.join("events.jsonl")).unwrap();
+        let source = std::fs::read(dir.join("source-association.json")).unwrap();
+        assert!(matches!(
+            rt.poll_status(id.clone()).unwrap().phase,
+            RunPhaseApi::Paused { .. }
+        ));
+        assert!(!rt.poll_status(id.clone()).unwrap().worker_active);
+        let first = rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .unwrap();
+        assert_eq!(
+            first,
+            rt.prepare_source_report(id.clone(), "controlled-device".into())
+                .unwrap()
+        );
+        let package: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(package["observation"]["snapshotStatus"], "paused");
+        assert_eq!(package["observation"]["progressDisposition"], "interrupted");
+        assert_eq!(package["observation"]["workerActive"], false);
+        assert_eq!(package["observation"]["nativeStatus"], "unknown");
+        assert_eq!(package["report"]["outcome"], "unknown");
+        assert_eq!(
+            package["observation"]["businessVerification"],
+            "not-assessed"
+        );
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot);
+        assert_eq!(std::fs::read(dir.join("events.jsonl")).unwrap(), journal);
+        assert_eq!(
+            std::fs::read(dir.join("source-association.json")).unwrap(),
+            source
+        );
+        let evidence = dir.join("source-reports");
+        assert_eq!(
+            std::fs::read(evidence.join(format!(
+                "{}.events.jsonl",
+                package["observation"]["journalSha256"].as_str().unwrap()
+            )))
+            .unwrap(),
+            journal
+        );
+
+        // Explicit serialized Running fixture exercises the other cold phase.
+        // It is not credited as a second real process-loss trial.
+        let mut state: trollm_core::RunState = serde_json::from_slice(&snapshot).unwrap();
+        state.status = trollm_core::state::StateStatus::Running;
+        let running = serde_json::to_vec(&state).unwrap();
+        std::fs::write(&snapshot_path, &running).unwrap();
+        let report: serde_json::Value = serde_json::from_str(
+            &rt.prepare_source_report(id.clone(), "controlled-device".into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["observation"]["snapshotStatus"], "running");
+        assert_eq!(report["report"]["outcome"], "unknown");
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), running);
+        for invalid in [
+            b"not JSON".to_vec(),
+            {
+                let mut wrong = state.clone();
+                wrong.run_id = "wrong-run".into();
+                serde_json::to_vec(&wrong).unwrap()
+            },
+            {
+                let mut future = state.clone();
+                future.event_watermark = u64::MAX;
+                serde_json::to_vec(&future).unwrap()
+            },
+        ] {
+            std::fs::write(&snapshot_path, invalid).unwrap();
+            assert!(rt
+                .prepare_source_report(id.clone(), "controlled-device".into())
+                .is_err());
+        }
+        std::fs::remove_file(&snapshot_path).unwrap();
+        assert!(rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .is_err());
+        std::fs::write(&snapshot_path, &snapshot).unwrap();
+        std::fs::write(dir.join("events.jsonl"), b"partial").unwrap();
+        assert!(rt
+            .prepare_source_report(id.clone(), "controlled-device".into())
+            .is_err());
+        assert_eq!(
+            std::fs::read(dir.join("source-association.json")).unwrap(),
+            source
+        );
+    }
+
+    #[test]
     fn run_succeeds_and_reports() {
         let base = temp_base("succeeds");
         let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();

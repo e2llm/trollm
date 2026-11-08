@@ -5,6 +5,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class EventRenderTest {
+    @Test fun outcomeAcknowledgementDoesNotExposePrivateEvidence() {
+        assertEquals("Outcome report acknowledged", render("tool_call_outcome_acknowledged",
+            """{"contextSha256":"private","intentSeq":18446744073709551615}"""))
+    }
+
     private fun render(type: String, json: String) = renderEventJson(type, 7uL, json)
 
     @Test fun attemptMeasurementsDoNotLookLikeRepeatedNodeExits() {
@@ -69,6 +74,7 @@ class EventRenderTest {
     @Test fun renderingDoesNotExposeRawResponsesArgumentsOrUnknownEventPayloads() {
         val payload = """{"response":"PRIVATE_RESPONSE","args":{"secret":"PRIVATE_ARG"},"metadata":{"secret":"PRIVATE_METADATA"}}"""
         assertEquals("model[?] unknown→unknown tokens, unknown ms", render("model_call", payload))
+        assertEquals("Tool arguments prepared", render("tool_call_prepared", payload))
         assertEquals("tool intent: browser.act", render("tool_call_intent",
             """{"server":"browser","tool":"act","args":{"secret":"PRIVATE_ARG"}}"""))
         assertEquals("unrecognized (#7)", render("unrecognized", payload))

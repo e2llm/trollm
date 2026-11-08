@@ -300,7 +300,16 @@
               }
             },
             "onEmpty": { "$ref": "#/$defs/transition" },
-            "onComplete": { "$ref": "#/$defs/transition" }
+            "onComplete": { "$ref": "#/$defs/transition" },
+            "onItemOutcome": {
+              "type": "object", "minProperties": 1, "maxProperties": 16,
+              "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$" },
+              "additionalProperties": {
+                "$ref": "#/$defs/transition",
+                "if": { "type": "object", "required": ["status"], "properties": { "status": { "const": "paused" } } },
+                "then": { "required": ["resumeAt"] }
+              }
+            }
           }
         },
         {

@@ -145,6 +145,86 @@ class MorayPortableTest {
             } finally { dir.deleteRecursively() }
         }
     }
+
+    @Test fun installedOwnerAndMachineReporterMustMatchBeforeReceiptCustody() {
+        val dir = Files.createTempDirectory("moray-machine-owner").toFile()
+        try {
+            var bundles = 0
+            var sends = 0
+            var reporterSubject = "other-machine"
+            var expectedTenant = "tenant"
+            val submitted = mutableListOf<String>()
+            val wire = MorayWire { method, url, _, body, _ ->
+                when {
+                    method == "POST" -> {
+                        sends++; submitted += checkNotNull(body).toString(Charsets.UTF_8)
+                        json(JSONObject().put("schema", "moray.edge-report.v1").put("report", report())
+                            .put("receivedAt", "2026-10-30T12:00:01Z").put("verification", "device-reported")
+                            .put("reporter", JSONObject().put("kind", "native").put("issuer", profile.issuer)
+                                .put("clientId", profile.clientId).put("subject", reporterSubject)), 201)
+                    }
+                    url.endsWith("/bundle") -> { bundles++; bundle() }
+                    else -> json(descriptor())
+                }
+            }
+            fun client(access: String) = MorayPortable(profile, dir, wire, { access }, "machine-lineage", { clock },
+                validateOwner = { owner -> require(owner.sourceString("tenantId") == expectedTenant) },
+                validateReporter = { reporter -> require(reporter.sourceString("subject") == "selected-machine") })
+            val saved = client("first-access").pull("publication1") { installation() }
+            client("first-access").retainReport(saved, report())
+            reject { client("first-access").sendReport("report1") }
+            assertFalse(java.io.File(dir, "receipt-report1.json").exists())
+            reporterSubject = "selected-machine"
+            client("renewed-access").sendReport("report1")
+            assertEquals(2, sends)
+            assertEquals(submitted.first(), submitted.last())
+            assertEquals(1, bundles)
+            expectedTenant = "other-tenant"
+            reject { client("renewed-access").sendReport("report1") }
+            reject { client("renewed-access").pull("publication1") { fail("wrong owner installed"); installation() } }
+            assertEquals(2, sends)
+            assertEquals(1, bundles)
+        } finally { dir.deleteRecursively() }
+    }
+    @Test fun collectionSourceIsClosedAndRetainsUnsupportedPublicationRefusal() {
+        val dir = Files.createTempDirectory("collection-refusal").toFile()
+        try {
+            val d = descriptor()
+            val owner = d.getJSONObject("source").getJSONObject("owner")
+            val source = JSONObject().put("schemaVersion", "moray.declared-native-collection.v1-proposal")
+                .put("origin", "DECLARED").put("owner", owner).put("fixtureId", "collection-fixture")
+                .put("versionId", "e".repeat(64)).put("selectionRawSha256", "a".repeat(64))
+                .put("selectionRef", JSONObject().put("tenantId", owner.getString("tenantId"))
+                    .put("artifactId", "art_" + "b".repeat(32)).put("sha256", "a".repeat(64)))
+                .put("profileId", "trollm.native-collection-members.v1-proposal")
+                .put("profileSha256", "b".repeat(64)).put("installationSha256", "c".repeat(64))
+                .put("qualification", "unqualified")
+            d.put("source", source).put("consumerRevision", JSONObject.NULL)
+                .put("identity", JSONObject.NULL).put("metadata", JSONObject.NULL)
+            d.getJSONObject("availability").put("available", false).put("reason", "NO_EXPORT")
+            d.getJSONObject("compatibility").put("status", "unsupported")
+            val client = MorayPortable(profile, dir, MorayWire { _, _, _, _, _ -> json(d) },
+                { "source-token" }, "grant1", { clock })
+            for (memberProfile in listOf("trollm.native-collection-members.v1-proposal",
+                "trollm.native-collection-members.v3-proposal")) {
+                source.put("profileId", memberProfile)
+                try { client.descriptor("publication1"); fail("unsupported collection admitted") }
+                catch (failure: MorayFailure) { assertEquals("NO_EXPORT", failure.code) }
+            }
+            source.put("profileId", "trollm.native-collection-members.v2-proposal")
+            reject { client.descriptor("publication1") }
+            source.put("profileId", "trollm.native-collection-members.v1-proposal")
+            source.put("promptSha256", "a".repeat(64))
+            reject { client.descriptor("publication1") }
+            source.remove("promptSha256")
+            source.getJSONObject("selectionRef").put("sha256", "d".repeat(64))
+            reject { client.descriptor("publication1") }
+            source.getJSONObject("selectionRef").put("sha256", "a".repeat(64))
+            source.put("profileId", "controlled-collection-native-selected.v2-proposal")
+            reject { client.descriptor("publication1") }
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun declaredRefusalIsDecodedWithoutInventingBrowserLineageOrRevision() {
         val dir = Files.createTempDirectory("declared-refusal").toFile()
         try {

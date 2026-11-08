@@ -23,4 +23,10 @@ codebase-review
 .gitlab-ci.yml
 apps/android
 docs
-flows
+# Keep only the compile-time collection setup template from flows.
+flows/*
+!flows/starters
+flows/starters/*
+!flows/starters/browser-summary
+flows/starters/browser-summary/*
+!flows/starters/browser-summary/setup.json

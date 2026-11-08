@@ -106,7 +106,7 @@ fun RunScreen(
     var setupChecked by remember(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
     var preparing by rememberSaveable(flow?.sha256, sourceInstallation) { mutableStateOf(false) }
     var configurationJson by rememberSaveable(flow?.sha256, sourceInstallation) { mutableStateOf<String?>(null) }
-    var sourceReportTerminal by remember(runId) { mutableStateOf(false) }
+    var sourceReportEligible by remember(runId) { mutableStateOf(false) }
     var finalReport by remember(runId) { mutableStateOf<String?>(null) }
     var olderEventsOmitted by remember(runId) { mutableStateOf(false) }
     var lines by remember(runId) { mutableStateOf<List<String>>(emptyList()) }
@@ -181,7 +181,7 @@ fun RunScreen(
                 cursor = observation.nextSeq
                 presentation = presentRun(status.phase, status.workerActive, status.activity)
                 finalReport = status.finalReport
-                sourceReportTerminal = !status.workerActive && (status.phase is RunPhaseApi.Succeeded || status.phase is RunPhaseApi.Failed)
+                sourceReportEligible = presentRun(status.phase, status.workerActive, status.activity).canRetainSourceReport
             }.onFailure {
                 pollingError = operationError(UiOperation.OBSERVE_RUN, it)
             }
@@ -292,12 +292,14 @@ fun RunScreen(
                     catchingOperation {
                         withContext(Dispatchers.IO) {
                             check(!runtime.hasActiveRun()) { "Finish or cancel the active run before starting another." }
-                            if (sourceInstallation != null) com.trollm.app.MoraySource.authorizeFreshStart(
-                                context, org.json.JSONObject(checkNotNull(sourceAssociation)))
+                            if (sourceInstallation != null) kotlinx.coroutines.runInterruptible {
+                                com.trollm.app.MoraySource.authorizeFreshStart(
+                                    context, org.json.JSONObject(checkNotNull(sourceAssociation)))
+                            }
                             val admittedAssociation = if (declaredSource) {
-                                val admission = runtime.admitSourceInput(checkNotNull(sourceInstallation), originalInput, submittedInput)
-                                org.json.JSONObject(checkNotNull(sourceAssociation))
-                                    .put("inputAdmission", org.json.JSONObject(admission)).toString()
+                                com.trollm.app.SourceInputAdmission.attach(checkNotNull(sourceAssociation), originalInput, submittedInput) { raw, apk ->
+                                    runtime.admitSourceInput(checkNotNull(sourceInstallation), raw, apk)
+                                }
                             } else sourceAssociation
                             val executionInput = if (declaredSource) originalInput else submittedInput
                             val id = submittedConfiguration?.let {
@@ -374,7 +376,7 @@ fun RunScreen(
                 ) { Text("Cancel run") }
             }
 
-            SourceRunReportPanel(runtime, runId, sourceReportTerminal)
+            SourceRunReportPanel(runtime, runId, sourceReportEligible)
 
             finalReport?.let { report ->
                 ContentCard {

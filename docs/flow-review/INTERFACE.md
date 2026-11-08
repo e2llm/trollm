@@ -128,3 +128,10 @@ Plan inspection preserves optional `exports` and per-collection `view` fields
 through the typed core contract. These control which original saved values a
 child returns and what a parent receives; they do not execute expressions.
 See [child-return limits](../amazon-generalization/G2-CONTRACT.md).
+
+Collection nodes also preserve optional `onItemOutcome`. The graph draws an edge
+for each declared outcome, the details panel shows the map, and comparisons
+include its changes. Terminal and paused targets retain their usual meaning;
+an explicit `resumeAt` is part of the transition. These are authored child-end
+outcomes, not words interpreted from model prose. See
+[declared collection exits](../FLOW-RELIABILITY.md#leave-a-collection-on-a-declared-child-outcome).

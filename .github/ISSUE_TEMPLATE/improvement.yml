@@ -12,7 +12,7 @@ body:
     id: outcome
     attributes:
       label: Desired outcome
-      description: Describe observable behavior. For a flow, include inputs, expected results and any external actions or required tools. Use placeholders for private data.
+      description: Describe observable behavior. For a flow, include inputs, expected results, cases where it should decline or pause, and any external actions or required tools. Use placeholders for private data.
     validations:
       required: true
   - type: textarea
@@ -24,4 +24,5 @@ body:
     attributes:
       value: |
         See [CONTRIBUTING.md](https://github.com/e2llm/trollm/blob/main/CONTRIBUTING.md) and the [product plan](https://github.com/e2llm/trollm/blob/main/docs/PRODUCT-PLAN.md).
+        For model instructions, start with [Flow prompting](https://github.com/e2llm/trollm/blob/main/docs/FLOW-PROMPTING.md); proposed authoring formats are not implemented contracts.
         Please keep credentials, private endpoints and personal data out of the issue.

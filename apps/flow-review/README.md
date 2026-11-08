@@ -151,7 +151,7 @@ alias. Other hostnames are rejected rather than resolved through DNS.
 The container uses `trollm-flow-review --healthcheck` to probe its own endpoint.
 This command succeeds only for HTTP 200 with `status: ok`, has a three-second
 deadline and bounded response size, and does not initialize imports or models.
-The production image uses distroless Debian 13; no shell or curl is required.
+The production image uses distroless Debian 13 `base-nossl` plus the required libgcc runtime and its package/license metadata. Rustls owns TLS; OpenSSL and its compression dependencies are not part of this server runtime. The build checks the ELF dependency set, and the final image still passes the required vulnerability/secret scan. No shell or curl is required.
 
 ## Code map
 

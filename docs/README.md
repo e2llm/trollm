@@ -9,11 +9,14 @@ Start with the [project overview](../README.md), then
 | --- | --- |
 | Understand the roles and design limits | [Premise](PREMISE.md), [current architecture](ARCHITECTURE-ANDROID.md) |
 | Author or revise a current flow | [Flow sources](../flows/README.md), [small-model practices](FLOW-PRACTICES.md), [routing and step context](ADAPTIVE-FLOWS.md), [built-in tools](BUILTIN-TOOLS.md) |
+| Write prompts the small models can use reliably | [Flow prompting](FLOW-PROMPTING.md): ask each execution model for wording, review it and compare actual decisions |
 | Decompose a repeated operation and avoid overfitting a failed run | [Repeated step groups](FLOW-PRACTICES.md#repeated-step-groups): prepare intent, select from evidence, act/observe/assess |
+| Implement repeated child calls, outcome exits or original-record selection | [Flow reliability](FLOW-RELIABILITY.md): frame-owned iteration, recovery and read-only model replays |
 | Keep an original read alongside a narrower read of the same source | [Task-specific result artifacts](TASK-RESULT-ARTIFACTS.md): native storage names, replacement and cache limits |
 | Inspect a large package and send feedback to its authoring LLM | [Flow review companion](../apps/flow-review/README.md), [design and interface](flow-review/README.md) |
 | Work on Android setup, models or execution | [Android guide](../apps/android/README.md), [run-scoped model preparation](MODEL-PREPARATION.md), [architecture](ARCHITECTURE-ANDROID.md) |
 | Find priorities and remaining acceptance work | [Product plan](PRODUCT-PLAN.md) |
+| Inspect the experimental collection member compiler | [Native collection offer](NATIVE-COLLECTION-MEMBERS.md); source/member checking is not installed runtime admission |
 | Understand proposed format work | [Flow contract direction](FLOW-CONTRACT-DIRECTION.md), [authoring direction](FLOW-AUTHORING.md); proposed fields are not current contracts |
 | Prepare source or APK releases | [Versioning](VERSIONING.md), [third-party notices](../THIRD_PARTY_NOTICES.md) |
 | Report or assess security issues | [Security policy](../SECURITY.md), [enterprise security](SECURITY-ENTERPRISE.md) |

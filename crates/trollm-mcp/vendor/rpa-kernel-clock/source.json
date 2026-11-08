@@ -1,0 +1,9 @@
+{
+  "members": {
+    "ci/kernel-clock-probe.c": "d18a9d227ce11232371d42526836bfc20726d325cba6daf7dc12cd32be5894a1",
+    "ci/kernel-clock-reader.h": "6894f72bf259c0026df95a43294be8fc9eb219713ad347b4a9cfa81b83376aca"
+  },
+  "project": "insitu/moray/moray-rpa",
+  "revision": "1f5f4a603f557195d43aee7ddd5bbc2a8815ac6b",
+  "scope": "source pin; no Android or clock-policy qualification"
+}

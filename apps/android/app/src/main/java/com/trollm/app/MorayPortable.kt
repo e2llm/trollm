@@ -9,7 +9,7 @@ import java.security.MessageDigest
 import java.time.Instant
 import javax.net.ssl.HttpsURLConnection
 
-/** Source authentication never enters the MCP token provider or runtime config. */
+/** Source bearer tokens never enter MCP getters or runtime configuration. */
 data class MorayProfile(val api: String, val issuer: String, val clientId: String, val consumerRevision: String) {
     init {
         for (value in listOf(api, issuer)) {
@@ -68,6 +68,8 @@ class MorayPortable(
     private val token: () -> String?,
     private val grantId: String,
     private val now: () -> Instant = Instant::now,
+    private val validateOwner: (JSONObject) -> Unit = {},
+    private val validateReporter: (JSONObject) -> Unit = {},
 ) {
     private val lock = locks.computeIfAbsent(directory.absolutePath) { Any() }
     init { require(grantId.isNotBlank()); directory.mkdirs(); require(directory.isDirectory) }
@@ -92,10 +94,26 @@ class MorayPortable(
         val source = value.getJSONObject("source")
         val declared = source.opt("origin") == "DECLARED"
         if (declared) {
-            closed(source, "schemaVersion", "origin", "owner", "fixtureId", "versionId", "fixtureSha256", "promptSha256", "installationSha256", "qualification")
-            require(source.sourceString("schemaVersion") == "moray.declared-native-text.v1")
+            when (source.sourceString("schemaVersion")) {
+                "moray.declared-native-text.v1" -> {
+                    closed(source, "schemaVersion", "origin", "owner", "fixtureId", "versionId", "fixtureSha256", "promptSha256", "installationSha256", "qualification")
+                    for (name in listOf("fixtureSha256", "promptSha256", "installationSha256")) hash(source.sourceString(name))
+                }
+                "moray.declared-native-collection.v1-proposal" -> {
+                    closed(source, "schemaVersion", "origin", "owner", "fixtureId", "versionId", "selectionRef", "selectionRawSha256", "profileId", "profileSha256", "installationSha256", "qualification")
+                    require(source.sourceString("profileId") in setOf("trollm.native-collection-members.v1-proposal",
+                        "trollm.native-collection-members.v3-proposal"))
+                    for (name in listOf("selectionRawSha256", "profileSha256", "installationSha256")) hash(source.sourceString(name))
+                    val selection = source.getJSONObject("selectionRef")
+                    closed(selection, "tenantId", "artifactId", "sha256")
+                    id(selection.sourceString("tenantId"))
+                    require(selection.sourceString("artifactId").matches(Regex("art_[a-f0-9]{32}")))
+                    hash(selection.sourceString("sha256"))
+                    require(selection.sourceString("sha256") == source.sourceString("selectionRawSha256"))
+                }
+                else -> error("unsupported declared source schema")
+            }
             id(source.sourceString("fixtureId"))
-            for (name in listOf("fixtureSha256", "promptSha256", "installationSha256")) hash(source.sourceString(name))
         } else closed(source, "owner", "versionId", "planSha256", "qualification", "sourceFindings", "provenance", "findings")
         val owner = source.getJSONObject("owner")
         closed(owner, "registrationId", "tenantId", "subject", "workerId", "runId", "epoch")
@@ -136,6 +154,7 @@ class MorayPortable(
         val size = identity.get("byteSize")
         require(size is Number && size.toString().matches(Regex("[1-9][0-9]*")) && size.toLong() <= BundleInput.MAX_BYTES)
         value.getJSONObject("metadata")
+        validateOwner(source.getJSONObject("owner"))
         return value
     }
 
@@ -181,6 +200,7 @@ class MorayPortable(
     fun retainReport(installation: JSONObject, report: JSONObject): String = synchronized(lock) {
         require(installation.sourceString("profile") == profile.key && installation.sourceString("grantId") == grantId)
         val descriptor = installation.getJSONObject("descriptor")
+        validateOwner(descriptor.getJSONObject("source").getJSONObject("owner"))
         require(installation.has("installation"))
         validateReport(report)
         require(report.sourceString("publicationId") == descriptor.sourceString("publicationId") &&
@@ -203,6 +223,8 @@ class MorayPortable(
         val pending = json(file.readBytes())
         require(pending.sourceString("profile") == profile.key && pending.sourceString("grantId") == grantId)
         val report = pending.getJSONObject("report")
+        validateOwner(pending.getJSONObject("installation").getJSONObject("descriptor")
+            .getJSONObject("source").getJSONObject("owner"))
         validateReport(report)
         val path = "/${report.sourceString("publicationId")}/reports"
         val response = request("POST", path, report.toString().toByteArray())
@@ -215,6 +237,7 @@ class MorayPortable(
         closed(reporter, "kind", "issuer", "subject", "clientId")
         require(reporter.sourceString("kind") == "native" && reporter.sourceString("issuer") == profile.issuer && reporter.sourceString("clientId") == profile.clientId)
         require(reporter.sourceString("subject").length in 1..256)
+        validateReporter(reporter)
         val receiptFile = File(directory, "receipt-$reportId.json")
         if (receiptFile.exists()) require(JsonValues.same(json(receiptFile.readBytes()), receipt)) { "REPORT_RECEIPT_CHANGED" }
         else atomic(receiptFile, response.bytes)

@@ -2271,13 +2271,22 @@ name = "trollm-mcp"
 version = "0.1.0-rc.8"
 dependencies = [
  "anyhow",
+ "bytes",
+ "cc",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "jsonschema",
+ "libc",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2297,6 +2306,8 @@ name = "trollm-uniffi"
 version = "0.1.0-rc.8"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",

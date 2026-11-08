@@ -41,10 +41,12 @@ bind full original accepted/rejected evidence before projecting it; an output
 which was already viewed contains only that view. Merely exporting a mutable
 filename does not preserve the referenced file's historical contents.
 
-Foreach outcomes keep their legacy meaning: an `end` named `failed` is collected,
-not a root abort. Mutation children must use an actual failing transition on an
-unresolved observation. Root foreach IDs remain distinct; no nested cursor or
-carry-state contract is added. `maxItems` remains a per-Resume dispatch window.
+Foreach outcomes keep their legacy meaning when `onItemOutcome` is omitted:
+an `end` named `failed` is collected, not a root abort. Optional declared outcome
+exits can stop after publishing the collected prefix; actual failing transitions
+still abort. Cursors now belong to each invocation frame, including nested
+iterations and repeated child calls; no carry-state contract is added. See
+[flow reliability](../FLOW-RELIABILITY.md) for migration and Resume semantics. `maxItems` remains a per-Resume dispatch window.
 The immutable prepared worklist supplies the lifetime count bound.
 
 The root deadline applies while children execute, but step/token/artifact budgets

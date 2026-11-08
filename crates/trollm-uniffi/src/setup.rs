@@ -840,7 +840,11 @@ tasks:
                 RunStatus::Failed { .. }
             ));
             let events = fs::read_to_string(run_dir.path().join("events.jsonl")).unwrap();
-            assert!(events.contains("tool-call-parse"), "{events}");
+            assert!(
+                events.contains("preparation: tool argument validation failed"),
+                "{events}"
+            );
+            assert!(events.contains("\"class\":\"mcp-error\""), "{events}");
             assert!(!events.contains("tool_call_intent"));
             assert!(!events.contains("tool_call_result"));
             drop(executor);

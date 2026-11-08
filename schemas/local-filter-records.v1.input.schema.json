@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.filter_records v1 arguments",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "schema"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object"
+      },
+      "description": "Original objects, at most 32 MiB serialized JSON; never truncated."
+    },
+    "schema": {
+      "type": "object",
+      "description": "Offline JSON Schema predicate, at most 16 KiB and depth 16."
+    }
+  }
+}

@@ -23,12 +23,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        SelectedNativeLauncher.accept(this, intent)
         notificationRun = intent.getStringExtra(RunService.EXTRA_RUN_ID)?.takeIf(RunIdentity::valid)
         intent.removeExtra(RunService.EXTRA_RUN_ID)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SelectedNativeLauncher.accept(this, intent)
         enableEdgeToEdge()
         val runtime = RuntimeHolder.get(this)
         val history = RunHistory(this)

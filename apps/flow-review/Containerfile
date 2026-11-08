@@ -1,7 +1,8 @@
 # Build from repository root. No Android SDK, inference backend or model files.
 ARG NODE_IMAGE=docker.io/library/node:22.22.2-bookworm-slim
 ARG RUST_IMAGE=docker.io/library/rust:1.90.0-bookworm
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
+ARG CC_RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
+ARG RUNTIME_IMAGE=gcr.io/distroless/base-nossl-debian13:nonroot
 FROM ${NODE_IMAGE} AS web
 WORKDIR /src/apps/flow-review/web
 COPY apps/flow-review/web/package*.json ./
@@ -14,13 +15,24 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY schemas/ schemas/
+COPY flows/starters/browser-summary/setup.json flows/starters/browser-summary/setup.json
 COPY apps/flow-review/server/ apps/flow-review/server/
 # Use the toolchain already installed in the pinned builder. Building does not
 # need the optional lint components requested by the repository toolchain file.
 RUN CARGO_BUILD_JOBS=2 rustup run 1.90.0 cargo build --locked --release -p trollm-flow-review \
+    && readelf -d target/release/trollm-flow-review > /out-dependencies.txt \
+    && ! grep NEEDED /out-dependencies.txt | grep -Ev '\[(libgcc_s\.so\.1|libm\.so\.6|libc\.so\.6|ld-linux-x86-64\.so\.2)\]' \
     && mkdir -p /out/packages
 
+# The Rust TLS stack does not link OpenSSL/zlib. Retain only its required
+# compiler runtime from the maintained cc image, including package/license data.
+FROM ${CC_RUNTIME_IMAGE} AS compiler-runtime
 FROM ${RUNTIME_IMAGE}
+COPY --from=compiler-runtime /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=compiler-runtime /var/lib/dpkg/status.d/libgcc-s1* /var/lib/dpkg/status.d/
+COPY --from=compiler-runtime /var/lib/dpkg/status.d/gcc-14-base* /var/lib/dpkg/status.d/
+COPY --from=compiler-runtime /usr/share/doc/gcc-14-base/ /usr/share/doc/gcc-14-base/
+COPY --from=compiler-runtime /usr/share/doc/libgcc-s1 /usr/share/doc/libgcc-s1
 WORKDIR /app
 COPY --from=server /out/packages/ /packages/
 COPY --from=server /src/target/release/trollm-flow-review /app/trollm-flow-review

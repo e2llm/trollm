@@ -211,8 +211,9 @@ needs the complete data while the next model needs only selected fields.
 {
   "runId": "uuid", "status": "running|paused|succeeded|failed",
   "stack": [ { "plan": "ticket-triage@sha256:...", "node": "each",
-               "vars": { "...": "..." } } ],
-  "foreachCursors": { "each": { "index": 42, "snapshotRef": "artifacts/....jsonl" } },
+               "vars": { "...": "..." },
+               "foreachCursors": { "each": { "index": 42, "snapshotRef": "artifacts/....jsonl" } } } ],
+  "foreachCursors": {},
   "counters": { "steps": 118, "reasonerCalls": 2, "tokens": 41000, "startedAt": "..." }
 }
 ```
@@ -1202,6 +1203,12 @@ call's generation budget. Adjacent sites can combine, but remain finite. This
 restriction does not change whitespace inside argument strings or ordinary prose,
 and the post-generation JSON parser still accepts arbitrary valid JSON whitespace.
 It does not bound argument content or guarantee semantic correctness.
+The generated rule uses `[ \t\n\r]{0,4}` rather than four independent optional
+terms. This follows [llama.cpp's efficient repetition guidance](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md#efficient-optional-repetitions)
+to reduce redundant grammar matching without changing the permitted whitespace,
+tool grants, argument restrictions or sampler order.
+See the [native timing experiment](amazon-generalization/PERFORMANCE.md#native-grammar-experiment-2026-11-03)
+for measurements and their host/device limits.
 
 Failures may save bounded `model-failure-*.json` artifacts containing the prompt,
 grammar and available partial response. They are private diagnostics, not reports
@@ -1244,3 +1251,15 @@ attempt measurement ends before its final event append and snapshot; it does
 not claim a complete terminal wall time. See the
 [measurement contract](amazon-generalization/PERFORMANCE.md) for phase overlap,
 unknown/zero coverage and the one-pass offline numeric summary.
+
+### Frame-owned iteration and declared child exits
+
+Current snapshots store `foreachCursors` within each stack frame. The older flat
+map in the overview is read only for migration; completed child cursors cannot
+be reused by a later invocation. Explicit graph reentry starts a new enumeration.
+Pause/Resume without `resumeAt` retains the active snapshot and cursor; an explicit
+`resumeAt` re-enters its target as an authored graph transition does. The optional
+`foreach.onItemOutcome` map publishes a child-result prefix before taking a
+declared exit. It consumes authored end outcomes, never model prose.
+[Flow reliability](FLOW-RELIABILITY.md) defines migration, partial collections,
+paused exits and the unchanged treatment of execution failures.

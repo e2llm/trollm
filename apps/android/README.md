@@ -342,3 +342,23 @@ when older lines are evicted; the authoritative journal remains on disk.
 The strict bridge read APIs and conservative resume rules are unchanged.
 [Measurement contracts](../../docs/amazon-generalization/PERFORMANCE.md) explain
 correlation, optional timings and offline numeric summaries.
+
+## Private selected-start failure custody
+
+The private selected launcher retains a closed `nativeCause` from the typed
+UniFFI selected-start error and a genuine allocated run ID when one exists.
+Raw native exception text, credential values and source input are not copied
+into that result. An allocated directory is not a worker binding or an inactive
+acknowledgment. A failed or lost start remains UNKNOWN until actual supported
+worker reconciliation establishes otherwise; it must not be resent.
+
+Original admitted input, admission receipt, source association and effective
+configuration are saved before installation binding. A bounded
+`selected-start-failure.json` can retain the bind refusal, with explicit unknown
+effect disposition and no inactive acknowledgment. The host launcher retains
+available original request/result and run-side files in `partial-start-custody`
+before cancel/readback can consume its existing cleanup interval. Its index is
+always partial and is neither a completion binding nor an API report. Missing
+files remain missing; it never creates a snapshot, journal, report or input sidecar
+to repair an earlier run. Preserve the full original run directory separately,
+including calibration files, before retiring a temporary device.

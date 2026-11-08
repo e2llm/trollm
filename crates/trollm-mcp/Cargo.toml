@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc = "=0.2.190"
 jsonschema = { version = "=0.58.6", default-features = false }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -13,5 +14,14 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
-[dev-dependencies]
+hyper = { version = "=1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+http-body-util = "=0.1.5"
+bytes = "=1.12.1"
+tokio = { version = "=1.53.2", features = ["rt", "net", "time", "macros", "io-util"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "=1.0.9"
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+
+[build-dependencies]
+cc = "=1.7.0"

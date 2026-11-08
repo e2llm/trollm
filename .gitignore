@@ -37,3 +37,6 @@ apps/flow-review/web/dist/
 apps/flow-review/web/test-results/
 apps/flow-review/web/playwright-report/
 apps/flow-review/deploy/generated/
+
+# Local dependency directories may be shared through a symlink in worktrees.
+**/node_modules

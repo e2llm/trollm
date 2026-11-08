@@ -394,6 +394,13 @@ pub struct Node {
     pub on_empty: Option<Transition>,
     #[serde(default)]
     pub on_complete: Option<Transition>,
+    /// Stop enumeration after collecting a child with a declared end outcome.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub on_item_outcome: Option<BTreeMap<String, Transition>>,
 
     // kind: end
     #[serde(default)]

@@ -5,11 +5,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::ToolDescriptor;
+mod records;
 
 pub const SERVER: &str = "local";
 pub const TOOL: &str = "calculate";
 pub const EXTRACT_TOOL: &str = "extract_decimal";
 pub const SELECT_TOOL: &str = "select_unique";
+pub const FILTER_TOOL: &str = "filter_records";
+pub const MATCH_TOOL: &str = "select_matching";
+pub const ORDER_TOOL: &str = "order_records";
 pub const ASSERT_TOOL: &str = "assert_equal";
 pub const PREPARE_TOOL: &str = "prepare_worklist";
 pub const COLLECTION_TOOL: &str = "collection_total";
@@ -37,6 +41,30 @@ pub fn descriptor() -> ToolDescriptor {
 pub fn descriptors() -> Vec<ToolDescriptor> {
     vec![
         descriptor(),
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: FILTER_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-filter-records.v1.input.schema.json"
+            ))
+            .expect("record filter schema"),
+        },
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: MATCH_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-select-matching.v1.input.schema.json"
+            ))
+            .expect("record match schema"),
+        },
+        ToolDescriptor {
+            server: SERVER.into(),
+            name: ORDER_TOOL.into(),
+            input_schema: serde_json::from_str(include_str!(
+                "../../../schemas/local-order-records.v1.input.schema.json"
+            ))
+            .expect("record ordering schema"),
+        },
         ToolDescriptor {
             server: SERVER.into(),
             name: PREPARE_TOOL.into(),
@@ -83,12 +111,20 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
 pub fn supports(tool: &str) -> bool {
     matches!(
         tool,
-        TOOL | EXTRACT_TOOL | SELECT_TOOL | ASSERT_TOOL | PREPARE_TOOL | COLLECTION_TOOL
+        TOOL | EXTRACT_TOOL
+            | SELECT_TOOL
+            | ASSERT_TOOL
+            | PREPARE_TOOL
+            | COLLECTION_TOOL
+            | FILTER_TOOL
+            | MATCH_TOOL
+            | ORDER_TOOL
     )
 }
 
 pub fn invoke(tool: &str, args: &Value) -> Result<Value> {
     match tool {
+        FILTER_TOOL | MATCH_TOOL | ORDER_TOOL => records::invoke(tool, args),
         TOOL => calculate(args),
         EXTRACT_TOOL => extract_decimal(args),
         SELECT_TOOL => select_unique(args),
@@ -97,6 +133,13 @@ pub fn invoke(tool: &str, args: &Value) -> Result<Value> {
         COLLECTION_TOOL => collection_total(args),
         _ => bail!("unknown builtin local tool"),
     }
+}
+
+pub(crate) fn record_tool(tool: &str) -> bool {
+    matches!(tool, FILTER_TOOL | MATCH_TOOL | ORDER_TOOL)
+}
+pub(crate) fn validate_record_arguments(tool: &str, args: &Value) -> Result<()> {
+    records::validate(tool, args)
 }
 
 /// Freeze a prepared envelope without interpreting the domain-specific entries.
@@ -278,15 +321,22 @@ pub fn assert_equal(args: &Value) -> Result<Value> {
     Ok(json!({"equal":true}))
 }
 
-/// Select one original object using only a literal string equality predicate.
+/// Select one original object by literal string equality or array membership.
 pub fn select_unique(args: &Value) -> Result<Value> {
-    let (items, field, equals, prefix) = select_arguments(args)?;
+    let (items, field, equals, prefix, array_contains) = select_arguments(args)?;
     let mut found = None;
     for (index, item) in items.iter().enumerate() {
-        let matches = item
-            .pointer(field)
-            .and_then(Value::as_str)
-            .is_some_and(|value| equals.strip_prefix(prefix) == Some(value));
+        let literal = equals.strip_prefix(prefix);
+        let matches = if array_contains {
+            item.pointer(field)
+                .and_then(Value::as_array)
+                .filter(|values| values.iter().all(Value::is_string))
+                .is_some_and(|values| values.iter().any(|value| literal == value.as_str()))
+        } else {
+            item.pointer(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| literal == Some(value))
+        };
         if matches {
             if found.is_some() {
                 bail!("local.select_unique: ambiguous");
@@ -320,12 +370,25 @@ pub(crate) fn validate_select_arguments(args: &Value) -> Result<()> {
     select_arguments(args).map(|_| ())
 }
 
-fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str)> {
+fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str, bool)> {
     const INVALID: &str = "local.select_unique: invalid-arguments";
     let object = args.as_object().ok_or_else(|| anyhow!(INVALID))?;
-    if object.len() != 4 {
+    if !(4..=5).contains(&object.len())
+        || object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "items" | "field" | "equals" | "prefix" | "matchMode"
+            )
+        })
+    {
         bail!(INVALID);
     }
+    let array_contains = match object.get("matchMode") {
+        None => false,
+        Some(Value::String(mode)) if mode == "equals" => false,
+        Some(Value::String(mode)) if mode == "array-contains" => true,
+        _ => bail!(INVALID),
+    };
     let items = object
         .get("items")
         .and_then(Value::as_array)
@@ -355,7 +418,7 @@ fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str)> {
     // Same complete-query byte allowance as the gateway, with no truncation.
     crate::schema::check_limits(&args["items"], SELECT_ITEMS_BYTES, 64, "selection items")?;
     crate::schema::check_limits(args, SELECT_ARGUMENT_BYTES, 64, "selection arguments")?;
-    Ok((items, field, equals, prefix))
+    Ok((items, field, equals, prefix, array_contains))
 }
 
 /// Bounded literal text processing only. All content boundaries, numeric prefix,

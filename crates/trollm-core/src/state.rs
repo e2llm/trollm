@@ -40,6 +40,9 @@ pub struct Frame {
     pub counters: Counters,
     #[serde(default)]
     pub last_error: Option<LastError>,
+    /// Cursors belong to this invocation, including completed collections.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub foreach_cursors: BTreeMap<String, ForeachCursor>,
 }
 
 /// Small recovery record retained until the next task failure in this frame.
@@ -61,9 +64,8 @@ pub enum MutationOutcome {
     Unknown,
 }
 
-/// Per-foreach cursor (§4.4 `foreachCursors`). v1 plans key these by node id
-/// (the §4.4 JSON does the same); nested foreaches sharing a node id across
-/// plans are out of scope for v1.
+/// A cursor keyed by node id inside its owning execution frame.
+/// A newly invoked child gets fresh cursors; Resume keeps the existing frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeachCursor {
@@ -154,6 +156,7 @@ pub struct RunState {
     pub terminal_reason: Option<String>,
     #[serde(default)]
     pub stack: Vec<Frame>,
+    /// Legacy flat snapshots only. Executor migrates these into active frames.
     #[serde(default)]
     pub foreach_cursors: BTreeMap<String, ForeachCursor>,
     #[serde(default)]
@@ -161,6 +164,20 @@ pub struct RunState {
 }
 
 impl RunState {
+    pub fn cursors(&self) -> impl Iterator<Item = (&String, &ForeachCursor)> {
+        self.stack
+            .iter()
+            .flat_map(|frame| frame.foreach_cursors.iter())
+            .chain(self.foreach_cursors.iter())
+    }
+
+    pub fn cursors_mut(&mut self) -> impl Iterator<Item = &mut ForeachCursor> {
+        self.stack
+            .iter_mut()
+            .flat_map(|frame| frame.foreach_cursors.values_mut())
+            .chain(self.foreach_cursors.values_mut())
+    }
+
     pub fn fresh(run_id: &str, entry_plan_pin: &str, entry_node: &str) -> Self {
         let now = crate::events::now_ms();
         Self {
@@ -176,6 +193,7 @@ impl RunState {
                 vars: Value::Object(serde_json::Map::new()),
                 node_outputs: BTreeMap::new(),
                 last_error: None,
+                foreach_cursors: BTreeMap::new(),
                 counters: Counters {
                     started_at: now,
                     ..Counters::default()

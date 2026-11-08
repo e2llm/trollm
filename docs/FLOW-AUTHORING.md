@@ -1,5 +1,10 @@
 # Authoring a flow with an LLM
 
+For current-format authoring, start with [Anatomy of a flow](ANATOMY-OF-A-FLOW.md),
+[small-model practices](FLOW-PRACTICES.md) and
+[writing prompts with the execution model](FLOW-PROMPTING.md). The prompt-writing
+method applies today; the broader authoring pack described later remains proposed.
+
 ## Human review of LLM-authored packages
 
 The [flow review companion](flow-review/README.md) is the approved human review
@@ -105,12 +110,18 @@ workflow would benefit from it. Identify a missing provider explicitly.
 3. **Author explicit steps.** Write prompts, tool/data bindings, completion and
    error behavior, limits and any iteration. Preserve structured facts in
    artifacts and use the model roles according to the execution contract.
+   Use the intended coder and reasoner separately to
+   [help phrase their own tasks](FLOW-PROMPTING.md). Review suggested wording
+   against the contract before testing it; an explanation is not verified data.
 4. **Package the procedure.** Include model/MCP defaults, title/input/result
    metadata and every referenced file. Let the packer compute real hashes.
 5. **Exercise representative cases.** Use known inputs and fixture responses
    while developing, then the intended model/services. Keep fixture evidence
    distinguishable from real execution. These are authoring tests, not a new
    user-facing compatibility gate.
+   Compare actual selections and declines against a fixed control, including
+   supported, unsupported and unseen cases. Freeze correct advice when isolating
+   a coder handoff; check adviser accuracy separately before assessing the full flow.
 6. **Refine from diagnostics.** Give the LLM the failing step, relevant redacted
    configuration/error and artifacts. Fix the cause, rerun the affected case
    and record the accepted bundle version.

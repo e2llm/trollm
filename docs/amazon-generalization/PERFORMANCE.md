@@ -50,6 +50,113 @@ quantifies observer I/O overhead or proves that generic item iteration is faster
 They establish that prefill was a major measured cost in these calls, separately
 from semantic-selection and flow-recovery failures.
 
+## Native grammar experiment, 2026-11-03
+
+A local CPU experiment used the pinned `llama-cpp-sys-2` 0.1.159 source and
+Qwen3.5-0.8B Q4_K_M GGUF (SHA-256
+`bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517`).
+Weights stayed loaded; each request had a fresh 8192-token context, four inference
+threads, thinking disabled, temperature 0.1, top-p 0.9 and seed 42. Requests ran
+serially in a four-CPU, 4 GiB Podman container on an x86 host.
+
+Following [upstream repetition guidance](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md#efficient-optional-repetitions),
+compared four independent optional whitespace terms with the equivalent
+`[ \t\n\r]{0,4}` and nested optionals. The actual projected grammars covered a
+fully bound `local.assert_equal` and a three-route `flow.choose`. Compact copy
+controls used natural generation; spaced controls replayed fixed valid tokens
+after evaluating the real model and sampler, to hold output work equal.
+
+| Control | Original mean request | Range-expression mean request |
+| --- | ---: | ---: |
+| `local.assert_equal`, compact, natural | 2,416 ms | 2,139 ms |
+| `local.assert_equal`, spaced, replay | 4,565 ms | 3,824 ms |
+| `flow.choose`, compact, natural | 2,564 ms | 2,263 ms |
+| `flow.choose`, spaced, replay | 5,084 ms | 4,551 ms |
+
+There were 60 calls: one warmup and four measured repetitions per control and
+variant, with varied order. Output bytes and token sequences matched within each
+control. The range expression reduced measured sampling time by 19–29% and
+request time by 10–16%; nested optionals performed similarly. The range form is
+now used by the shared grammar generator. Native checks passed 24,876 acceptance
+and rejection cases across the three response modes and all three expressions,
+including exhaustive zero-to-five-character whitespace combinations at one
+syntax site. All variants also produced identical full-vocabulary masks at
+107 tested prefixes, with 248,320 vocabulary entries per mask.
+
+A separate 40-call comparison reproduced upstream's
+[candidate-first sampling path](https://github.com/ggml-org/llama.cpp/blob/master/common/sampling.cpp):
+check one proposed token, falling back to full grammar masking and resampling
+from restored logits if it is invalid. Against the range grammar above, this
+reduced request time by a further 38–48% in that paired batch, with matching
+output tokens and a successful invalid-proposal fallback. This sampler change
+is **experimental, not applied to trollm**: top-p filtering before grammar
+checking can change choice probabilities, and fallback consumes another random
+draw. It needs correctness and saved-prompt comparisons before adoption.
+
+These are small, single-seed native performance controls, not phone latency
+forecasts or browser-decision tests. Replay does not establish that a model can
+produce the replayed answer unaided. No MCP actions or end-to-end shopping runs
+were performed; do not add percentages from the two separate experiment batches.
+
+### Candidate-first follow-up, 2026-11-04
+
+The next comparison used eight saved scenarios, seeds 42, 20261101 and 20261104,
+and both samplers:
+48 measured generations after two warmups, serialized with the same native
+source, model and settings above. Six requests came from historical executor
+captures with real fixture-derived frame values; only their whitespace grammar
+was updated to the range expression. Two used saved browser inspections and
+reader prompts with an explicit adaptation from Ollama's JSON-only instruction
+to the native fence format. These were isolated task probes, not a complete
+phone-run replay. The original output limits of 256, 384 or 1024 tokens were
+retained, with a 120-second experimental timeout guard; every call finished
+normally before either limit. No output tokens were forced.
+
+| Task scenario | Grammar-first mean | Candidate-first mean | Task result, each sampler |
+| --- | ---: | ---: | --- |
+| Original current-title prompt | 8.77 s | 6.99 s | 3/3 correct |
+| Focused current-title prompt | 8.15 s | 5.91 s | 3/3 correct |
+| Cart with one existing pack | 19.59 s | 18.90 s | 0/3 correct; used requested quantity as existing quantity |
+| Cart with two existing packs | 19.94 s | 18.59 s | 3/3 correct |
+| Suitability routing | 11.67 s | 10.88 s | 3/3 expected route |
+| Literal price extraction rules | 15.93 s | 11.51 s | 0/3; native extraction rejected the rules |
+| Reader, no enclosing DOM anchor | 5.45 s | 4.36 s | 0/3; copied an instruction placeholder |
+| Reader, enclosing DOM anchor present | 5.63 s | 4.53 s | 0/3; copied the same placeholder |
+
+Total measured request time fell from 285.37 to 245.00 seconds (**14.1%**), and
+sampling from 55.32 to 14.33 seconds (**74.1%**). Prefill stayed near 193 seconds
+and neural decode near 35 seconds. Mean per-scenario request reductions ranged
+from 3.5% to 27.7%; the long cart prompts were dominated by prefill. Candidate-first
+avoided the full mask on 686 of 886 samples, including EOG; 200 used fallback.
+This broader workload gives a more modest total gain than the earlier copy
+controls. Errors are included in those timing totals, not counted as successes.
+
+Every generation passed an independent grammar instance and the current Rust
+fence parser. Calls were assessed against the original fixture identities and
+bindings, using native local-tool/schema checks where applicable. Both samplers
+completed 12 of 24 task trials correctly under these checks. All 24 pairs had
+the same outcome; 22 had identical calls and output token sequences. Two price
+trials produced different arguments, both rejected by the native extractor.
+This confirms that changing sampling order can change answers, even with the
+same seed; it found no outcome regression in this small bank, not general
+semantic equivalence or improved task accuracy.
+
+Separate deterministic tests passed 1,984 token checks over all three response
+modes at two sampling settings, including 496 forced fallbacks where the first
+top-p selection excluded the valid token. They covered early EOG, Unicode and
+partial UTF-8, quoted fences, nested JSON, batches, prose, invalid grammars and
+states with no finite valid candidate. Five native parser controls checked
+duplicate/extra fields, incomplete fences and literal fence text inside strings.
+
+The result supports implementing candidate-first sampling in the Rust adapter;
+it remains experimental and is not enabled in the app by this test. The port
+must use proposal-only `apply`, not `sample()` which also accepts a token;
+restore the full candidate array on fallback; and accept only the final valid
+token once. Preserve deadline, token-limit and validation behavior. The current
+Rust wrapper exposes the required operations, so this does not require a new
+tool format, backend or dependency version. Rust integration tests and a phone
+comparison remain necessary before claiming app-level performance.
+
 ## Baseline repeated I/O established by source
 
 | Production path | Frequency and source-derived cost |

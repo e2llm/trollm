@@ -25,6 +25,20 @@ fn integer_id_schema() -> Value {
         "required":["id"], "additionalProperties":false})
 }
 
+#[test]
+fn cold_final_validation_is_network_free_and_explicit_discovery_is_separate() {
+    let server = schema_server("close_issue", integer_id_schema());
+    let dirs = TempDir::new("local-final-validation");
+    let gw = gateway(&server, &dirs, "{}", None);
+    let call = call("tracker", "close_issue", json!({"id":1}));
+    assert!(gw.validate_call(&call).is_err());
+    assert!(server.counts.lock().unwrap().is_empty());
+    gw.list_tools().unwrap();
+    let before = server.counts.lock().unwrap().clone();
+    gw.validate_call(&call).unwrap();
+    assert_eq!(*server.counts.lock().unwrap(), before);
+}
+
 fn gateway(
     server: &MockMcpServer,
     dirs: &TempDir,
@@ -170,6 +184,7 @@ fn repeated_validation_listing_and_calls_reuse_one_catalog() {
         None,
     );
     let c = call("tracker", "close_issue", json!({"id":1}));
+    gw.list_tools().unwrap();
     for _ in 0..3 {
         gw.validate_call(&c).unwrap();
         gw.list_tools().unwrap();
@@ -253,6 +268,7 @@ fn equal_tool_names_on_distinct_servers_do_not_share_schemas() {
     .unwrap();
     let number = call("first", "close_issue", json!({"id":1}));
     let text = call("second", "close_issue", json!({"id":"one"}));
+    gw.list_tools().unwrap();
     gw.validate_call(&number).unwrap();
     gw.validate_call(&text).unwrap();
     assert!(gw
@@ -280,6 +296,7 @@ fn synthesized_cursor_must_validate_before_the_next_request() {
     let dirs = TempDir::new("schema-cursor");
     let mut gw = gateway(&server, &dirs, PAGINATION, None);
     let c = call("tracker", "list_issues", json!({"query":"open"}));
+    gw.list_tools().unwrap();
     gw.validate_call(&c).unwrap();
     assert!(
         gw.call(&c).is_err(),
@@ -333,6 +350,7 @@ fn positive_model_page_is_stripped_before_validating_the_first_wire_arguments() 
         json!({"query":"open", "cursor":2}),
     );
     // This 2 is a local requested page, not the cursor of the first wire request.
+    gw.list_tools().unwrap();
     gw.validate_call(&c).unwrap();
     assert!(
         gw.call(&c).is_err(),

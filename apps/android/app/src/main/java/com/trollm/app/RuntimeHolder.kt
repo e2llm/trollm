@@ -8,8 +8,9 @@ import uniffi.trollm_uniffi.ConnectionAuth
 /**
  * Process-wide holder for the Rust runtime. The UniFFI object wires the
  * §8 storage tree under `filesDir/trollm`; the [TokenProvider] callback
- * resolves MCP bearer tokens from [SecretsStore] — auth is resolved by the
- * app, never by the plan (§3).
+ * resolves MCP bearer tokens from [SecretsStore]. Its separate publication
+ * authority callback uses the owned Moray client without returning source
+ * credentials to the runtime. Authority is supplied by the app, never a plan.
  */
 object RuntimeHolder {
     @Volatile
@@ -21,6 +22,11 @@ object RuntimeHolder {
                 val appContext = context.applicationContext
                 val secrets = SecretsStore(appContext)
                 val provider = object : TokenProvider {
+                    override fun sourceAuthorityCurrent(associationJson: String): Boolean = try {
+                        MoraySource.authorizeFreshStart(appContext, org.json.JSONObject(associationJson))
+                        true
+                    } catch (_: Exception) { false }
+
                     override fun bearerToken(serverName: String, serverUrl: String): String? = try {
                         secrets.token(serverName, serverUrl)
                     } catch (_: Exception) { null }

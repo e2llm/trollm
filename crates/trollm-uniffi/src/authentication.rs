@@ -141,6 +141,58 @@ fn endpoint(value: &str) -> Result<String> {
 }
 
 impl RunAuthentication {
+    /// Explicit selected static-key profile. Every acquisition rechecks the
+    /// ORIGINAL endpoint/mode/key. A replacement is refusal, never re-enrollment.
+    pub(crate) fn bind_selected_static(
+        &self,
+        config: ServerConfig,
+        provider: Option<&SharedTokenProvider>,
+        expected_key_sha256: &str,
+    ) -> Result<ServerConfig> {
+        let pin = self
+            .servers
+            .get(&config.name)
+            .context("missing selected connection identity")?;
+        if endpoint(&config.url)? != pin.url || pin.auth != ConnectionAuth::Bearer {
+            bail!("selected profile requires original endpoint-bound static key");
+        }
+        let provider = provider
+            .context("selected key provider unavailable")?
+            .clone();
+        let name = config.name.clone();
+        let url = pin.url.clone();
+        if provider.connection_auth(name.clone(), url.clone()) != ConnectionAuth::Bearer {
+            bail!("selected connection mode changed");
+        }
+        let original = provider
+            .bearer_token(name.clone(), url.clone())
+            .filter(|token| !token.trim().is_empty())
+            .context("selected key unavailable")?;
+        if crate::collection::raw_sha256(original.as_bytes()) != expected_key_sha256 {
+            bail!("selected credential differs from installed private account binding");
+        }
+        let fenced = std::sync::atomic::AtomicBool::new(false);
+        Ok(config
+            .with_protocol_version("2025-06-18")?
+            .with_grant_token_getter(Arc::new(move || {
+                use std::sync::atomic::Ordering;
+                if fenced.load(Ordering::SeqCst) {
+                    return None;
+                }
+                if provider.connection_auth(name.clone(), url.clone()) != ConnectionAuth::Bearer {
+                    fenced.store(true, Ordering::SeqCst);
+                    return None;
+                }
+                let token = provider
+                    .bearer_token(name.clone(), url.clone())
+                    .filter(|token| token == &original);
+                if token.is_none() {
+                    fenced.store(true, Ordering::SeqCst);
+                }
+                token
+            })))
+    }
+
     /// Validate every endpoint before consulting credentials. On cold resume,
     /// use the stored identity without asking the app to choose a new account.
     pub(crate) fn resolve(
@@ -340,6 +392,71 @@ mod tests {
         ConnectionAuth::Oauth {
             grant_id: id.into(),
         }
+    }
+
+    #[test]
+    fn selected_static_key_rechecks_original_mode_endpoint_and_key_without_rebinding() {
+        let dir = TestDir::new();
+        let (state, provider) = provider(ConnectionAuth::Bearer);
+        let expected = crate::collection::raw_sha256(b"fixture-private-access-token");
+        let auth = RunAuthentication::resolve(&dir.0, &[server()], Some(&provider), false).unwrap();
+        assert!(auth
+            .bind_selected_static(server(), Some(&provider), &"0".repeat(64))
+            .is_err());
+        let bound = auth
+            .bind_selected_static(server(), Some(&provider), &expected)
+            .unwrap();
+        let get = bound.token_getter.as_ref().unwrap().clone();
+        let make_gateway = |config| {
+            let policies = trollm_mcp::PolicySet::from_yaml_value(
+                &serde_yaml::to_value(
+                    serde_json::json!({"browser.act":{"class":"mutation","passthrough":true}}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            trollm_mcp::McpGateway::new(
+                vec![config],
+                policies,
+                dir.0.join("cache"),
+                dir.0.join("artifacts"),
+                None,
+            )
+            .unwrap()
+        };
+        let (preparer, _) = crate::collection_provider::controls::actor_for_control();
+        assert!(make_gateway(bound)
+            .with_preparer(vec!["browser.act".into()], preparer.clone())
+            .is_ok());
+        // Functional negative: ordinary manual auth lacks the selected native
+        // credential/protocol binding and cannot install prepared effects.
+        assert!(make_gateway(auth.bind(server(), Some(&provider)).unwrap())
+            .with_preparer(vec!["browser.act".into()], preparer)
+            .is_err());
+        assert_eq!(get().as_deref(), Some("fixture-private-access-token"));
+        *state.token.lock().unwrap() = "replacement-fixture-key".into();
+        assert!(get().is_none());
+        *state.token.lock().unwrap() = "fixture-private-access-token".into();
+        *state.selected.lock().unwrap() = ConnectionAuth::Anonymous;
+        assert!(get().is_none());
+        assert!(auth
+            .bind_selected_static(server(), Some(&provider), &expected)
+            .is_err());
+        *state.selected.lock().unwrap() = ConnectionAuth::Bearer;
+        assert!(
+            get().is_none(),
+            "observed replacement cannot silently re-enroll"
+        );
+        assert!(auth
+            .bind_selected_static(
+                ServerConfig::new("browser", "https://different.test/mcp"),
+                Some(&provider),
+                &expected
+            )
+            .is_err());
+        assert!(!fs::read_to_string(dir.0.join(AUTH_FILE))
+            .unwrap()
+            .contains("access-token"));
     }
 
     #[test]

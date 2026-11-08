@@ -18,13 +18,7 @@ fn discovery_error_chain_exposes_rpc_code_without_remote_message_or_data() {
     }));
     let dirs = TempDir::new("rpc-error-redaction");
     let gateway = gateway(&server, fixture_policies(), &dirs, None);
-    let error = gateway
-        .validate_call(&ToolCall {
-            server: "tracker".into(),
-            tool: "list_issues".into(),
-            args: json!({"query": "test"}),
-        })
-        .unwrap_err();
+    let error = gateway.list_tools().unwrap_err();
     let chain = format!("{error:#}");
     assert!(chain.contains("MCP tool discovery failed"));
     assert!(chain.contains("MCP tools/list returned error code -32603"));

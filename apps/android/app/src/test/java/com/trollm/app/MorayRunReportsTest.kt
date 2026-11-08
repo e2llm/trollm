@@ -13,13 +13,21 @@ class MorayRunReportsTest {
             var prepared = 0; var retained = 0; var sends = 0
             val actual = JSONObject().put("source", JSONObject().put("nativeRunId", run)).put("report", JSONObject()
                 .put("reportId", "native-original").put("runId", run).put("outcome", "unknown"))
+                .put("observation", JSONObject().put("snapshotStatus", "running")
+                    .put("progressDisposition", "interrupted").put("workerActive", false))
+                .put("qualification", "native-progress-only")
+            assertEquals("native-progress-only", actual.getString("qualification"))
+            assertEquals("interrupted", actual.getJSONObject("observation").getString("progressDisposition"))
+            assertFalse(actual.getJSONObject("observation").has("qualification"))
             val first = MorayRunReports(directory,
                 { prepared++; actual },
                 { id, value -> assertEquals(run, id); assertTrue(JsonValues.same(value, actual)); retained++; "native-original" },
                 { _, _ -> sends++; throw java.io.IOException("reply lost") })
             first.retain(run)
+            val originalOutbox = java.io.File(directory, "$run.json").readBytes()
             assertEquals(0, sends)
             try { first.send(run); fail() } catch (_: java.io.IOException) {}
+            assertArrayEquals(originalOutbox, java.io.File(directory, "$run.json").readBytes())
             val reopened = MorayRunReports(directory,
                 { fail("retry prepared new work"); actual },
                 { _, _ -> fail("retry retained a different report"); "" },

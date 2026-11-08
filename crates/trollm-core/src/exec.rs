@@ -377,6 +377,7 @@ pub struct Executor<M: ModelSlot, G: ToolGateway> {
     start_events_emitted: bool,
     pending_uncertain: Vec<DanglingIntent>,
     unsafe_completed_replay: bool,
+    selected_call_pending: bool,
     /// Retries consumed on the current node (per-node budget, resets on entry).
     node_retries: u32,
     pause_reason: String,
@@ -475,11 +476,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             let bytes = std::fs::read(&snapshot).context("reading state.snapshot.json")?;
             let mut state: RunState =
                 serde_json::from_slice(&bytes).context("parsing state.snapshot.json")?;
+            migrate_legacy_cursors(&plan, &mut state)?;
             // The maxItems window is per dispatch session: after pause/resume a
             // run may process up to maxItems further items (PREMISE: pause
             // composes with backgrounding; resume-from-cursor is the expected
             // path). Documented deviation-free reading of §3/§4.4.
-            for cur in state.foreach_cursors.values_mut() {
+            for cur in state.cursors_mut() {
                 cur.session_items = 0;
             }
             let mut pending = BTreeMap::new();
@@ -518,6 +520,23 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             )
         };
 
+        let mut selected_pending = std::collections::BTreeSet::new();
+        EventLog::visit(
+            &run_dir.events_path(),
+            Some(run_dir.run_id()),
+            |event, _| {
+                let key = serde_json::to_string(&event["callContext"]).unwrap_or_default();
+                match event["type"].as_str() {
+                    Some("tool_call_prepared") => {
+                        selected_pending.insert(key);
+                    }
+                    Some("tool_call_outcome_acknowledged") => {
+                        selected_pending.remove(&key);
+                    }
+                    _ => {}
+                }
+            },
+        )?;
         let fail_reason = state
             .terminal_reason
             .clone()
@@ -543,6 +562,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             start_events_emitted: false,
             pending_uncertain,
             unsafe_completed_replay,
+            selected_call_pending: !selected_pending.is_empty(),
             node_retries: 0,
             pause_reason: String::new(),
             fail_reason,
@@ -577,6 +597,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     /// §9: drive until Paused / Succeeded / Failed.
     pub fn run_until_blocked(&mut self) -> anyhow::Result<RunStatus> {
+        if self.selected_call_pending {
+            self.finish_failed(
+                "selected preparation outcome acknowledgement pending; execution replay refused",
+            )?;
+            return self.current_status();
+        }
         if !self.start_events_emitted {
             self.start_events_emitted = true;
             if !self.restored {
@@ -634,7 +660,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         }
         self.state.status = StateStatus::Running;
         // maxItems is a per-session window; resuming starts a new session.
-        for cur in self.state.foreach_cursors.values_mut() {
+        for cur in self.state.cursors_mut() {
             cur.session_items = 0;
         }
         self.handle_recovery()?;
@@ -708,7 +734,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             self.observation_context = Some(json!({
                 "epoch": self.observation_epoch, "attempt": self.observation_attempt,
                 "plan": plan_id, "node": node_id, "frameDepth": self.state.stack.len(),
-                "foreach": self.state.foreach_cursors.iter().map(|(node, cursor)|
+                "foreach": self.state.cursors().map(|(node, cursor)|
                     json!({"node":node,"index":cursor.index,"phase":cursor.phase})).collect::<Vec<_>>(),
             }));
             self.observation_start = Some(AttemptStart {
@@ -923,6 +949,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     json!({ "plan": plan_id, "from": from, "to": target, "key": key }),
                 )?;
                 let frame = self.state.stack.last_mut().unwrap();
+                frame.foreach_cursors.remove(target);
                 frame.node = target.clone();
                 self.node_retries = 0;
                 self.emit(
@@ -944,8 +971,9 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     InlineStatus::Paused => {
                         self.emit(EventType::Paused, json!({ "reason": inline.reason }))?;
                         if let Some(target) = &inline.resume_at {
-                            self.state.stack.last_mut().expect("active frame").node =
-                                target.clone();
+                            let frame = self.state.stack.last_mut().expect("active frame");
+                            frame.foreach_cursors.remove(target);
+                            frame.node = target.clone();
                             self.node_retries = 0;
                         }
                         self.state.status = StateStatus::Paused;
@@ -1440,10 +1468,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         // Closed task contracts must hold even when catalog discovery is unavailable.
         for (pair, fields) in &closed_arguments {
             let fqn = format!("{}.{}", pair.0, pair.1);
-            let bound_names: Vec<_> = bound_arguments
+            let prepared_names = self.gateway.prepared_argument_names(&pair.0, &pair.1);
+            let mut bound_names: Vec<_> = bound_arguments
                 .get(&fqn)
                 .map(|values| values.keys().map(String::as_str).collect())
                 .unwrap_or_default();
+            bound_names.extend(prepared_names.iter().map(String::as_str));
             let constraints = self
                 .gateway
                 .argument_constraints(&pair.0, &pair.1)
@@ -1491,10 +1521,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 if !task.tools.contains(&fqn) {
                     continue;
                 }
-                let bound_names: Vec<_> = bound_arguments
+                let prepared_names = self
+                    .gateway
+                    .prepared_argument_names(&descriptor.server, &descriptor.name);
+                let mut bound_names: Vec<_> = bound_arguments
                     .get(&fqn)
                     .map(|values| values.keys().map(String::as_str).collect())
                     .unwrap_or_default();
+                bound_names.extend(prepared_names.iter().map(String::as_str));
                 if let Some(constraints) = self
                     .gateway
                     .argument_constraints(&descriptor.server, &descriptor.name)
@@ -1942,6 +1976,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
 
             for call in &mut calls {
+                let model_proposal = call.clone();
                 let fqn = format!("{}.{}", call.server, call.tool);
                 if !task.tools.iter().any(|t| t == &fqn) {
                     // Post-hoc validation failure (§5.1): the model called a
@@ -2012,12 +2047,109 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     .set_deadline(Instant::now().checked_add(self.remaining_duration()));
                 let call_context = self.next_call_context();
                 self.gateway.set_call_context(Some(call_context.clone()));
+                let preparation_context = trollm_mcp::preparation::PreparationContext {
+                    run_id: self.state.run_id.clone(),
+                    node: node_id.to_owned(),
+                    task_ref: task_ref.clone(),
+                    model_slot: task.model.clone(),
+                    model_call_ordinal: model_ordinal,
+                    frames: self
+                        .state
+                        .stack
+                        .iter()
+                        .map(|frame| trollm_mcp::preparation::FramePosition {
+                            plan: frame.plan.clone(),
+                            node: frame.node.clone(),
+                        })
+                        .collect(),
+                    cursors: self
+                        .state
+                        .cursors()
+                        .map(|(node, cursor)| trollm_mcp::preparation::CursorPosition {
+                            node: node.clone(),
+                            snapshot_ref: cursor.snapshot_ref.clone(),
+                            index: cursor.index as u64,
+                            phase: match cursor.phase {
+                                crate::state::ForeachPhase::Next => "next",
+                                crate::state::ForeachPhase::InBody => "inBody",
+                                crate::state::ForeachPhase::InBetween => "inBetween",
+                            }
+                            .into(),
+                        })
+                        .collect(),
+                    call_context: call_context.clone(),
+                    argument_bindings: bound_arguments
+                        .get(&fqn)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(|(name, (value, source))| {
+                                    let rule = task
+                                        .tool_arguments
+                                        .as_ref()
+                                        .and_then(|rules| rules.get(&fqn));
+                                    let path = match *source {
+                                        "fromVars" => {
+                                            rule.and_then(|r| r.from_vars.get(name)).cloned()
+                                        }
+                                        "fromInput" => {
+                                            rule.and_then(|r| r.from_input.get(name)).cloned()
+                                        }
+                                        _ => None,
+                                    };
+                                    trollm_mcp::preparation::BoundArgument {
+                                        name: name.clone(),
+                                        source: (*source).into(),
+                                        path,
+                                        value: value.clone(),
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                };
+                let mut selected_prepared = false;
+                let requested_call = call.clone();
+                let preparation_started = Instant::now();
+                if let Some(prepared) = self
+                    .gateway
+                    .prepare_call(call, &preparation_context)
+                    .map_err(|e| {
+                        TaskFailure::new(ErrorClass::McpError, format!("preparation: {e:#}"))
+                    })?
+                {
+                    prepared.validate(call, &preparation_context).map_err(|e| {
+                        TaskFailure::new(ErrorClass::ToolCallParse, format!("preparation: {e:#}"))
+                    })?;
+                    self.check_deadline(node_id)?;
+                    if self.control_cancelled() {
+                        return Ok(TaskLoopOutcome::Cancelled);
+                    }
+                    self.emit(EventType::ToolCallPrepared, json!({
+                        "node":node_id,"taskRef":task_ref,"callContext":call_context,
+                        "modelProposal":model_proposal,"requestedCall":requested_call,
+                        "resolvedCall":prepared.call,"evidence":prepared.evidence,
+                        "nativeContext":preparation_context.raw()
+                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?,
+                        "preparationMs":preparation_started.elapsed().as_millis() as u64,
+                    })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
+                    *call = prepared.call;
+                    selected_prepared = true;
+                    // The remote guard has issued this preparation. Even a
+                    // later local validation refusal must not acquire another
+                    // guard or execute an authored retry/suffix.
+                    self.selected_call_pending = true;
+                }
                 self.gateway.validate_call(call).map_err(|e| {
                     self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
                     TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
                 })?;
 
                 self.check_deadline(node_id)?;
+
+                if self.control_cancelled() {
+                    return Ok(TaskLoopOutcome::Cancelled);
+                }
 
                 // Mutation journaling (§6): intent BEFORE the call for tasks
                 // with mutations.idempotency = intent-log.
@@ -2045,6 +2177,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     None
                 };
 
+                if selected_prepared && intent_seq.is_none() {
+                    return Err(TaskFailure::new(
+                        ErrorClass::ArtifactIo,
+                        "selected effect requires retained native intent",
+                    ));
+                }
+
                 let is_mutation = self.gateway.tool_class(&call.server, &call.tool)
                     == trollm_mcp::policy::ToolClass::Mutation
                     || self
@@ -2059,6 +2198,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 if is_mutation {
                     self.mutation_outcome = crate::state::MutationOutcome::Unknown;
                 }
+                self.gateway
+                    .after_retained_intent(call, &preparation_context, intent_seq)
+                    .map_err(|error| {
+                        TaskFailure::new(
+                            ErrorClass::ArtifactIo,
+                            format!("retained intent association: {error:#}"),
+                        )
+                    })?;
+                self.selected_call_pending |= selected_prepared;
                 let t0 = Instant::now();
                 let result =
                     match self
@@ -2086,6 +2234,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         }
                     };
                 if is_mutation
+                    && !selected_prepared
                     && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
                 {
                     self.mutation_outcome = crate::state::MutationOutcome::Returned;
@@ -2103,7 +2252,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         result.content_for_model, json!(call.server), json!(call.tool),
                     )
                 });
-                self.emit(
+                let retained_result_seq = self.emit(
                     EventType::ToolCallResult,
                     json!({
                         "taskRef": task_ref, "callContext":call_context,
@@ -2132,6 +2281,36 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         if let Some(name) = artifacts::logical_name(art) {
                             artifacts.insert(name, art.clone());
                         }
+                    }
+                }
+
+                self.gateway
+                    .after_retained_result(
+                        call,
+                        &preparation_context,
+                        &result,
+                        intent_seq,
+                        retained_result_seq,
+                    )
+                    .map_err(|e| {
+                        TaskFailure::new(
+                            ErrorClass::ArtifactIo,
+                            format!("retained result acknowledgement: {e:#}"),
+                        )
+                    })?;
+
+                if selected_prepared {
+                    self.emit(EventType::ToolCallOutcomeAcknowledged, json!({
+                        "node":node_id,"taskRef":task_ref,"callContext":call_context,
+                        "intentSeq":intent_seq,"resultSeq":retained_result_seq,
+                        "contextSha256":preparation_context.raw()
+                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?.sha256,
+                    })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
+                    self.selected_call_pending = false;
+                    if is_mutation
+                        && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
+                    {
+                        self.mutation_outcome = crate::state::MutationOutcome::Returned;
                     }
                 }
 
@@ -2359,6 +2538,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     /// Run-level onLimit policy (§3): abort | respond_partial.
     fn apply_run_limit(&mut self, fp: &FramePlan, detail: &str) -> anyhow::Result<()> {
+        if self.selected_call_pending {
+            return self.finish_failed(
+                "selected effect/result acknowledgement pending at limit; partial success refused",
+            );
+        }
         // A parent/root deadline retains its authored limit policy while a child runs.
         let policy = if detail.starts_with("timeoutS") {
             self.state
@@ -2413,6 +2597,12 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         fp: &FramePlan,
         failure: TaskFailure,
     ) -> anyhow::Result<()> {
+        if self.selected_call_pending {
+            self.record_task_failure(node_id, &failure);
+            return self.finish_failed(
+                "selected effect/result acknowledgement unresolved; retry and suffix refused",
+            );
+        }
         if self.control_cancelled() {
             if failure.class == ErrorClass::ArtifactIo {
                 return Err(anyhow!(failure));
@@ -2750,23 +2940,41 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     // ------------------------------------------------------------------
     // foreach nodes (§4.4, §4.6)
 
+    fn cursors(&self) -> &BTreeMap<String, ForeachCursor> {
+        &self
+            .state
+            .stack
+            .last()
+            .expect("active frame")
+            .foreach_cursors
+    }
+
+    fn cursors_mut(&mut self) -> &mut BTreeMap<String, ForeachCursor> {
+        &mut self
+            .state
+            .stack
+            .last_mut()
+            .expect("active frame")
+            .foreach_cursors
+    }
+
     fn step_foreach(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
-        if !self.state.foreach_cursors.contains_key(node_id) {
+        if !self.cursors().contains_key(node_id) {
             self.foreach_enter(node_id, node, fp)?;
             if self.state.status != StateStatus::Running {
                 return Ok(()); // onEmpty fired a terminal/pause transition
             }
-            if !self.state.foreach_cursors.contains_key(node_id) {
+            if !self.cursors().contains_key(node_id) {
                 return Ok(()); // transitioned away (empty snapshot)
             }
         }
-        let phase = self.state.foreach_cursors[node_id].phase;
+        let phase = self.cursors()[node_id].phase;
         match phase {
             ForeachPhase::Next => self.foreach_next(node_id, node, fp),
             ForeachPhase::InBody => self.foreach_body_done(node_id, node),
             ForeachPhase::InBetween => {
                 self.take_child_return(node_id)?;
-                let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+                let cur = self.cursors_mut().get_mut(node_id).unwrap();
                 cur.index += 1;
                 cur.phase = ForeachPhase::Next;
                 self.persist_snapshot()
@@ -2810,6 +3018,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
         };
 
+        let frame = self.state.stack.last_mut().expect("active foreach frame");
+        frame.node_outputs.remove(node_id);
+        vars_obj_mut(frame).remove(node_id);
+
         // Snapshot the items once, into the run artifact store (§4.4
         // foreachCursors snapshotRef).
         let mut buf = String::new();
@@ -2817,7 +3029,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             buf.push_str(&item.to_string());
             buf.push('\n');
         }
-        let file_name = format!("{node_id}.snapshot.jsonl");
+        let file_name = format!("{node_id}.{}.snapshot.jsonl", hex_sha256(buf.as_bytes()));
         let written =
             artifacts::write_atomic(&self.run_dir.artifacts_dir(), &file_name, buf.as_bytes())
                 .map_err(|e| anyhow!("snapshot artifact for foreach '{node_id}': {e}"))?;
@@ -2838,7 +3050,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             return self.transit("onEmpty", &t);
         }
 
-        self.state.foreach_cursors.insert(
+        self.cursors_mut().insert(
             node_id.to_string(),
             ForeachCursor {
                 index: 0,
@@ -2856,59 +3068,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     fn foreach_next(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
         let items = self.read_snapshot(node_id)?;
         let (index, session_items) = {
-            let cur = &self.state.foreach_cursors[node_id];
+            let cur = &self.cursors()[node_id];
             (cur.index, cur.session_items)
         };
 
         if index >= items.len() {
-            // Aggregate per §4.6 and transition onComplete: each declared
-            // output name collects `body.outputs` across iterations.
-            let bounded = self.foreach_bounded_returns(node);
-            if bounded
-                && crate::json_size::compact_json_bytes(
-                    &self.state.foreach_cursors[node_id].results,
-                )? > 2 * 1024 * 1024
-            {
-                return self.finish_failed("foreach collected results exceed 2 MiB");
+            self.publish_foreach_outputs(node_id, node, fp)?;
+            if self.state.status != StateStatus::Running {
+                return Ok(());
             }
-            let results = self.state.foreach_cursors[node_id].results.clone();
-            let mut outputs_obj = Map::new();
-            match &node.outputs {
-                Some(NodeOutputs::Foreach(spec)) => {
-                    for (name, collect) in spec {
-                        let value = Value::Array(results.clone());
-                        let value = match &collect.view {
-                            Some(view) => match view.apply(&value) {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    return self.finish_failed(&format!(
-                                        "foreach collection view: {error:#}"
-                                    ))
-                                }
-                            },
-                            None => value,
-                        };
-                        outputs_obj.insert(name.clone(), value);
-                    }
-                }
-                _ => {
-                    outputs_obj.insert("results".to_string(), Value::Array(results));
-                }
-            }
-            let frame = self.state.stack.last_mut().unwrap();
-            if self
-                .plan
-                .find_plan(&fp.id)
-                .is_some_and(|plan| plan.exports.is_some())
-            {
-                frame.node_outputs.insert(
-                    node_id.to_string(),
-                    outputs_obj.clone().into_iter().collect(),
-                );
-            }
-            let mut node_obj = Map::new();
-            node_obj.insert("outputs".to_string(), Value::Object(outputs_obj));
-            vars_obj_mut(frame).insert(node_id.to_string(), Value::Object(node_obj));
             let t = node.on_complete.clone().expect("validated");
             return self.transit("onComplete", &t);
         }
@@ -2939,12 +3107,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             EventType::Transition,
             json!({ "plan": fp.id, "from": node_id, "to": format!("{}:{}", body.flow_ref, child_entry), "key": "body" }),
         )?;
+        self.cursors_mut().get_mut(node_id).unwrap().phase = ForeachPhase::InBody;
         self.state.stack.push(Frame {
             plan: child_pin,
             node: child_entry.clone(),
             vars: Value::Object(child_vars),
             node_outputs: BTreeMap::new(),
             last_error: None,
+            foreach_cursors: BTreeMap::new(),
             counters: Counters {
                 started_at: now_ms(),
                 ..Counters::default()
@@ -2955,8 +3125,62 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             EventType::NodeEntered,
             json!({ "plan": body.flow_ref, "node": child_entry }),
         )?;
-        self.state.foreach_cursors.get_mut(node_id).unwrap().phase = ForeachPhase::InBody;
         self.persist_snapshot()?;
+        Ok(())
+    }
+
+    fn publish_foreach_outputs(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        fp: &FramePlan,
+    ) -> anyhow::Result<()> {
+        // Aggregate per §4.6 and transition onComplete: each declared
+        // output name collects `body.outputs` across iterations.
+        let bounded = self.foreach_bounded_returns(node);
+        if bounded
+            && crate::json_size::compact_json_bytes(&self.cursors()[node_id].results)?
+                > 2 * 1024 * 1024
+        {
+            return self.finish_failed("foreach collected results exceed 2 MiB");
+        }
+        let results = self.cursors()[node_id].results.clone();
+        let mut outputs_obj = Map::new();
+        match &node.outputs {
+            Some(NodeOutputs::Foreach(spec)) => {
+                for (name, collect) in spec {
+                    let value = Value::Array(results.clone());
+                    let value = match &collect.view {
+                        Some(view) => match view.apply(&value) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return self
+                                    .finish_failed(&format!("foreach collection view: {error:#}"))
+                            }
+                        },
+                        None => value,
+                    };
+                    outputs_obj.insert(name.clone(), value);
+                }
+            }
+            _ => {
+                outputs_obj.insert("results".to_string(), Value::Array(results));
+            }
+        }
+        let frame = self.state.stack.last_mut().unwrap();
+        if self
+            .plan
+            .find_plan(&fp.id)
+            .is_some_and(|plan| plan.exports.is_some())
+        {
+            frame.node_outputs.insert(
+                node_id.to_string(),
+                outputs_obj.clone().into_iter().collect(),
+            );
+        }
+        let mut node_obj = Map::new();
+        node_obj.insert("outputs".to_string(), Value::Object(outputs_obj));
+        vars_obj_mut(frame).insert(node_id.to_string(), Value::Object(node_obj));
         Ok(())
     }
 
@@ -2975,6 +3199,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         let returned = self.take_child_return(node_id)?;
         let outputs = returned.outputs;
         let outcome = returned.outcome;
+        let outcome_transition = node
+            .on_item_outcome
+            .as_ref()
+            .and_then(|routes| routes.get(&outcome))
+            .cloned();
         let items = self.read_snapshot(node_id)?;
         // `indexBy: itemKey` (§3) means: index each result entry by the value
         // of the item's itemKey field. Any other literal names the item field
@@ -2994,7 +3223,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             index_field
         };
         let (index, new_index_done) = {
-            let cur = &self.state.foreach_cursors[node_id];
+            let cur = &self.cursors()[node_id];
             (cur.index, cur.index + 1)
         };
         let key_value = items
@@ -3010,7 +3239,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             entry.insert("evidence".to_string(), serde_json::to_value(evidence)?);
         }
         if self.foreach_bounded_returns(node) {
-            let results = &self.state.foreach_cursors[node_id].results;
+            let results = &self.cursors()[node_id].results;
             let bytes = crate::json_size::compact_json_bytes(results)?;
             let added =
                 crate::json_size::compact_json_bytes(&entry)? + usize::from(!results.is_empty());
@@ -3019,9 +3248,22 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
         }
         {
-            let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+            let cur = self.cursors_mut().get_mut(node_id).unwrap();
             cur.results.push(Value::Object(entry));
             cur.session_items += 1;
+        }
+
+        if let Some(target) = outcome_transition {
+            let cur = self.cursors_mut().get_mut(node_id).unwrap();
+            cur.index += 1;
+            cur.phase = ForeachPhase::Next;
+            let (plan_id, _) = self.current_position()?;
+            let fp = self.frame_plan(&plan_id)?;
+            self.publish_foreach_outputs(node_id, node, &fp)?;
+            if self.state.status != StateStatus::Running {
+                return Ok(());
+            }
+            return self.transit("onItemOutcome", &target);
         }
 
         if let Some(between) = node.between.clone() {
@@ -3044,12 +3286,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 EventType::Transition,
                 json!({ "plan": plan_id, "from": node_id, "to": format!("{}:{}", between.flow_ref, child_entry), "key": "between" }),
             )?;
+            self.cursors_mut().get_mut(node_id).unwrap().phase = ForeachPhase::InBetween;
             self.state.stack.push(Frame {
                 plan: child_pin,
                 node: child_entry.clone(),
                 vars: Value::Object(child_vars),
                 node_outputs: BTreeMap::new(),
                 last_error: None,
+                foreach_cursors: BTreeMap::new(),
                 counters: Counters {
                     started_at: now_ms(),
                     ..Counters::default()
@@ -3060,11 +3304,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 EventType::NodeEntered,
                 json!({ "plan": between.flow_ref, "node": child_entry }),
             )?;
-            self.state.foreach_cursors.get_mut(node_id).unwrap().phase = ForeachPhase::InBetween;
             self.persist_snapshot()?;
             Ok(())
         } else {
-            let cur = self.state.foreach_cursors.get_mut(node_id).unwrap();
+            let cur = self.cursors_mut().get_mut(node_id).unwrap();
             cur.index += 1;
             cur.phase = ForeachPhase::Next;
             self.persist_snapshot()
@@ -3090,8 +3333,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     fn read_snapshot(&self, node_id: &str) -> anyhow::Result<Vec<Value>> {
         let cur = self
-            .state
-            .foreach_cursors
+            .cursors()
             .get(node_id)
             .ok_or_else(|| anyhow!("no foreach cursor for '{node_id}'"))?;
         let path = self.run_dir.path().join(&cur.snapshot_ref);
@@ -3177,6 +3419,41 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         }
         Ok(())
     }
+}
+
+fn migrate_legacy_cursors(plan: &ExecutionPlan, state: &mut RunState) -> anyhow::Result<()> {
+    if state.foreach_cursors.is_empty() {
+        return Ok(());
+    }
+    if state
+        .stack
+        .iter()
+        .any(|frame| !frame.foreach_cursors.is_empty())
+    {
+        return Err(anyhow!("mixed legacy and frame-owned foreach cursors"));
+    }
+    for (node, cursor) in std::mem::take(&mut state.foreach_cursors) {
+        let owners: Vec<_> = state
+            .stack
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| {
+                plan.find_plan(&plan_id_of_pin(&frame.plan))
+                    .and_then(|plan| plan.nodes.get(&node))
+                    .filter(|node| node.kind == NodeKind::Foreach)
+                    .map(|_| index)
+            })
+            .collect();
+        match owners.as_slice() {
+            [index] => {
+                state.stack[*index].foreach_cursors.insert(node, cursor);
+            }
+            // Completed children from old flat snapshots are no longer live.
+            [] => {}
+            _ => return Err(anyhow!("ambiguous legacy foreach cursor owner")),
+        }
+    }
+    Ok(())
 }
 
 fn collect_pins(plan: &ExecutionPlan, out: &mut Vec<(String, String)>) {
@@ -3439,6 +3716,241 @@ mod recovery_regressions {
         .is_err());
         let registry = "schemaVersion: ledger.task-registry.v1\ntasks:\n  x:\n    model: coder\n    prompt: unused\n    outputContract:\n      outputs:\n        data: {fromArtifact: x, format: jsonl, type: list, view: {fields: {id: true}, maxBytes: 100}}";
         assert!(TaskRegistry::from_yaml_str(registry, Path::new(".")).is_ok());
+    }
+
+    #[test]
+    fn preparation_precedes_exact_intent_and_refusal_cancel_grant_drift_never_send() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use trollm_mcp::preparation::{
+            raw_sha256, PreparationContext, PreparationEvidence, PreparedCall,
+        };
+        struct Control(Arc<AtomicBool>);
+        impl ExecutionControl for Control {
+            fn checkpoint(&self) -> bool {
+                self.0.load(Ordering::SeqCst)
+            }
+            fn wait_backoff(&self, _: Duration) -> bool {
+                self.checkpoint()
+            }
+        }
+        struct PreparedGateway {
+            mode: u8,
+            calls: usize,
+            log: PathBuf,
+            cancel: Arc<AtomicBool>,
+        }
+        impl ToolGateway for PreparedGateway {
+            fn list_tools(&self) -> anyhow::Result<Vec<ToolDescriptor>> {
+                Ok(vec![])
+            }
+            fn prepared_argument_names(&self, _: &str, _: &str) -> Vec<String> {
+                vec!["nativeValue".into()]
+            }
+            fn argument_constraints(&self, _: &str, _: &str) -> Option<Value> {
+                Some(
+                    json!({"type":"object","properties":{"nativeValue":{"type":"integer"}},"required":["nativeValue"]}),
+                )
+            }
+            fn available_tools(&self, _: &[String]) -> Vec<ToolDescriptor> {
+                vec![ToolDescriptor {
+                    server: "tracker".into(),
+                    name: "write".into(),
+                    input_schema: self.argument_constraints("tracker", "write").unwrap(),
+                }]
+            }
+            fn tool_class(&self, _: &str, _: &str) -> trollm_mcp::policy::ToolClass {
+                trollm_mcp::policy::ToolClass::Mutation
+            }
+            fn prepare_call(
+                &mut self,
+                call: &ToolCall,
+                context: &PreparationContext,
+            ) -> anyhow::Result<Option<PreparedCall>> {
+                assert!(!context.run_id.is_empty());
+                assert_eq!(context.node, "work");
+                assert_eq!(context.model_slot, "coder");
+                assert_eq!(context.model_call_ordinal, 1);
+                assert_eq!(context.frames.len(), 1);
+                assert!(!EventLog::read_all(&self.log)?
+                    .iter()
+                    .any(|e| e["type"] == "tool_call_intent"));
+                if self.mode == 1 {
+                    anyhow::bail!("controlled guard refused");
+                }
+                if self.mode == 2 {
+                    self.cancel.store(true, Ordering::SeqCst);
+                }
+                let response = "{\"args\":{\"nativeValue\":1}}";
+                let mut resolved = call.clone();
+                resolved.args = json!({"nativeValue":1});
+                if self.mode == 6 {
+                    resolved.args = json!({});
+                }
+                if self.mode == 3 {
+                    resolved.tool = "ungranted".into();
+                }
+                Ok(Some(PreparedCall {
+                    call: resolved,
+                    evidence: PreparationEvidence {
+                        provider: "controlled-read-only-guard".into(),
+                        context_sha256: context.raw()?.sha256,
+                        response_json: response.into(),
+                        response_sha256: raw_sha256(response.as_bytes()),
+                    },
+                }))
+            }
+            fn after_retained_result(
+                &mut self,
+                _: &ToolCall,
+                _: &PreparationContext,
+                _: &ToolResult,
+                intent: Option<u64>,
+                result: u64,
+            ) -> anyhow::Result<()> {
+                let events = EventLog::read_all(&self.log)?;
+                assert!(intent.is_some_and(|seq| seq < result));
+                assert!(events
+                    .iter()
+                    .any(|event| event["seq"] == result && event["type"] == "tool_call_result"));
+                if self.mode == 5 {
+                    anyhow::bail!("controlled ACK delivery loss");
+                }
+                Ok(())
+            }
+            fn validate_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    call.args == json!({"nativeValue":1}),
+                    "final argument mismatch"
+                );
+                Ok(())
+            }
+            fn call(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+                let events = EventLog::read_all(&self.log)?;
+                let prepared = events
+                    .iter()
+                    .position(|e| e["type"] == "tool_call_prepared")
+                    .unwrap();
+                let intent = events
+                    .iter()
+                    .position(|e| e["type"] == "tool_call_intent")
+                    .unwrap();
+                assert!(prepared < intent);
+                assert_eq!(events[intent]["args"], call.args);
+                assert_eq!(events[prepared]["modelProposal"]["args"], json!({}));
+                self.calls += 1;
+                if self.mode == 4 {
+                    anyhow::bail!("controlled response loss after possible send");
+                }
+                Ok(ToolResult {
+                    content_for_model: json!({"observed":true}),
+                    artifacts: vec![],
+                    provenance: trollm_mcp::Provenance::Live,
+                })
+            }
+        }
+        for mode in 0..7 {
+            let base = std::env::temp_dir().join(format!("prepared-dispatch-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&base).unwrap();
+            std::fs::write(base.join("work.md"), "one controlled call").unwrap();
+            let root=plan("prepared-dispatch","work","  work: {kind: task, taskRef: work, onVerified: done}\n  done: {kind: end, outcome: succeeded}");
+            let registry=TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: work.md\n    completion: tool-result\n    tools: [tracker.write]\n    toolArguments: {tracker.write: {modelFields: []}}\n    mutations: {idempotency: intent-log, onUncertain: fail-run}",&base).unwrap();
+            let run = RunDir::under(&base);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let mut exec = Executor::new(
+                root.clone(),
+                registry.clone(),
+                String::new(),
+                SlotMap::new().with(
+                    "coder",
+                    DeadlineModel {
+                        late: false,
+                        request: Arc::new(std::sync::Mutex::new(None)),
+                    },
+                ),
+                PreparedGateway {
+                    mode,
+                    calls: 0,
+                    log: run.events_path(),
+                    cancel: cancel.clone(),
+                },
+                run.clone(),
+            )
+            .unwrap();
+            exec.set_control(Arc::new(Control(cancel)));
+            let status = exec.run_until_blocked().unwrap();
+            assert_eq!(matches!(status, RunStatus::Succeeded), mode == 0);
+            let sent = mode == 0 || mode == 4 || mode == 5;
+            assert_eq!(exec.gateway.calls, usize::from(sent));
+            let events = EventLog::read_all(&run.events_path()).unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["type"] == "tool_call_intent")
+                    .count(),
+                usize::from(sent)
+            );
+            assert_eq!(
+                events.iter().filter(|e| e["type"] == "model_call").count(),
+                1
+            );
+            if mode == 4 {
+                assert!(events.iter().any(|e| e["type"] == "error"));
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["type"] == "tool_call_outcome_acknowledged")
+                    .count(),
+                usize::from(mode == 0)
+            );
+            if mode == 5 {
+                assert_eq!(
+                    exec.mutation_outcome,
+                    crate::state::MutationOutcome::Unknown
+                );
+                assert!(matches!(
+                    exec.run_until_blocked().unwrap(),
+                    RunStatus::Failed { .. }
+                ));
+                assert_eq!(
+                    exec.gateway.calls, 1,
+                    "lost acknowledgement never permits effect replay"
+                );
+            }
+            drop(exec);
+            if mode == 5 {
+                let mut reopened = Executor::new(
+                    root,
+                    registry,
+                    String::new(),
+                    SlotMap::new().with(
+                        "coder",
+                        DeadlineModel {
+                            late: false,
+                            request: Arc::new(std::sync::Mutex::new(None)),
+                        },
+                    ),
+                    PreparedGateway {
+                        mode: 0,
+                        calls: 0,
+                        log: run.events_path(),
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    },
+                    run.clone(),
+                )
+                .unwrap();
+                assert!(reopened.selected_call_pending);
+                assert!(matches!(
+                    reopened.run_until_blocked().unwrap(),
+                    RunStatus::Failed { .. }
+                ));
+                assert_eq!(
+                    reopened.gateway.calls, 0,
+                    "reopened pending journal never redispatches"
+                );
+            }
+            std::fs::remove_dir_all(base).unwrap();
+        }
     }
 
     struct DeadlineModel {
@@ -4399,8 +4911,10 @@ nodes:
             exec.step_end("done", &end, &fp).unwrap();
             assert_eq!(exec.state.status, StateStatus::Failed);
             assert!(exec.state.pending_return.is_none());
-            assert_eq!(exec.state.foreach_cursors["each"].index, 0);
-            assert!(exec.state.foreach_cursors["each"].results.is_empty());
+            assert_eq!(exec.state.stack[0].foreach_cursors["each"].index, 0);
+            assert!(exec.state.stack[0].foreach_cursors["each"]
+                .results
+                .is_empty());
             drop(exec);
             std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
         }
@@ -4428,8 +4942,10 @@ nodes:
         )
         .unwrap();
         assert!(matches!(exec.resume().unwrap(), RunStatus::Failed { .. }));
-        assert_eq!(exec.state.foreach_cursors["each"].index, 0);
-        assert!(exec.state.foreach_cursors["each"].results.is_empty());
+        assert_eq!(exec.state.stack[0].foreach_cursors["each"].index, 0);
+        assert!(exec.state.stack[0].foreach_cursors["each"]
+            .results
+            .is_empty());
         drop(exec);
         std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
     }
@@ -4484,7 +5000,7 @@ nodes:
         let mut resumed = executor(root.clone(), run.clone());
         assert_eq!(resumed.resume().unwrap(), RunStatus::Succeeded);
         assert_eq!(
-            resumed.state.foreach_cursors["inner"].results[0]["outcome"],
+            resumed.state.stack[0].foreach_cursors["outer"].results[0]["outcome"],
             "succeeded"
         );
         root.subflows.insert(
@@ -4497,6 +5013,226 @@ nodes:
             .contains("duplicate plan id"));
         drop(resumed);
         std::fs::remove_dir_all(run.path().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn nested_foreach_runs_again_for_each_parent_item() {
+        let mut root = plan("root", "outer", &foreach_nodes("outer", "child", false));
+        let mut child = plan("child", "inner", &foreach_nodes("inner", "leaf", false));
+        child.exports = Some(BTreeMap::from([(
+            "children".into(),
+            FromBinding {
+                from: "inner.outputs.results".into(),
+            },
+        )]));
+        child.subflows.insert(
+            "leaf".into(),
+            plan("leaf", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        root.subflows.insert("child".into(), child);
+        let base = std::env::temp_dir().join(format!("repeated-child-{}", Uuid::new_v4()));
+        let run = RunDir::under(&base);
+        let mut exec = executor(root, run);
+        exec.state.stack[0].vars = json!({"items":[
+            {"id":1,"children":[{"id":11,"children":[]}]},
+            {"id":2,"children":[{"id":21,"children":[]},{"id":22,"children":[]}]}
+        ]});
+        assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+        let results = &exec.state.stack[0].vars["outer"]["outputs"]["results"];
+        assert_eq!(results[0]["outputs"]["children"][0]["id"], 11);
+        assert_eq!(results[1]["outputs"]["children"][0]["id"], 21);
+        assert_eq!(results[1]["outputs"]["children"][1]["id"], 22);
+        drop(exec);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn frame_cursors_allow_same_node_names_and_keep_each_snapshot_across_resume() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        let mut child = plan("child", "each", &foreach_nodes("each", "leaf", false));
+        child.subflows.insert(
+            "leaf".into(),
+            plan("leaf", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        root.subflows.insert("child".into(), child);
+        let base = std::env::temp_dir().join(format!("same-cursor-name-{}", Uuid::new_v4()));
+        let run = RunDir::under(&base);
+        let mut exec = executor(root.clone(), run.clone());
+        exec.state.stack[0].vars = json!({"items":[{"id":1,"children":[{"id":2,"children":[]}]}]});
+        advance_foreach(&mut exec, "each");
+        let parent_snapshot = exec.state.stack[0].foreach_cursors["each"]
+            .snapshot_ref
+            .clone();
+        advance_foreach(&mut exec, "each");
+        let child_snapshot = exec.state.stack[1].foreach_cursors["each"]
+            .snapshot_ref
+            .clone();
+        assert_ne!(parent_snapshot, child_snapshot);
+        assert!(run.path().join(&parent_snapshot).is_file());
+        assert!(run.path().join(&child_snapshot).is_file());
+        drop(exec);
+        let mut exec = executor(root, run);
+        assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+        assert_eq!(exec.state.stack[0].foreach_cursors["each"].index, 1);
+        drop(exec);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn explicit_reentry_renews_items_while_paused_resume_keeps_the_cursor() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        root.subflows.insert(
+            "child".into(),
+            plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        let base = std::env::temp_dir().join(format!("cursor-reentry-{}", Uuid::new_v4()));
+        let mut exec = executor(root, RunDir::under(&base));
+        exec.state.stack[0].vars = json!({"items":[{"id":1,"children":[]}]});
+        assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+        exec.state.status = StateStatus::Running;
+        exec.state.stack[0].vars["items"] = json!([{"id":2,"children":[]}]);
+        exec.transit("repeat", &Transition::Node("each".into()))
+            .unwrap();
+        assert!(!exec.state.stack[0].foreach_cursors.contains_key("each"));
+        advance_foreach(&mut exec, "each");
+        let fp = exec.frame_plan("child").unwrap();
+        let end = exec.plan.subflows["child"].nodes["done"].clone();
+        exec.step_end("done", &end, &fp).unwrap();
+        advance_foreach(&mut exec, "each");
+        exec.transit(
+            "pause",
+            &Transition::Inline(InlineTransition {
+                status: InlineStatus::Paused,
+                reason: "user".into(),
+                resume_at: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(exec.state.stack[0].foreach_cursors["each"].index, 1);
+        assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+        assert_eq!(
+            exec.state.stack[0].vars["each"]["outputs"]["results"][0]["id"],
+            2
+        );
+        drop(exec);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_flat_cursor_migration_keeps_active_owner_and_refuses_ambiguity() {
+        let root = plan("root", "each", &foreach_nodes("each", "child", false));
+        let mut state = RunState::fresh("run", &root.pin(), "each");
+        let cursor = ForeachCursor {
+            index: 1,
+            snapshot_ref: "artifacts/old.jsonl".into(),
+            session_items: 1,
+            results: vec![],
+            phase: ForeachPhase::Next,
+        };
+        state.foreach_cursors.insert("each".into(), cursor.clone());
+        state
+            .foreach_cursors
+            .insert("inactive-child".into(), cursor.clone());
+        migrate_legacy_cursors(&root, &mut state).unwrap();
+        assert!(state.foreach_cursors.is_empty());
+        assert_eq!(state.stack[0].foreach_cursors["each"].index, 1);
+        state.stack[0].foreach_cursors.clear();
+        state.stack.push(state.stack[0].clone());
+        state.foreach_cursors.insert("each".into(), cursor);
+        assert!(migrate_legacy_cursors(&root, &mut state)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn child_outcome_exit_collects_once_and_resumes_at_authored_continuation() {
+        for cold_boundary in 0..=2 {
+            let mut root = plan("root", "each", &foreach_nodes("each", "child", true));
+            root.subflows.insert(
+                "child".into(),
+                plan("child", "done", "  done: { kind: end, outcome: accepted }"),
+            );
+            root.subflows.insert(
+                "between".into(),
+                plan(
+                    "between",
+                    "done",
+                    "  done: { kind: end, outcome: succeeded }",
+                ),
+            );
+            root.nodes.get_mut("each").unwrap().on_item_outcome = Some(BTreeMap::from([(
+                "accepted".into(),
+                Transition::Inline(InlineTransition {
+                    status: InlineStatus::Paused,
+                    reason: "inspect selection".into(),
+                    resume_at: Some("done".into()),
+                }),
+            )]));
+            let base = std::env::temp_dir().join(format!("outcome-exit-{}", Uuid::new_v4()));
+            let run = RunDir::under(&base);
+            let mut exec = executor(root.clone(), run.clone());
+            exec.state.stack[0].vars =
+                json!({"items":[{"id":1,"children":[]},{"id":2,"children":[]}]});
+            advance_foreach(&mut exec, "each");
+            if cold_boundary == 0 {
+                drop(exec);
+                exec = executor(root.clone(), run.clone());
+            }
+            let fp = exec.frame_plan("child").unwrap();
+            let end = exec.plan.subflows["child"].nodes["done"].clone();
+            exec.step_end("done", &end, &fp).unwrap();
+            if cold_boundary == 1 {
+                drop(exec);
+                exec = executor(root.clone(), run.clone());
+            }
+            advance_foreach(&mut exec, "each");
+            assert_eq!(exec.state.status, StateStatus::Paused);
+            assert_eq!(exec.state.stack[0].node, "done");
+            assert_eq!(
+                exec.state.stack[0].vars["each"]["outputs"]["results"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            if cold_boundary == 2 {
+                drop(exec);
+                exec = executor(root.clone(), run.clone());
+            }
+            assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+            let events = EventLog::read_all(&run.events_path()).unwrap();
+            assert!(!events
+                .iter()
+                .any(|e| e["type"] == "node_entered" && e["plan"] == "between"));
+            drop(exec);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn child_outcome_routes_are_authored_end_values_and_validated_exits() {
+        let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
+        root.subflows.insert(
+            "child".into(),
+            plan("child", "done", "  done: { kind: end, outcome: succeeded }"),
+        );
+        for (outcome, target) in [
+            ("invented", Transition::Node("done".into())),
+            ("succeeded", Transition::Node("missing".into())),
+            (
+                "succeeded",
+                Transition::Inline(InlineTransition {
+                    status: InlineStatus::Paused,
+                    reason: "pause".into(),
+                    resume_at: None,
+                }),
+            ),
+        ] {
+            root.nodes.get_mut("each").unwrap().on_item_outcome =
+                Some(BTreeMap::from([(outcome.into(), target)]));
+            assert!(validate::validate_plan(&root).is_err());
+        }
     }
     #[test]
     fn final_output_overrides_enforce_types_and_completeness() {

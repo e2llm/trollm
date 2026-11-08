@@ -5,15 +5,24 @@ import org.json.JSONObject
 import java.io.File
 import uniffi.trollm_uniffi.TrollmRuntime
 
-/** Existing AppAuth + native importer/model/MCP lifecycle, not a second runtime. */
+/** Provisioned source machine identity + existing importer/model/MCP lifecycle. */
 object MoraySource {
     fun client(context: Context, profile: MorayProfile): MorayPortable {
-        val oauth = OAuthConnections.moray(context)
-        val server = "moray-${profile.key}"
-        val grant = oauth.pin(server, profile.api) ?: throw MorayFailure("SOURCE_RECONNECT_REQUIRED")
+        val provider = MorayMachineInstallation.provider(context, profile)
+        val grant = provider.pin()
         return MorayPortable(profile, File(context.filesDir, "trollm/moray/${profile.key}"),
             MorayHttps(context.filesDir),
-            { oauth.accessTokenBlocking(server, profile.api, grant.grantId) }, grant.grantId)
+            { provider.accessToken(grant) }, grant,
+            validateOwner = { owner ->
+                require(provider.pin() == grant)
+                MorayMachineInstallation.requireOwner(context, profile, owner)
+                require(provider.pin() == grant)
+            },
+            validateReporter = { reporter ->
+                require(provider.pin() == grant)
+                MorayMachineInstallation.requireReporter(context, profile, reporter)
+                require(provider.pin() == grant)
+            })
     }
 
     fun install(context: Context, profile: MorayProfile, publicationId: String, runtime: TrollmRuntime): JSONObject =
@@ -29,10 +38,14 @@ object MoraySource {
     fun authorizeFreshStart(context: Context, association: JSONObject) {
         val profile = profileFromAssociation(association).copy(consumerRevision = BuildConfig.SOURCE_REVISION)
         require(association.sourceString("profile") == profile.key)
-        val oauth = OAuthConnections.moray(context)
-        require(oauth.pin("moray-${profile.key}", profile.api)?.grantId == association.sourceString("grantId"))
+        val provider = MorayMachineInstallation.provider(context, profile)
+        require(provider.pin() == association.sourceString("grantId"))
         val original = association.getJSONObject("descriptor")
         require(JsonValues.same(client(context, profile).descriptor(original.sourceString("publicationId")), original))
+        MorayMachineInstallation.requireOwner(context, profile, original.getJSONObject("source").getJSONObject("owner"))
+        // A removal/replacement while the HTTPS read was pending cannot retain
+        // the original publication authority merely because the response arrived.
+        require(provider.pin() == association.sourceString("grantId"))
     }
 
     fun profileFromAssociation(association: JSONObject): MorayProfile {
@@ -43,12 +56,7 @@ object MoraySource {
     }
 
     fun reports(context: Context, runtime: TrollmRuntime): MorayRunReports {
-        val prefs = context.getSharedPreferences("moray-source-device", 0)
-        val device = synchronized(this) {
-            prefs.getString("id", null) ?: java.util.UUID.randomUUID().toString().also {
-                check(prefs.edit().putString("id", it).commit())
-            }
-        }
+        val device = MorayMachineInstallation.deviceId(context)
         return MorayRunReports(File(context.filesDir, "trollm/moray-report-refs"),
             prepare = { run -> JSONObject(runtime.prepareSourceReport(run, device)) },
             retainNative = { run, native -> retainRunReport(context, profileFromAssociation(native.getJSONObject("source")),

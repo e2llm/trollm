@@ -15,10 +15,17 @@
 
 mod authentication;
 pub mod bundle;
+pub mod collection;
+pub mod collection_authority;
+mod collection_clock;
+mod collection_installation;
+pub mod collection_members;
+pub mod collection_provider;
 pub mod configuration;
 mod history;
 mod observation;
 pub mod run;
+mod selected_start;
 pub mod setup;
 mod source_report;
 pub mod tar;
@@ -53,6 +60,11 @@ pub enum TrollmError {
     Run(String),
     #[error("model runtime unavailable: {0}")]
     ModelUnavailable(String),
+    #[error("selected start refused: {code}")]
+    SelectedStart {
+        code: String,
+        native_run_id: Option<String>,
+    },
 }
 
 impl TrollmError {
@@ -69,6 +81,7 @@ impl TrollmError {
             | Self::NotFound(value)
             | Self::Run(value)
             | Self::ModelUnavailable(value) => value,
+            Self::SelectedStart { code, .. } => code,
         };
         let message = rendered
             .strip_suffix(&cause.to_string())
@@ -80,6 +93,13 @@ impl TrollmError {
             Self::NotFound(_) => Self::NotFound(message),
             Self::Run(_) => Self::Run(message),
             Self::ModelUnavailable(_) => Self::ModelUnavailable(message),
+            Self::SelectedStart {
+                code,
+                native_run_id,
+            } => Self::SelectedStart {
+                code: code.clone(),
+                native_run_id: native_run_id.clone(),
+            },
         })
     }
 
@@ -99,6 +119,18 @@ impl TrollmError {
 
     fn bundle(error: anyhow::Error) -> Self {
         Self::typed_cause(&error).unwrap_or_else(|| Self::Bundle(format!("{error:#}")))
+    }
+
+    fn selected_start(error: anyhow::Error) -> Self {
+        // anyhow's typed context is available through its own downcast, not
+        // necessarily through the std::error::Error source iterator.
+        let failure = error.downcast_ref::<selected_start::Failure>();
+        Self::SelectedStart {
+            code: failure
+                .map_or("SELECTED_START_UNAVAILABLE", |cause| cause.code)
+                .into(),
+            native_run_id: failure.and_then(|cause| cause.native_run_id.clone()),
+        }
     }
 }
 
@@ -131,6 +163,15 @@ mod error_classification_tests {
 /// Keystore/EncryptedSharedPreferences.
 #[uniffi::export(callback_interface)]
 pub trait TokenProvider: Send + Sync {
+    /// Application-owned authenticated publication read, never a model tool or
+    /// MCP credential lookup. False includes unavailable/unimplemented clients.
+    /// The Android implementation pins the original source grant and compares
+    /// the current server descriptor with the retained installation descriptor.
+    fn source_authority_current(&self, association_json: String) -> bool {
+        let _ = association_json;
+        false
+    }
+
     /// Atomically return the selected manual token only when its stored endpoint
     /// matches server_url. Legacy name-only tokens must require explicit re-save.
     fn bearer_token(&self, server_name: String, server_url: String) -> Option<String>;
@@ -222,6 +263,8 @@ pub enum RunActivityApi {
 pub struct RunStatusInfo {
     pub run_id: String,
     pub phase: RunPhaseApi,
+    /// Actual native worker lifetime, including terminal publication before
+    /// teardown. Terminal phase alone is not an inactive acknowledgement.
     pub worker_active: bool,
     pub activity: Option<RunActivityApi>,
     /// Highest seq observed in events.jsonl (cursor helper for the UI).
@@ -434,6 +477,102 @@ impl TrollmRuntime {
         Ok(run_id)
     }
 
+    /// Explicit app-private installation entry. The caller retains the returned
+    /// genuine run ID and uses poll_status.worker_active for teardown, not an
+    /// outcome ACK or callback return. No public source flag selects this path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_selected_source_run_configured(
+        &self,
+        flow_sha256: String,
+        installation_sha256: String,
+        user_input: String,
+        configuration_json: String,
+        association_json: String,
+        private_installation_key: String,
+        invocation_key: String,
+    ) -> Result<String, TrollmError> {
+        let _start = self.resume_lock.lock().unwrap();
+        let installation = collection_installation::load(
+            &self.base,
+            &private_installation_key,
+            &installation_sha256,
+            &invocation_key,
+        )
+        .map_err(|_| TrollmError::SelectedStart {
+            code: "SELECTED_INSTALLATION_LOAD".into(),
+            native_run_id: None,
+        })?;
+        let association =
+            serde_json::from_str(&association_json).map_err(|_| TrollmError::SelectedStart {
+                code: "SELECTED_SOURCE_JSON".into(),
+                native_run_id: None,
+            })?;
+        let configuration =
+            serde_json::from_str(&configuration_json).map_err(|_| TrollmError::SelectedStart {
+                code: "SELECTED_CONFIGURATION_JSON".into(),
+                native_run_id: None,
+            })?;
+        let spawned = run::spawn_installed_source_run(
+            self.base.clone(),
+            flow_sha256,
+            user_input,
+            self.token_provider.lock().unwrap().clone(),
+            None,
+            Some(configuration),
+            Some((installation_sha256, association)),
+            Some(installation),
+        )
+        .map_err(TrollmError::selected_start)?;
+        let run_id = spawned.run_id.clone();
+        self.runs.insert(run_id.clone(), spawned.handle);
+        Ok(run_id)
+    }
+
+    /// Same-process selected-worker readback. Missing/evicted handles refuse;
+    /// absence is never translated into an inactive-worker acknowledgement.
+    pub fn selected_run_binding(&self, run_id: String) -> Result<String, TrollmError> {
+        history::validate_run_id(&run_id)?;
+        let handle = self
+            .runs
+            .get(&run_id)
+            .ok_or_else(|| TrollmError::Run("selected live worker handle unavailable".into()))?;
+        let (installed_key, installed_invocation) = handle
+            .control
+            .selected_invocation_binding()
+            .map_err(TrollmError::run)?;
+        let directory = self.base.join("runs").join(&run_id);
+        let claim = setup::read_input_evidence(&directory, "selected-invocation.json", 65536)
+            .map_err(TrollmError::run)?;
+        let private =
+            setup::read_input_evidence(&directory, "selected-private-installation.json", 4096)
+                .map_err(TrollmError::run)?;
+        let claim_value: serde_json::Value = serde_json::from_slice(&claim)
+            .map_err(|_| TrollmError::Run("invalid native selected claim".into()))?;
+        let private_value: serde_json::Value = serde_json::from_slice(&private)
+            .map_err(|_| TrollmError::Run("invalid native private binding".into()))?;
+        if claim_value["schema"] != "trollm.selected-run-claim.v1"
+            || private_value["schema"] != "trollm.selected-private-installation-binding.v1"
+            || private_value["privateInstallationSha256"] != installed_key
+            || private_value["invocationKey"] != installed_invocation
+            || claim_value["nativeRunId"] != run_id
+            || private_value["nativeRunId"] != run_id
+            || claim_value["identity"]["invocationKey"] != private_value["invocationKey"]
+        {
+            return Err(TrollmError::Run("selected worker association drift".into()));
+        }
+        let source = self.source_run_association(run_id.clone())?;
+        serde_json::to_string(&serde_json::json!({
+            "schema":"trollm.selected-worker-binding.v1", "nativeRunId":run_id,
+            "workerActive":handle.control.worker_active(),
+            "privateBindingJson":String::from_utf8(private)
+                .map_err(|_| TrollmError::Run("invalid private binding encoding".into()))?,
+            "claimJson":String::from_utf8(claim)
+                .map_err(|_| TrollmError::Run("invalid claim encoding".into()))?,
+            "sourceAssociationJson":source,
+        }))
+        .map_err(|e| TrollmError::Run(format!("selected binding serialization: {e}")))
+    }
+
     pub fn is_source_run(&self, run_id: String) -> Result<bool, TrollmError> {
         history::validate_run_id(&run_id)?;
         let dir = self.base.join("runs").join(run_id);
@@ -448,12 +587,9 @@ impl TrollmRuntime {
     ) -> Result<String, TrollmError> {
         let _guard = self.resume_lock.lock().unwrap();
         let status = self.poll_status(run_id.clone())?;
-        if status.worker_active
-            || !matches!(
-                status.phase,
-                RunPhaseApi::Succeeded | RunPhaseApi::Failed { .. }
-            )
-        {
+        // Passive interrupted evidence is reportable without changing its phase.
+        // The same lock excludes explicit reconstruction while custody is read.
+        if status.worker_active {
             return Err(TrollmError::Run(
                 "retain a report only after the native worker stops".into(),
             ));
@@ -569,8 +705,9 @@ impl TrollmRuntime {
                     // Keep terminal publication excluded until the worker flag and
                     // activity belong to this same phase observation.
                     let phase = handle.status.lock().unwrap();
-                    let active = handle.control.worker_active()
-                        && matches!(*phase, RunPhase::Running | RunPhase::Paused { .. });
+                    // Terminal status can be published before model/gateway
+                    // teardown. Expose the actual worker flag through that gap.
+                    let active = handle.control.worker_active();
                     let activity = if active && matches!(*phase, RunPhase::Running) {
                         handle.control.activity()
                     } else {
@@ -629,7 +766,7 @@ impl TrollmRuntime {
         if let Some(handle) = self.runs.get(&run_id) {
             let phase = handle.status.lock().unwrap();
             if handle.control.worker_active() {
-                let active = matches!(*phase, RunPhase::Running | RunPhase::Paused { .. });
+                let active = true; // The actual worker flag above is still set.
                 let activity = if active && matches!(*phase, RunPhase::Running) {
                     handle.control.activity()
                 } else {

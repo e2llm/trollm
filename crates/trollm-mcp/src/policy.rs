@@ -155,6 +155,9 @@ pub fn validate_task_result_artifact_name(name: &str) -> Result<()> {
                 | "equality-proof"
                 | "prepared-worklist"
                 | "collection-total"
+                | "filtered-records"
+                | "matched-record"
+                | "ordered-records"
         )
     {
         bail!("task resultArtifact must be a safe, non-reserved basename (1..64 ASCII letters/digits, '_' or '-')");

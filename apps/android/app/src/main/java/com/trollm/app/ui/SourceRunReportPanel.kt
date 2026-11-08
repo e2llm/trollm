@@ -9,12 +9,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import org.json.JSONObject
 import uniffi.trollm_uniffi.TrollmRuntime
 
 /** Native observations enter durable custody before any explicit network send. */
 @Composable
-fun SourceRunReportPanel(runtime: TrollmRuntime, runId: String, terminal: Boolean) {
+fun SourceRunReportPanel(runtime: TrollmRuntime, runId: String, eligible: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var source by remember(runId) { mutableStateOf(false) }
@@ -31,12 +32,12 @@ fun SourceRunReportPanel(runtime: TrollmRuntime, runId: String, terminal: Boolea
     if (!source) { problem?.let { Text(it) }; return }
     ContentCard {
         SectionHeading("Moray native report")
-        Text("Reports contain native progress observations. Business completion is not assessed; model prose is not verification.")
+        Text("Reports retain inactive native progress, including interrupted saved states. Reporting does not resume execution. Business completion is not assessed; model prose is not verification.")
         saved?.let {
             Text("Report: ${it.getString("reportId")}")
             Text(if (it.has("receipt")) "Delivery acknowledged as device-reported." else "Retained locally; delivery not confirmed.")
         }
-        Button(enabled = terminal && !busy, onClick = {
+        Button(enabled = eligible && !busy, onClick = {
             busy = true; problem = null
             scope.launch {
                 try { saved = withContext(Dispatchers.IO) { MoraySource.reports(context, runtime).retain(runId) } }
@@ -48,7 +49,7 @@ fun SourceRunReportPanel(runtime: TrollmRuntime, runId: String, terminal: Boolea
         Button(enabled = saved != null && saved?.has("receipt") == false && !busy, onClick = {
             busy = true; problem = null
             scope.launch {
-                try { saved = withContext(Dispatchers.IO) { MoraySource.reports(context, runtime).send(runId) } }
+                try { saved = runInterruptible(Dispatchers.IO) { MoraySource.reports(context, runtime).send(runId) } }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { problem = "Report delivery not confirmed. Retry sends the same retained report without repeating execution." }
                 finally { busy = false }

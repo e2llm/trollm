@@ -70,7 +70,9 @@ pub struct RunControl {
     pub(crate) observation: Arc<Mutex<crate::observation::Projection>>,
     hold_ns: AtomicU64,
     cancel: AtomicBool,
+    cancellation_cause: Mutex<Option<&'static str>>,
     worker_active: AtomicBool,
+    selected_preparer: Option<Arc<crate::collection_provider::InstalledCollectionPreparer>>,
     /// Keep the only available failure diagnostic if its sidecar could not be written.
     volatile_worker_failure: AtomicBool,
     activity: Mutex<Option<RunActivityApi>>,
@@ -87,7 +89,20 @@ struct PauseGate {
     plan_paused: bool,
 }
 
+// Cooperative wake cadence only, not a freshness/authority policy or hard-stop
+// guarantee. Every wake resamples the selected device clock/original cutoff.
+const SELECTED_CONTROL_RECHECK: Duration = Duration::from_millis(100);
+
 impl RunControl {
+    pub(crate) fn selected_invocation_binding(&self) -> Result<(String, String)> {
+        let preparer = self
+            .selected_preparer
+            .as_ref()
+            .context("worker has no installed selected preparer")?;
+        let (key, invocation) = preparer.private_invocation_binding()?;
+        Ok((key.to_owned(), invocation.to_owned()))
+    }
+
     pub fn worker_active(&self) -> bool {
         self.worker_active.load(Ordering::SeqCst)
     }
@@ -118,7 +133,7 @@ impl RunControl {
             .gate
             .lock()
             .map_err(|_| anyhow!("run control lock poisoned"))?;
-        if self.cancel.load(Ordering::SeqCst) {
+        if self.is_cancelled() {
             bail!(CANCEL_MARKER);
         }
         if self.pause_requested.load(Ordering::SeqCst) {
@@ -130,17 +145,22 @@ impl RunControl {
                         .to_string(),
                 };
             }
-            while self.pause_requested.load(Ordering::SeqCst) && !self.cancel.load(Ordering::SeqCst)
-            {
-                guard = self
-                    .gate_cond
-                    .wait(guard)
-                    .map_err(|_| anyhow!("run control lock poisoned"))?;
+            while self.pause_requested.load(Ordering::SeqCst) && !self.is_cancelled() {
+                guard = if self.selected_preparer.is_some() {
+                    self.gate_cond
+                        .wait_timeout(guard, SELECTED_CONTROL_RECHECK)
+                        .map_err(|_| anyhow!("run control lock poisoned"))?
+                        .0
+                } else {
+                    self.gate_cond
+                        .wait(guard)
+                        .map_err(|_| anyhow!("run control lock poisoned"))?
+                };
             }
             self.record_hold(hold_started);
             *self.status.lock().unwrap() = RunPhase::Running;
         }
-        if self.cancel.load(Ordering::SeqCst) {
+        if self.is_cancelled() {
             bail!(CANCEL_MARKER);
         }
         Ok(())
@@ -170,12 +190,31 @@ impl RunControl {
     pub fn request_cancel(&self) {
         let mut guard = self.gate.lock().unwrap();
         guard.plan_paused = false;
-        self.cancel.store(true, Ordering::SeqCst);
+        self.latch_cancel("OPERATOR_CANCELLED");
         self.pause_requested.store(false, Ordering::SeqCst);
         self.gate_cond.notify_all();
     }
 
+    fn latch_cancel(&self, cause: &'static str) {
+        let mut original = self
+            .cancellation_cause
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if original.is_none() {
+            *original = Some(cause);
+        }
+        self.cancel.store(true, Ordering::SeqCst);
+    }
     pub fn is_cancelled(&self) -> bool {
+        if !self.cancel.load(Ordering::SeqCst) {
+            if let Some(cause) = self
+                .selected_preparer
+                .as_ref()
+                .and_then(|preparer| preparer.cancellation_cause())
+            {
+                self.latch_cancel(cause);
+            }
+        }
         self.cancel.load(Ordering::SeqCst)
     }
 
@@ -183,7 +222,7 @@ impl RunControl {
         let mut remaining = duration;
         let mut guard = self.gate.lock().unwrap();
         loop {
-            if self.cancel.load(Ordering::SeqCst) {
+            if self.is_cancelled() {
                 return true;
             }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -195,10 +234,15 @@ impl RunControl {
                     reason: "user-requested (cooperative hold; not a persisted §4.4 pause)"
                         .to_string(),
                 };
-                while self.pause_requested.load(Ordering::SeqCst)
-                    && !self.cancel.load(Ordering::SeqCst)
-                {
-                    guard = self.gate_cond.wait(guard).unwrap();
+                while self.pause_requested.load(Ordering::SeqCst) && !self.is_cancelled() {
+                    guard = if self.selected_preparer.is_some() {
+                        self.gate_cond
+                            .wait_timeout(guard, SELECTED_CONTROL_RECHECK)
+                            .unwrap()
+                            .0
+                    } else {
+                        self.gate_cond.wait(guard).unwrap()
+                    };
                 }
                 self.record_hold(hold_started);
                 *self.status.lock().unwrap() = RunPhase::Running;
@@ -210,6 +254,9 @@ impl RunControl {
             // Bounded chunks avoid `Instant + Duration` overflow for an
             // authored u64::MAX seconds and allow periodic predicate checks.
             let mut chunk = remaining.min(Duration::from_secs(60));
+            if self.selected_preparer.is_some() {
+                chunk = chunk.min(SELECTED_CONTROL_RECHECK);
+            }
             if let Some(deadline) = deadline {
                 chunk = chunk.min(deadline.saturating_duration_since(Instant::now()));
             }
@@ -348,6 +395,9 @@ struct WorkerGuard(Arc<RunControl>);
 
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
+        if let Some(preparer) = &self.0.selected_preparer {
+            preparer.stop_clock_maintenance();
+        }
         self.0.set_activity(None);
         // Readers capture phase then projection in this same order. Release
         // event/report storage even for retained volatile-failure handles; only
@@ -374,11 +424,48 @@ pub struct ControlledGateway {
 }
 
 impl trollm_mcp::ToolGateway for ControlledGateway {
+    fn prepare_call(
+        &mut self,
+        call: &trollm_mcp::ToolCall,
+        context: &trollm_mcp::preparation::PreparationContext,
+    ) -> Result<Option<trollm_mcp::preparation::PreparedCall>> {
+        self.ctl.before_boundary()?;
+        let prepared = self.inner.prepare_call(call, context)?;
+        self.ctl.before_boundary()?;
+        Ok(prepared)
+    }
+    fn after_retained_intent(
+        &mut self,
+        call: &trollm_mcp::ToolCall,
+        context: &trollm_mcp::preparation::PreparationContext,
+        intent_seq: Option<u64>,
+    ) -> Result<()> {
+        self.ctl.before_boundary()?;
+        self.inner
+            .after_retained_intent(call, context, intent_seq)?;
+        self.ctl.before_boundary()
+    }
+    fn after_retained_result(
+        &mut self,
+        call: &trollm_mcp::ToolCall,
+        context: &trollm_mcp::preparation::PreparationContext,
+        result: &trollm_mcp::ToolResult,
+        intent_seq: Option<u64>,
+        result_seq: u64,
+    ) -> Result<()> {
+        // Preserve a returned result before honoring cancellation; this callback
+        // never grants another effect or acknowledges worker inactivity.
+        self.inner
+            .after_retained_result(call, context, result, intent_seq, result_seq)
+    }
     fn set_call_context(&mut self, context: Option<trollm_mcp::CallContext>) {
         self.inner.set_call_context(context);
     }
     fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.inner.set_deadline(deadline);
+    }
+    fn prepared_argument_names(&self, server: &str, tool: &str) -> Vec<String> {
+        self.inner.prepared_argument_names(server, tool)
     }
     fn argument_constraints(&self, server: &str, tool: &str) -> Option<Value> {
         self.inner.argument_constraints(server, tool)
@@ -485,6 +572,7 @@ struct RunPlan {
     registry: TaskRegistry,
     configuration: Option<RunConfiguration>,
     argument_constraints: std::collections::BTreeMap<String, Value>,
+    selected_preparer: Option<Arc<crate::collection_provider::InstalledCollectionPreparer>>,
 }
 
 /// Closed first declared-text execution shape. Other declared sources require
@@ -579,6 +667,7 @@ fn load_run_plan(base: &Path, flow_sha: &str, installation: Option<&str>) -> Res
         registry,
         configuration: None,
         argument_constraints: Default::default(),
+        selected_preparer: None,
     })
 }
 
@@ -732,21 +821,35 @@ fn build_gateway(
     )?;
     let servers = servers
         .into_iter()
-        .map(|server| authentication.bind(server, token_provider.as_ref()))
+        .map(|server| {
+            if let Some(preparer) = &run_plan.selected_preparer {
+                authentication.bind_selected_static(
+                    server,
+                    token_provider.as_ref(),
+                    preparer.installed_key_sha256()?,
+                )
+            } else {
+                authentication.bind(server, token_provider.as_ref())
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     let policies = PolicySet::from_yaml_value(&serde_yaml::to_value(&run_plan.plan.mcp.policies)?)?;
     let sink = proxy_sink(
         run_dir.path().join("proxy.events.jsonl"),
         run_dir.run_id().to_string(),
     )?;
-    McpGateway::new(
+    let gateway = McpGateway::new(
         servers,
         policies,
         base.join("cache").join("mcp"),
         run_dir.artifacts_dir(),
         Some(sink),
     )?
-    .with_argument_constraints(run_plan.argument_constraints.clone())
+    .with_argument_constraints(run_plan.argument_constraints.clone())?;
+    match &run_plan.selected_preparer {
+        Some(preparer) => gateway.with_preparer(vec!["e2llm.act".into()], preparer.clone()),
+        None => Ok(gateway),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1190,35 @@ pub fn spawn_source_run(
     configuration: Option<RunConfiguration>,
     source: Option<(String, Value)>,
 ) -> Result<SpawnedRun> {
+    spawn_installed_source_run(
+        base,
+        flow_sha,
+        user_input,
+        token_provider,
+        resume_run_id,
+        configuration,
+        source,
+        None,
+    )
+}
+
+/// Native embedding entry. The ordinary/public source entry cannot infer or
+/// manufacture this out-of-band installation from a publication support flag.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    not(any(feature = "llama", feature = "stub")),
+    allow(unused_variables, unreachable_code)
+)]
+pub fn spawn_installed_source_run(
+    base: PathBuf,
+    flow_sha: String,
+    user_input: String,
+    token_provider: Option<SharedTokenProvider>,
+    resume_run_id: Option<String>,
+    configuration: Option<RunConfiguration>,
+    source: Option<(String, Value)>,
+    selected_installation: Option<crate::collection_provider::SelectedRunInstallation>,
+) -> Result<SpawnedRun> {
     // Fail synchronously when this build carries no model runtime at all.
     #[cfg(not(any(feature = "llama", feature = "stub")))]
     bail!(TrollmError::ModelUnavailable(
@@ -1147,28 +1279,52 @@ pub fn spawn_source_run(
     let declared = source_association
         .as_ref()
         .is_some_and(|source| source["descriptor"]["source"]["origin"] == "DECLARED");
+    let mut inspected_collection = None;
     if declared {
-        validate_declared_text(&run_plan)?;
-        if source_association.as_ref().unwrap()["descriptor"]["source"]["schemaVersion"]
-            != "moray.declared-native-text.v1"
-        {
-            bail!("declared source schema unsupported");
+        let source = &source_association.as_ref().unwrap()["descriptor"]["source"];
+        match source["schemaVersion"].as_str() {
+            Some(crate::collection_members::SOURCE_SCHEMA) => {
+                let source: crate::collection_members::CollectionSource =
+                    serde_json::from_value(source.clone())?;
+                let id = installation
+                    .as_deref()
+                    .context("collection source requires immutable installation")?;
+                if source.installation_sha256 != id {
+                    bail!("collection source installation association drift");
+                }
+                let servers = &run_plan.plan.mcp.servers;
+                if servers.len() != 1 || servers[0].name != "e2llm" {
+                    bail!("collection source requires exact selected MCP server");
+                }
+                let inspected =
+                    source.inspect(&crate::bundle::revision_dir(&base, id)?, &servers[0].url)?;
+                if inspected.root_plan_pin
+                    != format!("{}@sha256:{}", run_plan.plan.id, run_plan.plan.sha256)
+                {
+                    bail!("collection source selected root drift");
+                }
+                inspected_collection = Some(inspected);
+            }
+            Some("moray.declared-native-text.v1") => validate_declared_text(&run_plan)?,
+            _ => bail!("declared source schema unsupported"),
         }
-        let input = setup
-            .as_ref()
-            .and_then(|setup| setup.input.as_ref())
-            .context("declared text input unavailable")?;
-        let fields = input
-            .fields
-            .as_ref()
-            .context("declared text input unavailable")?;
-        if fields.len() != 1
-            || !fields[0].required
-            || !matches!(fields[0].kind, crate::setup::InputKind::Text)
-            || !input.tool_arguments.is_empty()
-            || !setup.as_ref().unwrap().connections.is_empty()
-        {
-            bail!("declared text requires one required text field and no connections");
+        if inspected_collection.is_none() {
+            let input = setup
+                .as_ref()
+                .and_then(|setup| setup.input.as_ref())
+                .context("declared text input unavailable")?;
+            let fields = input
+                .fields
+                .as_ref()
+                .context("declared text input unavailable")?;
+            if fields.len() != 1
+                || !fields[0].required
+                || !matches!(fields[0].kind, crate::setup::InputKind::Text)
+                || !input.tool_arguments.is_empty()
+                || !setup.as_ref().unwrap().connections.is_empty()
+            {
+                bail!("declared text requires one required text field and no connections");
+            }
         }
     }
     let supplied_admission = source_association
@@ -1233,6 +1389,21 @@ pub fn spawn_source_run(
         }
         None => user_input,
     };
+    if let Some(inspected) = &inspected_collection {
+        if user_input != inspected.selection_input_json {
+            bail!("collection admitted input differs from immutable selected roster");
+        }
+        // Exact input/member agreement is not execution authority, including
+        // empty/complete-prefix cases. No run directory or worker exists yet.
+        if selected_installation.is_none() {
+            bail!("collection installed authority/preparer/worker binding unavailable");
+        }
+        if resume_run_id.is_some() {
+            bail!("selected cold reconstruction requires original actor/custody recovery; unavailable");
+        }
+    } else if selected_installation.is_some() {
+        bail!("selected installation requires inspected collection source");
+    }
     let run_dir = match &resume_run_id {
         Some(id) => {
             let dir = RunDir::new(base.join("runs").join(id));
@@ -1268,43 +1439,16 @@ pub fn spawn_source_run(
     };
     if let Some(configuration) = &mut configuration {
         configuration.validate_and_resolve(&run_plan.plan)?;
+        if inspected_collection.is_some() {
+            crate::collection_provider::SelectedRunInstallation::validate_configuration(
+                configuration,
+                &run_plan.plan.mcp.servers[0].url,
+            )?;
+        }
         configuration.apply_to_plan(&mut run_plan.plan);
     }
 
-    let observation =
-        crate::observation::Projection::seed(&base, &run_id).unwrap_or_else(|error| {
-            // Core still performs its own authoritative reconstruction and publishes
-            // its usual failure. A disposable observer cannot replace that path.
-            let mut view = crate::observation::Projection::default();
-            view.report_error = Some(format!("observation seed failed: {error:#}"));
-            view
-        });
-    let status = Arc::new(Mutex::new(RunPhase::Running));
-    let control = Arc::new(RunControl {
-        hold_ns: AtomicU64::new(0),
-        observation: Arc::new(Mutex::new(observation)),
-        cancel: AtomicBool::new(false),
-        worker_active: AtomicBool::new(true),
-        volatile_worker_failure: AtomicBool::new(false),
-        activity: Mutex::new(Some(RunActivityApi::Starting)),
-        preparation_activity: Mutex::new(HashMap::new()),
-        pause_requested: AtomicBool::new(false),
-        gate: Mutex::new(PauseGate::default()),
-        gate_cond: Condvar::new(),
-        status: status.clone(),
-    });
-    let (tx, rx) = channel();
-
-    let handle = Arc::new(RunHandle {
-        status,
-        control: control.clone(),
-        cmd: Mutex::new(Some(tx)),
-        run_dir: run_dir.path().to_path_buf(),
-    });
-
-    // user_input persistence for cold resume (wrapper sidecar — RunState
-    // does not carry it; documented in OPEN QUESTIONS).
-    if resume_run_id.is_none() {
+    let retain_initial_inputs = || -> Result<()> {
         run_dir.create_dirs()?;
         if let Some(source) = &source_association {
             trollm_core::artifacts::write_atomic(
@@ -1332,6 +1476,78 @@ pub fn spawn_source_run(
         fs::write(run_dir.path().join("user_input.txt"), &user_input)?;
         if let Some(configuration) = &configuration {
             configuration.save(run_dir.path())?;
+        }
+        Ok(())
+    };
+
+    let selected_start = selected_installation.is_some();
+    if let Some(installation) = selected_installation {
+        if configuration.is_none() {
+            bail!("selected source requires explicit effective runtime configuration");
+        }
+        let association = source_association
+            .as_ref()
+            .context("selected source association unavailable")?;
+        // Allocate the genuine native run before binding. Failed installation
+        // can retain an unstarted directory/claim but never starts a worker.
+        crate::selected_start::at(
+            retain_initial_inputs(),
+            "SELECTED_INITIAL_INPUT_CUSTODY",
+            run_dir.path(),
+        )?;
+        run_plan.selected_preparer = Some(
+            installation.bind(
+                &base,
+                run_dir.path(),
+                association,
+                inspected_collection
+                    .as_ref()
+                    .context("selected member inspection unavailable")?,
+                token_provider
+                    .as_ref()
+                    .context("selected app provider unavailable")?
+                    .clone(),
+                &run_plan.plan.mcp.servers[0].url,
+            )?,
+        );
+    }
+
+    let observation =
+        crate::observation::Projection::seed(&base, &run_id).unwrap_or_else(|error| {
+            // Core still performs its own authoritative reconstruction and publishes
+            // its usual failure. A disposable observer cannot replace that path.
+            let mut view = crate::observation::Projection::default();
+            view.report_error = Some(format!("observation seed failed: {error:#}"));
+            view
+        });
+    let status = Arc::new(Mutex::new(RunPhase::Running));
+    let control = Arc::new(RunControl {
+        hold_ns: AtomicU64::new(0),
+        observation: Arc::new(Mutex::new(observation)),
+        cancel: AtomicBool::new(false),
+        cancellation_cause: Mutex::new(None),
+        worker_active: AtomicBool::new(true),
+        selected_preparer: run_plan.selected_preparer.clone(),
+        volatile_worker_failure: AtomicBool::new(false),
+        activity: Mutex::new(Some(RunActivityApi::Starting)),
+        preparation_activity: Mutex::new(HashMap::new()),
+        pause_requested: AtomicBool::new(false),
+        gate: Mutex::new(PauseGate::default()),
+        gate_cond: Condvar::new(),
+        status: status.clone(),
+    });
+    let (tx, rx) = channel();
+
+    let handle = Arc::new(RunHandle {
+        status,
+        control: control.clone(),
+        cmd: Mutex::new(Some(tx)),
+        run_dir: run_dir.path().to_path_buf(),
+    });
+
+    if resume_run_id.is_none() {
+        if !selected_start {
+            retain_initial_inputs()?;
         }
         // Public event polling must recognize the returned run while model
         // initialization is still pending. The executor appends real events
@@ -1363,10 +1579,33 @@ pub fn spawn_source_run(
             if let Err(e) = result {
                 publish_worker_failure(&failure_dir, &thread_control, e);
             }
+            if retain_cancellation_cause(&failure_dir, &thread_control).is_err() {
+                thread_control
+                    .volatile_worker_failure
+                    .store(true, Ordering::SeqCst);
+            }
         })
         .context("spawning run worker")?;
 
     Ok(SpawnedRun { handle, run_id })
+}
+
+fn retain_cancellation_cause(directory: &Path, control: &RunControl) -> Result<()> {
+    if let Some(cause) = *control
+        .cancellation_cause
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+    {
+        let record = json!({"schema":"trollm.native-cancellation-cause.v1-proposal",
+            "nativeRunId":directory.file_name().and_then(|v| v.to_str()),
+            "cause":cause,"meaning":"cooperative-stop-cause-only","effectDisposition":"unknown"});
+        trollm_core::artifacts::write_atomic(
+            directory,
+            "cancellation-cause.json",
+            &serde_json::to_vec(&record)?,
+        )?;
+    }
+    Ok(())
 }
 
 fn publish_worker_failure(failure_dir: &Path, ctl: &RunControl, error: anyhow::Error) {
@@ -1392,6 +1631,9 @@ fn drive(
     resume_existing: bool,
 ) -> Result<()> {
     let (ctl, rx) = controls;
+    if let Some(preparer) = &ctl.selected_preparer {
+        preparer.start_clock_maintenance()?;
+    }
     let configuration = run_plan.configuration.clone();
     // For new legacy native runs, capture the old app-private slots once too.
     #[cfg(feature = "llama")]
@@ -1405,7 +1647,15 @@ fn drive(
     };
     let gateway = build_gateway(&run_plan, &base, &run_dir, token_provider, resume_existing)?;
     let gateway = ControlledGateway {
-        inner: gateway,
+        inner: gateway.with_send_gate({
+            let control = ctl.clone();
+            Arc::new(move || {
+                if control.is_cancelled() {
+                    bail!(CANCEL_MARKER);
+                }
+                Ok(())
+            })
+        }),
         ctl: ctl.clone(),
     };
     let (slots, mut preparations) = build_slots(
@@ -1502,11 +1752,25 @@ fn drive(
             return Ok(());
         }
         // Plan-driven pause: park until resume/cancel.
-        match rx.recv() {
-            Ok(RunCommand::Resume) => {
+        let command = if ctl.selected_preparer.is_some() {
+            loop {
+                if ctl.is_cancelled() {
+                    break Some(RunCommand::Cancel);
+                }
+                match rx.recv_timeout(SELECTED_CONTROL_RECHECK) {
+                    Ok(command) => break Some(command),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+                }
+            }
+        } else {
+            rx.recv().ok()
+        };
+        match command {
+            Some(RunCommand::Resume) => {
                 result = exec.resume();
             }
-            Ok(RunCommand::Cancel) => {
+            Some(RunCommand::Cancel) => {
                 exec.try_cancel()?;
                 preparations.stop_and_join();
                 *ctl.status.lock().unwrap() = RunPhase::Failed {
@@ -1514,7 +1778,7 @@ fn drive(
                 };
                 return Ok(());
             }
-            Err(_) => return Ok(()), // runtime dropped; snapshot is persisted
+            None => return Ok(()), // runtime dropped; snapshot is persisted
         }
     }
 }
@@ -1776,6 +2040,11 @@ impl RunRegistry {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../trollm-mcp/tests/common/mock.rs"]
+mod gateway_fixture;
+
+#[cfg(test)]
 mod regression_tests {
     use super::*;
     use std::sync::mpsc::RecvTimeoutError;
@@ -1918,6 +2187,9 @@ mod regression_tests {
         let base = TrustTestDir::new("live-observation-lifecycle");
         let rt = crate::TrollmRuntime::new(base.0.to_string_lossy().into_owned(), None).unwrap();
         let id = "00000000-0000-0000-0000-000000000079";
+        let run_dir = base.0.join("runs").join(id);
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("events.jsonl"), b"").unwrap();
         let (handle, _) = handle();
         rt.runs.insert(id.into(), handle.clone());
         let status = rt.observe_run(id.into(), 0).unwrap().status;
@@ -1932,7 +2204,11 @@ mod regression_tests {
         handle.control.observation.lock().unwrap().final_report = Some("full report".into());
         *handle.status.lock().unwrap() = RunPhase::Succeeded;
         let status = rt.observe_run(id.into(), 0).unwrap().status;
-        assert!(!status.worker_active && status.activity.is_none());
+        assert!(
+            status.worker_active && status.activity.is_none(),
+            "terminal phase is not an inactive-worker acknowledgement"
+        );
+        assert!(rt.poll_status(id.into()).unwrap().worker_active);
         assert_eq!(status.final_report.as_deref(), Some("full report"));
         *handle.status.lock().unwrap() = RunPhase::Failed {
             reason: "worker failed".into(),
@@ -2204,12 +2480,97 @@ mod regression_tests {
     }
 
     #[test]
+    fn native_completion_fixture_uses_actual_terminal_writer() {
+        let base = TrustTestDir::new("native-completion-writer");
+        let mut yaml: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../flows/examples/minimal-summary.flow.yaml"
+        ))
+        .unwrap();
+        yaml["id"] = serde_yaml::Value::String("native-completion-control".into());
+        yaml["models"] = serde_yaml::from_str("{}").unwrap();
+        yaml["entryStep"] = serde_yaml::Value::String("done".into());
+        yaml["nodes"]
+            .as_mapping_mut()
+            .unwrap()
+            .remove(serde_yaml::Value::String("summarize".into()));
+        let plan = ExecutionPlan::from_yaml_str(&serde_yaml::to_string(&yaml).unwrap()).unwrap();
+        let registry = TaskRegistry::from_yaml_str(
+            "schemaVersion: ledger.task-registry.v1\ntasks: {}",
+            &base.0,
+        )
+        .unwrap();
+        let run_dir = RunDir::under(&base.0);
+        let gateway = McpGateway::new(
+            vec![],
+            Default::default(),
+            base.0.join("cache"),
+            run_dir.artifacts_dir(),
+            None,
+        )
+        .unwrap();
+        let mut executor = Executor::new(
+            plan,
+            registry,
+            "{}".into(),
+            SlotMap::<trollm_models::MockModel>::new(),
+            gateway,
+            run_dir.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            executor.run_until_blocked().unwrap(),
+            RunStatus::Succeeded
+        ));
+        let snapshot = fs::read_to_string(run_dir.snapshot_path()).unwrap();
+        let journal = fs::read_to_string(run_dir.path().join("events.jsonl")).unwrap();
+        let state: Value = serde_json::from_str(&snapshot).unwrap();
+        let last: Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
+        assert_eq!(state["runId"], last["runId"]);
+        assert_eq!(state["eventWatermark"], last["seq"]);
+        assert_eq!(last["type"], "run_ended");
+        let fixture = json!({"provenance":"actual core Executor terminal snapshot and EventLog serialization; DECLARED source control only", "snapshotJson":snapshot, "journalJsonl":journal});
+        let retained: Value = serde_json::from_str(include_str!(
+            "../../../scripts/android/fixtures/native-completion.json"
+        ))
+        .unwrap();
+        let retained_raw: Value =
+            serde_json::from_str(retained["snapshotJson"].as_str().unwrap()).unwrap();
+        let retained_state: trollm_core::RunState =
+            serde_json::from_value(retained_raw.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(retained_state).unwrap(),
+            retained_raw,
+            "retained Node fixture must have the complete actual serializer shape"
+        );
+        let retained_last: Value = serde_json::from_str(
+            retained["journalJsonl"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained_raw["eventWatermark"], retained_last["seq"]);
+        assert_eq!(retained_raw["runId"], retained_last["runId"]);
+        if let Some(path) = std::env::var_os("TROLLM_WRITE_COMPLETION_FIXTURE") {
+            fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
     fn controlled_gateway_forwards_task_result_artifact_attempt_and_dispatch() {
         use trollm_mcp::ToolGateway;
         let base = TrustTestDir::new("task-result-forwarding");
         let artifacts_dir = base.0.join("artifacts");
+        let server = super::gateway_fixture::MockMcpServer::start_with_tools_response(json!({
+            "result": {"tools": [{"name":"read","inputSchema":{"type":"object"}}]}
+        }));
         let inner = McpGateway::new(
-            vec![],
+            vec![trollm_mcp::ServerConfig::for_local_test(
+                "fixture",
+                &server.url,
+            )],
             trollm_mcp::PolicySet::from_yaml_str(
                 "fixture.read: {class: read, resultArtifact: browser-text}",
             )
@@ -2233,19 +2594,28 @@ mod regression_tests {
             false
         );
         fs::remove_file(&meta).unwrap();
-        // No remote server is configured. Re-created metadata proves the storage
-        // option reached the concrete gateway before ordinary call validation.
-        assert!(gateway
+        // A real loopback catalog admits the tool before result storage starts.
+        // Complete task-owned storage proves the wrapper forwarded the override
+        // through actual discovery and dispatch, not only attempt creation.
+        let result = gateway
             .call_with_result_artifact(
                 &trollm_mcp::ToolCall {
                     server: "fixture".into(),
                     tool: "read".into(),
-                    args: json!({})
+                    args: json!({}),
                 },
-                Some("selected-original")
+                Some("selected-original"),
             )
-            .is_err());
-        assert!(meta.is_file());
+            .unwrap();
+        assert_eq!(server.count("call:read"), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&meta).unwrap()).unwrap()["complete"],
+            true
+        );
+        assert!(result
+            .artifacts
+            .contains(&artifacts_dir.join("selected-original.json")));
+        assert!(!artifacts_dir.join("browser-text.json").exists());
     }
 
     #[test]
@@ -2258,6 +2628,7 @@ mod regression_tests {
         let run_plan = |plan_source: &str| RunPlan {
             configuration: None,
             argument_constraints: Default::default(),
+            selected_preparer: None,
             plan: ExecutionPlan::from_yaml_str(plan_source).unwrap(),
             registry: TaskRegistry::from_yaml_str(
                 include_str!("../../../flows/tasks/minimal-summary.tasks.yaml"),
@@ -2295,6 +2666,7 @@ mod regression_tests {
         let run_plan = RunPlan {
             configuration: None,
             argument_constraints: Default::default(),
+            selected_preparer: None,
             plan: ExecutionPlan::from_yaml_str(&source).unwrap(),
             registry: TaskRegistry::from_yaml_str(
                 include_str!("../../../flows/tasks/minimal-summary.tasks.yaml"),
@@ -2410,6 +2782,7 @@ mod regression_tests {
         let run_plan = RunPlan {
             configuration: None,
             argument_constraints: Default::default(),
+            selected_preparer: None,
             plan: ExecutionPlan::from_yaml_str(include_str!(
                 "../../../flows/examples/minimal-summary.flow.yaml"
             ))
@@ -2481,7 +2854,9 @@ mod regression_tests {
             hold_ns: AtomicU64::new(0),
             observation: Arc::new(Mutex::new(crate::observation::Projection::default())),
             cancel: AtomicBool::new(false),
+            cancellation_cause: Mutex::new(None),
             worker_active: AtomicBool::new(true),
+            selected_preparer: None,
             volatile_worker_failure: AtomicBool::new(false),
             activity: Mutex::new(Some(RunActivityApi::Starting)),
             preparation_activity: Mutex::new(HashMap::new()),
@@ -2500,6 +2875,149 @@ mod regression_tests {
             }),
             rx,
         )
+    }
+
+    #[test]
+    fn selected_case_expiry_wakes_cooperative_hold_and_waits_for_real_worker_guard() {
+        let (handle, _) = handle();
+        assert!(handle.control.selected_invocation_binding().is_err());
+        let mut handle = Arc::try_unwrap(handle).ok().unwrap();
+        let (preparer, clock) = crate::collection_provider::controls::actor_for_control();
+        Arc::get_mut(&mut handle.control).unwrap().selected_preparer = Some(preparer);
+        let control = handle.control;
+        let original_binding = control.selected_invocation_binding().unwrap();
+        assert_eq!(original_binding.0, "a".repeat(64));
+        assert!(!original_binding.1.is_empty());
+        control.request_pause();
+        let worker_control = control.clone();
+        let (tx, rx) = channel();
+        let worker = std::thread::spawn(move || {
+            let _worker = WorkerGuard(worker_control.clone());
+            tx.send(worker_control.before_boundary().is_err()).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(*control.status.lock().unwrap(), RunPhase::Paused { .. }) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(control.worker_active());
+        clock.now.store(u64::MAX, Ordering::SeqCst);
+        let cancelled = rx.recv_timeout(Duration::from_secs(2));
+        // On a regression, unblock and join rather than leak a test worker.
+        control.request_cancel();
+        worker.join().unwrap();
+        assert!(cancelled.unwrap());
+        assert_eq!(
+            *control.cancellation_cause.lock().unwrap(),
+            Some("SELECTED_ACTOR_EXPIRED")
+        );
+        assert!(!control.worker_active());
+        assert_eq!(
+            control.selected_invocation_binding().unwrap(),
+            original_binding
+        );
+        clock.now.store(0, Ordering::SeqCst);
+        assert!(
+            control.is_cancelled(),
+            "expired actor must not silently renew"
+        );
+    }
+
+    #[test]
+    fn cancellation_cause_keeps_original_classification_and_unknown_on_disk() {
+        let (handle, _) = handle();
+        handle.control.latch_cancel("SELECTED_CLOCK_STALE");
+        handle.control.request_cancel();
+        let directory = std::env::temp_dir().join(format!(
+            "cancel-cause-{}",
+            trollm_core::RunDir::under(Path::new("unused")).run_id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        retain_cancellation_cause(&directory, &handle.control).unwrap();
+        let value: Value =
+            serde_json::from_slice(&fs::read(directory.join("cancellation-cause.json")).unwrap())
+                .unwrap();
+        assert_eq!(value["cause"], "SELECTED_CLOCK_STALE");
+        assert_eq!(value["effectDisposition"], "unknown");
+        assert_eq!(value["meaning"], "cooperative-stop-cause-only");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn selected_model_wrapper_spans_single_long_and_three_item_waits_with_owned_refresh() {
+        struct Environment(Arc<crate::collection_clock::CalibratedClock>);
+        impl crate::collection_provider::InstalledSelectedEnvironment for Environment {
+            fn start_clock_maintenance(&self) -> Result<()> {
+                self.0.start_maintenance()
+            }
+            fn stop_clock_maintenance(&self) {
+                self.0.stop_maintenance();
+            }
+            fn current_utc_upper_ms(&self) -> Result<u64> {
+                Ok(self.0.sample()?.0)
+            }
+            fn check_current_authority(
+                &self,
+                _: &crate::collection::SelectionRecord,
+                _: &trollm_mcp::preparation::PreparationContext,
+            ) -> Result<()> {
+                bail!("no effect authority in model control")
+            }
+        }
+        struct WaitingModel;
+        impl ModelSlot for WaitingModel {
+            fn generate(&mut self, request: GenerateRequest) -> Result<GenerateResponse> {
+                std::thread::sleep(if request.prompt == "single-long-call" {
+                    Duration::from_millis(1300)
+                } else {
+                    Duration::from_millis(500)
+                });
+                Ok(GenerateResponse {
+                    text: "declared-only".into(),
+                    tokens_in: 1,
+                    tokens_out: 1,
+                    finish: trollm_models::FinishReason::Stop,
+                    capacity: None,
+                    diagnostics: None,
+                })
+            }
+        }
+        let (clock, server, calls, directory) =
+            crate::collection_clock::controls::clock_fixture_responses("refresh", 0);
+        let clock = Arc::new(clock);
+        clock.acquire().unwrap();
+        let (handle, _) = handle();
+        let mut handle = Arc::try_unwrap(handle).ok().unwrap();
+        Arc::get_mut(&mut handle.control).unwrap().selected_preparer =
+            Some(crate::collection_provider::controls::actor_for_environment(
+                Arc::new(Environment(clock)),
+            ));
+        handle
+            .control
+            .selected_preparer
+            .as_ref()
+            .unwrap()
+            .start_clock_maintenance()
+            .unwrap();
+        let worker = WorkerGuard(handle.control.clone());
+        let mut model = ControlledModel {
+            slot: "coder".into(),
+            inner: Box::new(WaitingModel),
+            ctl: handle.control.clone(),
+        };
+        let mut single = request();
+        single.prompt = "single-long-call".into();
+        assert_eq!(model.generate(single).unwrap().text, "declared-only");
+        for _ in 0..3 {
+            assert_eq!(model.generate(request()).unwrap().text, "declared-only");
+        }
+        assert!(!handle.control.is_cancelled());
+        assert!(handle.control.worker_active());
+        drop(worker);
+        assert!(!handle.control.worker_active());
+        assert!(calls.load(Ordering::SeqCst) >= 3);
+        server.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn inactive_handle(phase: RunPhase) -> Arc<RunHandle> {
@@ -3239,14 +3757,24 @@ mod regression_tests {
         assert!(diagnostics.preparation_wait_ms.unwrap() >= 90);
         assert!(requests.lock().unwrap().is_empty());
         let (dropped_tx, dropped_rx) = channel();
+        // Selected completion must not treat foreground terminal phase as an
+        // inactive worker while a native preparation load still owns the run.
+        *handle.status.lock().unwrap() = RunPhase::Failed {
+            reason: "foreground generation timed out".into(),
+        };
+        let worker_control = handle.control.clone();
         let cleanup = std::thread::spawn(move || {
+            let worker = WorkerGuard(worker_control);
             drop(preparations);
+            drop(worker);
             dropped_tx.send(()).unwrap();
         });
         assert!(dropped_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert!(handle.control.worker_active());
         release_tx.send(()).unwrap();
         dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         cleanup.join().unwrap();
+        assert!(!handle.control.worker_active());
         assert!(requests.lock().unwrap().is_empty());
         assert!(handle
             .control
@@ -3917,16 +4445,38 @@ nodes:
         rt.runs.insert(ID.into(), handle.clone());
         let status = rt.poll_status(ID.into()).unwrap();
         assert!(status.worker_active);
+        assert!(rt
+            .prepare_source_report(ID.into(), "controlled-device".into())
+            .unwrap_err()
+            .to_string()
+            .contains("worker stops"));
         assert_eq!(status.activity, Some(RunActivityApi::Starting));
         *handle.status.lock().unwrap() = RunPhase::Paused {
             reason: "hold".into(),
         };
         let status = rt.poll_status(ID.into()).unwrap();
         assert!(status.worker_active);
+        assert!(rt
+            .prepare_source_report(ID.into(), "controlled-device".into())
+            .unwrap_err()
+            .to_string()
+            .contains("worker stops"));
         assert_eq!(status.activity, None);
         handle.resume();
         assert!(matches!(*handle.status.lock().unwrap(), RunPhase::Running));
         *handle.status.lock().unwrap() = RunPhase::Succeeded;
+        let status = rt.poll_status(ID.into()).unwrap();
+        assert!(
+            status.worker_active,
+            "terminal phase is not worker-stop proof"
+        );
+        assert!(rt
+            .prepare_source_report(ID.into(), "controlled-device".into())
+            .unwrap_err()
+            .to_string()
+            .contains("worker stops"));
+        assert_eq!(status.activity, None);
+        drop(WorkerGuard(handle.control.clone()));
         let status = rt.poll_status(ID.into()).unwrap();
         assert!(!status.worker_active);
         assert_eq!(status.activity, None);
