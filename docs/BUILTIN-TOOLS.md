@@ -1,8 +1,17 @@
 # Built-in tools: interface contract v1
 
-Calculator design agreed 2026-10-21; literal extraction added 2026-10-24.
-This contract accompanies `local.calculate`, `local.extract_decimal`, `local.select_unique`
-and `local.assert_equal`.
+This contract covers all nine implemented local tools:
+
+| Tools | Contract |
+| --- | --- |
+| `local.calculate` | [Exact decimal arithmetic and comparison](#calculator-contract) |
+| `local.assert_equal` | [Structural JSON equality](#structural-json-equality-contract) |
+| `local.select_unique` | [Unique original-object selection](#unique-object-selection-contract) |
+| `local.prepare_worklist` | [Prepared input and occurrence identities](#prepared-worklist-contract) |
+| `local.collection_total` | [Complete collection coverage and sum](#complete-collection-total-contract) |
+| `local.extract_decimal` | [Literal decimal extraction](#literal-decimal-extraction-contract) |
+| `local.filter_records`, `local.select_matching`, `local.order_records` | [Structural record operations](#structural-record-operations) |
+
 It defines source capabilities; older APKs do not gain them by
 installing a new flow bundle. Build an APK containing the implementation before
 claiming phone acceptance. The fixture and scripted checks below require no
@@ -116,7 +125,7 @@ response-size telemetry. It requires no connection and has no browser, DOM,
 selector, URL or site semantics. Its schemas are [input](../schemas/local-select-unique.v1.input.schema.json)
 and [output](../schemas/local-select-unique.v1.output.schema.json).
 
-Supply exactly `items` (an array of original objects), `field` (a JSON pointer),
+Supply the required `items` (an array of original objects), `field` (a JSON pointer),
 `equals` (a literal string) and `prefix` (a literal string, possibly empty).
 An item matches precisely when `prefix + item[field]` equals `equals`, with
 case-sensitive string comparison. Missing or non-string field values do not
@@ -142,8 +151,8 @@ byte/depth admission may report their existing bounded diagnostics instead.
 
 Selection admits at most 100,000 objects and 32 MiB of compact serialized items,
 matching the existing complete-query collection allowance. Total argument JSON
-is bounded to 33 MiB and depth 64; only this tool receives that argument-byte
-allowance. Other tools retain their 256 KiB argument bound. `field` is bounded
+is bounded to 33 MiB and depth 64. The three structural record tools below share
+that argument-byte allowance; other tools retain their 256 KiB bound. `field` is bounded
 to 4,096 UTF-8 bytes, and `equals` and `prefix` to 16,384 bytes each. Bounds are
 checked before matching/hash work, and oversized inputs fail without truncation.
 Flows may apply smaller result/artifact budgets; complete sources must fit those
@@ -154,6 +163,14 @@ coder still invokes the ordinary tool-call fence. A later ordinary tool step
 can bind `selection.outputs.data.selected.id` without transcribing an ID from
 model prose. This operation establishes literal uniqueness only, not semantic
 suitability or freshness of the selected object.
+
+`local.select_unique` also accepts optional `matchMode: array-contains` for a
+JSON-pointer field containing an array of strings, such as original affected
+record IDs in an action result. It uses literal equality with the same prefix
+rule and selects exactly one original object. Duplicate matching strings within
+one object still identify one object; two matching objects are ambiguous. Mixed
+type arrays do not match. Omission or `equals` preserves the original scalar
+contract. This is membership checking, not interpretation of adviser text.
 
 ## Prepared worklist contract
 
@@ -406,3 +423,53 @@ adapter must retain all five responsibilities. Production integration should
 remove the temporary implementation; flow tool names, arguments and bindings
 remain unchanged. No Amazon-specific task names, selectors or prose parsing
 belong in that seam.
+
+## Structural record operations
+
+`local.filter_records`, `local.select_matching` and `local.order_records` are
+explicitly granted coder-invoked read tools. Their versioned contracts are:
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `filter_records` | [Input schema](../schemas/local-filter-records.v1.input.schema.json) | [Output schema](../schemas/local-filter-records.v1.output.schema.json) |
+| `select_matching` | [Input schema](../schemas/local-select-matching.v1.input.schema.json) | [Output schema](../schemas/local-select-matching.v1.output.schema.json) |
+| `order_records` | [Input schema](../schemas/local-order-records.v1.input.schema.json) | [Output schema](../schemas/local-order-records.v1.output.schema.json) |
+
+They accept original object arrays (at most 10,000 records, 32 MiB compact JSON,
+64 levels), combined arguments of at most 33 MiB/depth 64, and an offline JSON
+Schema predicate (16 KiB, depth 16), using the
+existing bounded validator. No external schema fetches, expressions, browser
+code or business-specific matching are provided. Bind the predicate from authored
+data; it is a structural filter, not a semantic product/ticket decision.
+
+- `filter_records({items, schema})` returns `matches`, each containing the original
+  `index` and unchanged `selected` object, plus `matchedCount`, `excludedCount`
+  and `sourceSha256` of the complete compact original array. Order is preserved;
+  zero matches is a valid result. Require a nonempty output explicitly when needed.
+- `select_matching({items, schema})` requires exactly one match and returns
+  `index`, `selected`, `sourceSha256`. Absence and duplicates fail without a
+  selected artifact. It does not choose between multiple structurally valid options.
+- `order_records({items, schema, field, prefix, fractionDigits, groupSize})`
+  orders admitted records by a literal decimal string at the JSON pointer `field`.
+  The prefix is exact, the entire remaining string must be a supported decimal,
+  and its fractional digits must equal `fractionDigits` (0..6). Trailing prose,
+  separators and excess digits fail; they are never trimmed or guessed. Sorting
+  is ascending and stable for ties. Each result retains `index`, `selected` and
+  canonical `decimal`. `groups` contains sequential `{index, items}` batches
+  of 1..32 records, alongside the same counts and original source hash.
+
+The ordering field is a JSON pointer of at most 4,096 UTF-8 bytes; its literal
+prefix is at most 256 bytes. Decimals use the calculator's 12-integer-digit and
+six-fractional-digit bounds. An empty admitted set produces empty `matches` or
+`groups`; unique selection instead reports `no-match`. One admitted record with
+a missing field or invalid decimal fails the entire ordering operation. It does
+not silently drop that record or return a partially sorted list.
+
+Ordering establishes numeric order only. A price label might still be a discount,
+unit price or unrelated product; the flow/model must establish its meaning.
+Configure `resultArtifact` on each local policy to retain complete results, and
+project only the prompt view. Schema/invocation errors fail; there is no truncation
+or fallback to an arbitrary first match. Existing gateway grants, argument
+validation, artifacts and response-size telemetry apply.
+
+Validation: `cargo test --locked -p trollm-mcp --test record_tools`.

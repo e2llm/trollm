@@ -181,3 +181,11 @@ completion and mixed or multiple calls. Tool failures and invalid calls follow
 `onError`; they never become semantic abstention. Other completion modes retain
 their contracts. A route named `more_evidence` is only an authored exit: it does
 not obtain evidence unless the graph explicitly performs that work.
+
+## Declared collection exits
+
+`foreach.onItemOutcome` can leave an enumeration after a child reaches a declared
+end outcome and its result has been collected and verified. This is separate
+from a coder's `flow.choose`: models cannot invent child outcomes or graph edges.
+See [frame-owned iteration and recovery](FLOW-RELIABILITY.md) for the contract,
+including explicit Resume continuations and unchanged failure semantics.

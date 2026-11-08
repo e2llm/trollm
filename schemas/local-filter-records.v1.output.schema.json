@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "local.filter_records v1 result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sourceSha256",
+    "matchedCount",
+    "excludedCount",
+    "matches"
+  ],
+  "properties": {
+    "sourceSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "matchedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "excludedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "matches": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "selected"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selected": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

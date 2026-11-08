@@ -101,3 +101,16 @@ Browser checks cover 1440x900 and 2560x1440, independent inspector scrolling,
 keyboard tabs, graph selection, boundary navigation, branches/loops and large
 graphs. Local pod checks used rebuilt browser assets with the unchanged backend;
 they do not identify a newly distributed image or establish model/device acceptance.
+
+## Current runtime contract support, 2026-11-08
+
+Inspection exposes model-owned argument fields, artifact views and task-specific
+result destinations. The graph also displays declared `foreach.onItemOutcome`
+exits. These are authored child-end transitions, not handlers for runtime failures
+or uncertain writes. See [Flow reliability](../FLOW-RELIABILITY.md) and the
+[interface](INTERFACE.md) for the runtime and inspection contracts.
+
+The latest source checks passed the host Rust workspace and 30 frontend tests,
+with type/lint checks. These checks cover the updated source; the earlier browser
+and Podman checks above retain their original scope. They do not certify a newly
+distributed container image or Android build.

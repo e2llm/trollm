@@ -6,6 +6,12 @@ These practices incorporate lessons reported during browser-flow experiments.
 They guide authors; they do not establish end-to-end phone acceptance or add
 new runtime semantics.
 
+Use [the execution model to help write its own prompts](FLOW-PROMPTING.md) when
+developing or improving a task family. Probe the coder and reasoner separately,
+review their wording and test actual choices, including supported work and
+no-answer cases. This is authoring work; it does not add a self-explanation step
+to every run or make generated descriptions authoritative.
+
 ## Split tasks where the evidence or recovery requires it
 
 Split discovery, inspecting a target, changing it and checking the result into
@@ -105,6 +111,19 @@ exact-membership guard can correctly accept an unsuitable record when the prompt
 omits the attribute needed to distinguish it. Test the rendered prompt handoff
 as well as the exact-selection guard.
 
+Keep a bounded path to another candidate when an ordinary suitability check
+rejects one. A one-record collection is not a search strategy if rejecting it
+ends the whole mission. Distinguish a normal candidate rejection from missing
+evidence, failed integrity checks and uncertain mutations. Use only loop and
+return behavior supported by the installed runtime; a field in an experimental
+package does not implement that capability.
+
+Once a specific offer is selected, discover its detail navigation within its
+observed scope. The user's search words may differ from the actual title or
+brand. Repeating the initial search phrase can miss the selected offer or switch
+to another one. Preserve the observed navigation attributes and verify the
+selected target and resulting page before treating it as the same offer.
+
 ### Act, observe, assess
 
 Invoke one operation using prepared intent and current target evidence. Observe
@@ -141,6 +160,28 @@ bindings. Avoid a universal operation prompt that makes a small model sort
 through instructions for unrelated operations. Prompts guide interpretation;
 tools and contracts enforce the mechanical facts they actually check.
 
+Write calmly and explain the immediate purpose. Give valid tool-call shapes for
+authored routes, but do not put invented observation IDs or selectors in examples:
+a small model can copy the example instead of the evidence. Known route names
+are authored constants; a browser ID must come from the current original result.
+Make insufficient evidence an ordinary, supported alternative.
+
+Before decomposing a brittle instruction further, try a reviewed wording change
+with the intended model. For advice-to-tool tasks, ask it to phrase the generic
+job without a particular example to answer. Keep the actual records, advice,
+tool definitions and uncertainty route in the execution prompt. Compare with a
+short human-written control so removing unrelated instructions is not mistaken
+for a benefit of model-proposed wording. The [prompt-writing guide](FLOW-PROMPTING.md)
+provides authoring questions and checks for wrong selections and false refusals.
+
+A task that forwards advice should receive that advice and the allowed choices.
+Do not ask it to recheck originals it cannot see. A task that independently
+assesses an offer does need the decisive original facts. Keep these contracts
+distinct instead of sharing one prompt with incompatible requirements. Retain
+large original collections for bound membership checks; avoid sending the same
+large list through both models when the second task needs only a smaller view
+of the selected evidence and the advice.
+
 Site-specific objectives, prerequisites and prohibitions belong in the flow.
 Captured node IDs, aliases for a failed model answer and rules derived from one
 recording must not become generic runtime behavior. Prefer observed identities
@@ -155,6 +196,10 @@ Do not rebuild page loading, node ranking or browser state inside the executor.
 
 Discover a relevant scope through query/inspection, then request the needed
 page section. Never invent a selector merely to satisfy a result-size cap.
+Read and assess each promising scope before walking to the next enclosing scope.
+Do not inspect the entire maximum-depth chain before trying the first useful
+read. Keep the original traversal observation separate from later read captures,
+and follow the service's session/epoch rules when continuing outward.
 Handle truncation, unmatched scopes, missing facts and ambiguous targets through
 authored alternatives or an unresolved result. A partial observation must not
 silently become a complete list. Follow the tool's continuation contract. Configure nested continuation metadata
@@ -199,6 +244,14 @@ switching from typing to another supported input method. For an uncertain Add or
 similar write, inspect the actual resulting state before deciding whether more
 work is safe. Ambiguous state ends unresolved; do not automatically repeat a
 write, repair unrelated data or claim that cancellation rolled it back.
+
+After a search submission, observe whether the intended search page was reached;
+a successful capture of the old page is not successful search. A URL or page-kind
+check can establish a structural prerequisite, not that the results match the
+request. An ambiguous submission still requires observation before any authored
+retry. Pure textual rejection of a candidate does not itself navigate the browser;
+place restoration on paths that can have changed it, with fresh target checks
+before subsequent actions.
 
 `runtime.lastError.mutationOutcome` distinguishes `none`, `returned` and `unknown`.
 Check its originating node: it remains available after later successful tasks.
@@ -254,3 +307,16 @@ Distinguish enforceable checks from semantic judgments that remain model work.
 Scripted tests do not establish semantic decisions by a small model.
 Record separate phone runs and continuations separately; a collection of
 successful actions is not a successful complete workflow.
+
+## Preserve identity and avoid repeated arithmetic judgments
+
+Keep original intent alongside prepared search wording, and provide the target
+entity whenever asking for an action. A compact view must preserve distinguishing
+attributes. Where numbers distract selection, identify the measurement's record
+first and read its original value through a tool. Use calculator results to guide
+the next control choice without asking the model to redo arithmetic. Exact
+reasoner output strings are not a substitute for coder tool selection.
+
+[Flow reliability](FLOW-RELIABILITY.md) covers these patterns, bounded recovery,
+iteration ownership and portable replays. Compare coherent tasks against
+mechanical microsteps; extra boundaries have model and coordination costs.

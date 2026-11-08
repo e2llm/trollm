@@ -13,6 +13,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64 = "=0.22.1"
 trollm-core = { path = "../trollm-core" }
 trollm-models = { path = "../trollm-models" }
 trollm-mcp = { path = "../trollm-mcp" }
@@ -40,3 +41,6 @@ bindgen-cli = ["uniffi/cli"]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 required-features = ["bindgen-cli"]
+
+[dev-dependencies]
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }

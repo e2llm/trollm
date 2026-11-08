@@ -11,6 +11,7 @@ data class RunPresentation(
     val canCancel: Boolean,
     val observeInBackground: Boolean,
     val keepPolling: Boolean,
+    val canRetainSourceReport: Boolean = false,
     val details: String? = null,
     val label: String = "Run status",
     val tone: StatusTone = StatusTone.NEUTRAL,
@@ -41,6 +42,7 @@ fun presentRun(phase: RunPhaseApi, workerActive: Boolean, activity: RunActivityA
         canCancel = !requesting && workerActive && (running || paused),
         observeInBackground = workerActive && running,
         keepPolling = workerActive && (running || paused),
+        canRetainSourceReport = !workerActive,
         details = failure?.details,
         label = when {
             interrupted -> "Interrupted"

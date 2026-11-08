@@ -6,6 +6,7 @@ use crate::cache::{safe_path_component, write_file_atomic, CacheStore};
 use crate::events::ProxyEvent;
 use crate::local;
 use crate::policy::{split_policy_key, OnMiss, PolicySet, ShapePolicy, ToolClass, ToolPolicy};
+use crate::preparation::{CallPreparer, PreparationContext, PreparedCall, PreparedDispatch};
 use crate::schema::ToolSchema;
 use crate::transport::{
     extract_tool_payload, find_items_field, required_grant_token, McpClient, RootCertificates,
@@ -32,6 +33,7 @@ pub struct ServerConfig {
     grant_bound: bool,
     allow_loopback_http: bool,
     root_certificates: RootCertificates,
+    protocol_version: Option<String>,
 }
 
 impl ServerConfig {
@@ -43,6 +45,7 @@ impl ServerConfig {
             grant_bound: false,
             allow_loopback_http: false,
             root_certificates: RootCertificates::default(),
+            protocol_version: None,
         }
     }
 
@@ -55,6 +58,7 @@ impl ServerConfig {
             grant_bound: false,
             allow_loopback_http: true,
             root_certificates: RootCertificates::default(),
+            protocol_version: None,
         }
     }
 
@@ -77,6 +81,15 @@ impl ServerConfig {
         self.root_certificates = roots;
         self
     }
+
+    pub fn with_protocol_version(mut self, version: &str) -> Result<Self> {
+        anyhow::ensure!(
+            matches!(version, "2025-03-26" | "2025-06-18"),
+            "unsupported MCP protocol version"
+        );
+        self.protocol_version = Some(version.into());
+        Ok(self)
+    }
 }
 
 struct ServerEntry {
@@ -93,6 +106,14 @@ struct CatalogTool {
 type ToolCatalog = BTreeMap<String, CatalogTool>;
 
 impl ServerEntry {
+    fn cached_catalog(&self) -> Result<Arc<ToolCatalog>> {
+        self.catalog
+            .lock()
+            .map_err(|_| anyhow!("catalog lock poisoned"))?
+            .as_ref()
+            .map(Arc::clone)
+            .context("tool catalog requires preparation")
+    }
     fn require_credentials(&self) -> Result<()> {
         if self.config.grant_bound {
             required_grant_token(self.config.token_getter.as_ref())?;
@@ -223,6 +244,11 @@ impl ServerEntry {
                     self.config.root_certificates.clone(),
                 )?
             };
+            let client = if let Some(version) = &self.config.protocol_version {
+                client.with_protocol_version(version)?
+            } else {
+                client
+            };
             *guard = Some(if self.config.grant_bound {
                 client.require_grant_credentials()
             } else {
@@ -242,6 +268,14 @@ struct DispatchTimings {
 }
 
 pub struct McpGateway {
+    required_preparations: HashSet<String>,
+    preparer: Option<Arc<dyn CallPreparer>>,
+    pending_preparation: Option<PreparedDispatch>,
+    used_preparation_contexts: HashSet<String>,
+    active_preparation: Option<PreparedDispatch>,
+    awaiting_retained_result: Option<PreparedDispatch>,
+    preparation_fenced: bool,
+    send_gate: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
     call_context: Option<crate::CallContext>,
     timings: std::cell::Cell<DispatchTimings>,
     dispatch_started: Option<std::time::Instant>,
@@ -346,6 +380,14 @@ impl McpGateway {
             })
             .collect();
         Ok(Self {
+            required_preparations: HashSet::new(),
+            preparer: None,
+            pending_preparation: None,
+            used_preparation_contexts: HashSet::new(),
+            active_preparation: None,
+            awaiting_retained_result: None,
+            preparation_fenced: false,
+            send_gate: None,
             call_context: None,
             timings: std::cell::Cell::new(DispatchTimings::default()),
             dispatch_started: None,
@@ -375,6 +417,84 @@ impl McpGateway {
             sink: sink.map(|s| Arc::new(Mutex::new(s))),
             audit_failed: AtomicBool::new(false),
         })
+    }
+
+    /// Closed native installation input. A selected mutation cannot use a
+    /// direct gateway call to bypass preparation or reuse another call's permit.
+    pub fn with_preparer(
+        mut self,
+        tools: Vec<String>,
+        preparer: Arc<dyn CallPreparer>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !tools.is_empty() && tools.len() <= 16,
+            "invalid preparation tool count"
+        );
+        for tool in tools {
+            let (server, name) = split_policy_key(&tool).context("invalid preparation tool")?;
+            anyhow::ensure!(
+                server != local::SERVER && self.servers.contains_key(server),
+                "preparation server unavailable"
+            );
+            let config = &self.servers[server].config;
+            anyhow::ensure!(
+                config.grant_bound && config.protocol_version.is_some(),
+                "prepared tools require an explicit protocol and native-bound credentials"
+            );
+            let policy = self
+                .policies
+                .get(server, name)
+                .context("preparation requires explicit mutation policy")?;
+            anyhow::ensure!(
+                policy.class == ToolClass::Mutation && policy.passthrough,
+                "prepared tools require mutation passthrough"
+            );
+            anyhow::ensure!(
+                self.required_preparations.insert(tool),
+                "duplicate preparation tool"
+            );
+        }
+        self.preparer = Some(preparer);
+        Ok(self)
+    }
+
+    /// Nonblocking native cancellation/currentness gate, evaluated after the
+    /// client lock and credential callback, immediately before HTTP send.
+    pub fn with_send_gate(mut self, gate: Arc<dyn Fn() -> Result<()> + Send + Sync>) -> Self {
+        self.send_gate = Some(gate);
+        self
+    }
+
+    fn prepared_for(&self, call: &ToolCall) -> Result<Option<&PreparedDispatch>> {
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            return Ok(None);
+        }
+        let p = self
+            .active_preparation
+            .as_ref()
+            .or(self.pending_preparation.as_ref())
+            .context("selected tool requires native preparation")?;
+        anyhow::ensure!(
+            self.call_context.as_ref() == Some(&p.context.call_context),
+            "prepared call context mismatch"
+        );
+        anyhow::ensure!(
+            p.prepared.call.server == call.server
+                && p.prepared.call.tool == call.tool
+                && p.prepared.call.args == call.args,
+            "prepared final arguments mismatch"
+        );
+        Ok(Some(p))
+    }
+
+    fn ensure_catalog_for(&self, server: &str) -> Result<()> {
+        if server != local::SERVER {
+            self.server(server)?.catalog(self.deadline)?;
+        }
+        Ok(())
     }
 
     /// Additional immutable run-local restrictions, checked alongside catalog schemas.
@@ -472,8 +592,44 @@ impl McpGateway {
         self.validate_arguments(server, tool, args)?;
         let timeout = Some(self.bounded_timeout(Duration::from_secs(timeout_s.unwrap_or(30)))?);
         let result = self.measured("transport", || {
-            self.server(server)?
-                .with_client(|client| client.call_tool(tool, args, timeout))
+            self.server(server)?.with_client(|client| {
+                let call = ToolCall {
+                    server: server.into(),
+                    tool: tool.into(),
+                    args: args.clone(),
+                };
+                let check = || {
+                    if let Some(gate) = &self.send_gate {
+                        gate()?;
+                    }
+                    if let Some(p) = self.prepared_for(&call)? {
+                        anyhow::ensure!(self.send_gate.is_some(), "native send gate unavailable");
+                        self.preparer
+                            .as_ref()
+                            .context("preparation provider unavailable")?
+                            .check_before_send(&call, &p.context, &p.prepared.evidence)?;
+                    }
+                    if let Some(gate) = &self.send_gate {
+                        gate()?;
+                    }
+                    self.bounded_timeout(Duration::from_secs(30))?;
+                    Ok(())
+                };
+                if self.prepared_for(&call)?.is_some() {
+                    let acquisition = || {
+                        let p = self
+                            .prepared_for(&call)?
+                            .context("selected preparation lost before acquisition")?;
+                        self.preparer
+                            .as_ref()
+                            .context("preparation provider unavailable")?
+                            .acquire_before_send(&call, &p.context, &p.prepared.evidence)
+                    };
+                    client.call_prepared_tool_acquired(tool, args, timeout, &acquisition, &check)
+                } else {
+                    client.call_tool_checked(tool, args, timeout, Some(&check))
+                }
+            })
         })?;
         let payload = extract_tool_payload(&result);
         self.response_size(
@@ -489,7 +645,7 @@ impl McpGateway {
 
     fn validate_argument_constraints(&self, server: &str, tool: &str, args: &Value) -> Result<()> {
         if let Some(constraint) = self.argument_constraints.get(&format!("{server}.{tool}")) {
-            if server == local::SERVER && tool == local::SELECT_TOOL {
+            if server == local::SERVER && (tool == local::SELECT_TOOL || local::record_tool(tool)) {
                 constraint.validate_with_byte_limit(args, local::SELECT_ARGUMENT_BYTES)?;
             } else {
                 constraint.validate(args)?;
@@ -511,11 +667,15 @@ impl McpGateway {
                 .local_tools
                 .get(tool)
                 .context("unknown builtin local tool")?;
-            if tool == local::SELECT_TOOL {
+            if tool == local::SELECT_TOOL || local::record_tool(tool) {
                 entry
                     .schema
                     .validate_with_byte_limit(args, local::SELECT_ARGUMENT_BYTES)?;
-                local::validate_select_arguments(args)?;
+                if local::record_tool(tool) {
+                    local::validate_record_arguments(tool, args)?;
+                } else {
+                    local::validate_select_arguments(args)?;
+                }
             } else {
                 entry.schema.validate(args)?;
             }
@@ -530,7 +690,7 @@ impl McpGateway {
             }
             return Ok(());
         }
-        let catalog = self.server(server)?.catalog(self.deadline)?;
+        let catalog = self.server(server)?.cached_catalog()?;
         let entry = catalog
             .get(tool)
             .context("unknown tool in MCP server catalog")?;
@@ -539,12 +699,173 @@ impl McpGateway {
 }
 
 impl ToolGateway for McpGateway {
+    fn after_retained_intent(
+        &mut self,
+        call: &ToolCall,
+        context: &PreparationContext,
+        intent_seq: Option<u64>,
+    ) -> Result<()> {
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(!self.preparation_fenced, "selected preparation fenced");
+        self.preparation_fenced = true;
+        let pending = self
+            .pending_preparation
+            .as_ref()
+            .context("selected preparation missing before intent")?;
+        anyhow::ensure!(
+            pending.context.raw()?.sha256 == context.raw()?.sha256
+                && pending.prepared.call.server == call.server
+                && pending.prepared.call.tool == call.tool
+                && pending.prepared.call.args == call.args,
+            "selected native intent association mismatch"
+        );
+        let seq = intent_seq
+            .filter(|seq| *seq > 0)
+            .context("selected native intent unavailable")?;
+        self.preparer
+            .as_ref()
+            .context("selected preparer unavailable")?
+            .after_retained_intent(call, context, &pending.prepared.evidence, seq)?;
+        self.pending_preparation
+            .as_mut()
+            .context("selected preparation disappeared")?
+            .intent_seq = Some(seq);
+        self.preparation_fenced = false;
+        Ok(())
+    }
+    fn after_retained_result(
+        &mut self,
+        call: &ToolCall,
+        context: &PreparationContext,
+        result: &ToolResult,
+        intent_seq: Option<u64>,
+        result_seq: u64,
+    ) -> Result<()> {
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            return Ok(());
+        }
+        // Remain fenced on any mismatch or failed acknowledgement. Reporting
+        // recovery may not create another dispatch permit.
+        self.preparation_fenced = true;
+        let pending = self
+            .awaiting_retained_result
+            .as_ref()
+            .context("selected retained result is not pending")?;
+        anyhow::ensure!(
+            pending.context.raw()?.sha256 == context.raw()?.sha256
+                && pending.prepared.call.server == call.server
+                && pending.prepared.call.tool == call.tool
+                && pending.prepared.call.args == call.args,
+            "retained result association mismatch"
+        );
+        anyhow::ensure!(
+            intent_seq == pending.intent_seq && intent_seq.is_some_and(|seq| seq < result_seq),
+            "selected mutation requires preceding native intent"
+        );
+        self.preparer
+            .as_ref()
+            .context("preparer unavailable")?
+            .after_retained_result(
+                call,
+                context,
+                &pending.prepared.evidence,
+                result,
+                intent_seq,
+                result_seq,
+            )?;
+        self.awaiting_retained_result = None;
+        self.preparation_fenced = false;
+        Ok(())
+    }
+    fn prepare_call(
+        &mut self,
+        call: &ToolCall,
+        context: &PreparationContext,
+    ) -> Result<Option<PreparedCall>> {
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            self.validate_argument_constraints(&call.server, &call.tool, &call.args)?;
+        }
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            self.ensure_catalog_for(&call.server)?;
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            !self.preparation_fenced
+                && self.awaiting_retained_result.is_none()
+                && self.pending_preparation.is_none()
+                && self.active_preparation.is_none(),
+            "preparation already pending"
+        );
+        anyhow::ensure!(
+            self.call_context.as_ref() == Some(&context.call_context),
+            "native context not selected"
+        );
+        anyhow::ensure!(
+            self.used_preparation_contexts.len() < 4096,
+            "preparation context capacity exceeded"
+        );
+        anyhow::ensure!(
+            self.used_preparation_contexts.insert(context.raw()?.sha256),
+            "native preparation context already used"
+        );
+        self.preparation_fenced = true;
+        self.ensure_catalog_for(&call.server)?;
+        let prepared = self
+            .preparer
+            .as_ref()
+            .context("preparation provider unavailable")?
+            .prepare(call, context, self.deadline)?;
+        prepared.validate(call, context)?;
+        self.bounded_timeout(Duration::from_secs(30))?;
+        if let Some(gate) = &self.send_gate {
+            gate()?;
+        }
+        self.pending_preparation = Some(PreparedDispatch {
+            intent_seq: None,
+            context: context.clone(),
+            prepared: prepared.clone(),
+        });
+        self.preparation_fenced = false;
+        Ok(Some(prepared))
+    }
     fn set_call_context(&mut self, context: Option<crate::CallContext>) {
+        if context != self.call_context {
+            self.preparation_fenced |= self.pending_preparation.is_some()
+                || self.active_preparation.is_some()
+                || self.awaiting_retained_result.is_some();
+            self.pending_preparation = None;
+        }
         self.call_context = context;
     }
 
     fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
         self.deadline = deadline;
+    }
+    fn prepared_argument_names(&self, server: &str, tool: &str) -> Vec<String> {
+        if !self
+            .required_preparations
+            .contains(&crate::policy::policy_key(server, tool))
+        {
+            return Vec::new();
+        }
+        self.preparer
+            .as_ref()
+            .map(|p| p.prepared_argument_names(server, tool))
+            .unwrap_or_default()
     }
     fn argument_constraints(&self, server: &str, tool: &str) -> Option<Value> {
         self.argument_constraint_schemas
@@ -609,6 +930,7 @@ impl ToolGateway for McpGateway {
 
     fn validate_call(&self, call: &ToolCall) -> Result<()> {
         self.require_audit()?;
+        self.prepared_for(call)?;
         self.validate_argument_constraints(&call.server, &call.tool, &call.args)?;
         // Pagination exposes a positive page selector to the caller; actual
         // server cursors are supplied by responses and checked before every I/O.
@@ -663,50 +985,84 @@ impl ToolGateway for McpGateway {
         call: &ToolCall,
         name: Option<&str>,
     ) -> Result<ToolResult> {
-        if let Some(name) = name {
-            self.begin_result_artifact_attempt(&call.server, &call.tool, name)?;
+        if self
+            .required_preparations
+            .contains(&crate::policy::policy_key(&call.server, &call.tool))
+        {
+            anyhow::ensure!(
+                !self.preparation_fenced
+                    && self.awaiting_retained_result.is_none()
+                    && self.active_preparation.is_none(),
+                "prepared dispatch active, awaiting acknowledgement or fenced"
+            );
+            self.active_preparation = Some(
+                self.pending_preparation
+                    .take()
+                    .context("selected tool requires native preparation")?,
+            );
         }
-        // Invalid calls never cross the dispatch/audit boundary.
-        self.validate_call(call)?;
-        self.timings.set(DispatchTimings::default());
-        self.dispatch_started = Some(std::time::Instant::now());
-        self.dispatch_id += 1;
-        self.dispatch_args_hash = CacheStore::hash_args(&call.args, None, None);
-        let result = self.dispatch(call, name);
-        // Preserve the original audit I/O failure; the sink is already closed.
-        if self.audit_failed.load(Ordering::SeqCst) {
-            return result;
-        }
-        match &result {
-            Ok(result) => self.response_size(
-                &call.server,
-                &call.tool,
-                "gateway_result",
-                provenance_source(result.provenance),
-                Some(crate::json_size::compact_bytes(&result.content_for_model)?),
-                None,
-            )?,
-            Err(error) => {
-                if let Some(received) =
-                    error.downcast_ref::<crate::transport::ReceivedResponseError>()
-                {
+        let result = (|| {
+            if let Some(prepared) = self.prepared_for(call)? {
+                anyhow::ensure!(
+                    prepared.intent_seq.is_some(),
+                    "selected effect requires verified native intent before dispatch"
+                );
+            }
+            self.validate_argument_constraints(&call.server, &call.tool, &call.args)?;
+            self.ensure_catalog_for(&call.server)?;
+            if let Some(name) = name {
+                self.begin_result_artifact_attempt(&call.server, &call.tool, name)?;
+            }
+            // Invalid calls never cross the dispatch/audit boundary.
+            self.validate_call(call)?;
+            self.timings.set(DispatchTimings::default());
+            self.dispatch_started = Some(std::time::Instant::now());
+            self.dispatch_id += 1;
+            self.dispatch_args_hash = CacheStore::hash_args(&call.args, None, None);
+            let result = self.dispatch(call, name);
+            // Preserve the original audit I/O failure; the sink is already closed.
+            if self.audit_failed.load(Ordering::SeqCst) {
+                return result;
+            }
+            match &result {
+                Ok(result) => self.response_size(
+                    &call.server,
+                    &call.tool,
+                    "gateway_result",
+                    provenance_source(result.provenance),
+                    Some(crate::json_size::compact_bytes(&result.content_for_model)?),
+                    None,
+                )?,
+                Err(error) => {
+                    if let Some(received) =
+                        error.downcast_ref::<crate::transport::ReceivedResponseError>()
+                    {
+                        self.response_size(
+                            &call.server,
+                            &call.tool,
+                            "raw_error_payload",
+                            &format!("live:{}", received.origin),
+                            Some(received.compact_json_utf8_bytes),
+                            None,
+                        )?;
+                    }
                     self.response_size(
                         &call.server,
                         &call.tool,
-                        "raw_error_payload",
-                        &format!("live:{}", received.origin),
-                        Some(received.compact_json_utf8_bytes),
+                        "failed_result",
+                        "unknown",
+                        None,
                         None,
                     )?;
                 }
-                self.response_size(
-                    &call.server,
-                    &call.tool,
-                    "failed_result",
-                    "unknown",
-                    None,
-                    None,
-                )?;
+            }
+            result
+        })();
+        if let Some(active) = self.active_preparation.take() {
+            if result.is_ok() {
+                self.awaiting_retained_result = Some(active);
+            } else {
+                self.preparation_fenced = true;
             }
         }
         result

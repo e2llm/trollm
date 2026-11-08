@@ -163,7 +163,7 @@ fn multiple_additional_anchors_work_through_both_gateway_constructors() {
         )
         .unwrap();
         let tools = gateway.list_tools().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), trollm_mcp::local::descriptors().len());
         assert!(tools.iter().all(|tool| tool.server == "local"));
         assert!(tools.iter().any(|tool| tool.name == "calculate"));
         handle.join().unwrap();

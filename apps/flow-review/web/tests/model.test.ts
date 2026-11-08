@@ -16,6 +16,16 @@ import {
 import { fixture } from "./fixture";
 
 describe("inspection view logic", () => {
+  it("shows declared child-outcome exits as graph edges", () => {
+    const plan = fixture().plans[0];
+    plan.nodes.each = {
+      kind: "foreach",
+      onItemOutcome: { accepted: "done", pending: { status: "paused", resumeAt: "start" } },
+    };
+    const edges = edgesOf(plan);
+    expect(edges.some((edge) => edge.source === "each" && edge.target === "done" && edge.label === "child outcome: accepted")).toBe(true);
+    expect(edges.some((edge) => edge.source === "each" && edge.label.startsWith("child outcome: pending"))).toBe(true);
+  });
   it("reports effective default failure for task nodes with absent or null policies only", () => {
     const doc = fixture(),
       plan = doc.plans[0];

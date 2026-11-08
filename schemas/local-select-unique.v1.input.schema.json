@@ -5,6 +5,7 @@
   "additionalProperties": false,
   "required": ["items", "field", "equals", "prefix"],
   "properties": {
+    "matchMode": {"type": "string", "enum": ["equals", "array-contains"], "description": "Defaults to exact string equality. array-contains selects an object whose field is an array of strings containing the exact literal; uniqueness is still by original object."},
     "items": {"type": "array", "maxItems": 100000, "items": {"type": "object"}, "description": "Complete original objects; at most 32 MiB of compact serialized JSON, no truncation."},
     "field": {"type": "string", "maxLength": 4096, "pattern": "^(?:/(?:[^~]|~[01])*)?$", "description": "JSON pointer, at most 4096 UTF-8 bytes; no URI-fragment decoding."},
     "equals": {"type": "string", "maxLength": 16384, "description": "Literal comparison value, at most 16384 UTF-8 bytes."},

@@ -333,6 +333,9 @@ pub fn tool_call_grammar_with_mode(
     // Bound syntax whitespace so indentation cannot exhaust a call's budget.
     // String contents, ordinary prose and post-generation JSON parsing retain
     // their own rules. Adjacent ws sites can combine but remain finite.
+    // Use a range rather than four independent optional terms: llama.cpp's
+    // grammar matcher otherwise explores redundant ways to consume whitespace.
+    // https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md#efficient-optional-repetitions
     g.push_str(
         "object ::= \"{\" ws (member (\",\" ws member)*)? \"}\" ws\n\
          member ::= string \":\" ws value\n\
@@ -343,7 +346,7 @@ pub fn tool_call_grammar_with_mode(
          escape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\n\
          hex ::= [0-9a-fA-F]\n\
          number ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)? ws\n\
-         ws ::= [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]?\n",
+         ws ::= [ \\t\\n\\r]{0,4}\n",
     );
 
     // Prose alternative (§14 item 5): any text that never completes the
@@ -629,7 +632,7 @@ mod tests {
                 .lines()
                 .find(|line| line.starts_with("ws ::="))
                 .unwrap();
-            assert_eq!(rule, r"ws ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?");
+            assert_eq!(rule, r"ws ::= [ \t\n\r]{0,4}");
             assert!(grammar.contains("prose ::= prose-item+"));
         }
     }

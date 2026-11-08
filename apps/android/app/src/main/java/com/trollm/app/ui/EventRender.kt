@@ -32,6 +32,8 @@ internal fun renderEventJson(eventType: String, seq: ULong, json: String): Strin
         "model_call" -> "model[${str("slot") ?: "?"}] " +
             "${measured("tokensIn")}→${measured("tokensOut")} tokens, ${measured("ms")} ms" +
             (finishReason?.let { "; finish $it" } ?: "")
+        "tool_call_prepared" -> "Tool arguments prepared"
+        "tool_call_outcome_acknowledged" -> "Outcome report acknowledged"
         "tool_call_intent" -> "tool intent: ${str("server")}.${str("tool")}"
         "tool_call_result" -> "tool result: ${str("server")}.${str("tool")}" +
             (str("provenance")?.let { " ($it)" } ?: "")

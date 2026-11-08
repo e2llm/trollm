@@ -23,6 +23,11 @@ body:
     validations:
       required: true
   - type: textarea
+    id: models
+    attributes:
+      label: Model settings, if relevant
+      description: For inference or prompt failures, give the model name/revision and quantization, context/generation limits, thinking setting and model role. Say if these are unknown. Do not attach weights or private inputs.
+  - type: textarea
     id: reproduce
     attributes:
       label: Steps to reproduce

@@ -13,7 +13,7 @@ import org.json.JSONObject
  * Tokens and their canonical endpoint bindings are stored together per MCP server
  * name. Values never touch logs or the event log.
  */
-class SecretsStore(context: Context, source: Boolean = false) {
+class SecretsStore(context: Context, private val source: Boolean = false) {
     private val masterKey = MasterKey.Builder(context)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
         .build()
@@ -39,6 +39,27 @@ class SecretsStore(context: Context, source: Boolean = false) {
     val oauthGrants = OAuthGrants(::readConnection, ::writeConnection, oauthLock)
 
     fun selectedAuthMode(server: String): SelectedAuthMode = oauthGrants.mode(server)
+
+    /** Provisioned source credentials never use MCP/manual bearer or AppAuth state. */
+    private val machines = MorayMachineGrants({
+        require(source)
+        MorayMachineState(prefs.getString("machine-selection-revision", null),
+            prefs.getString("machine-selected", null)?.let { JSONObject(it) })
+    }, { state ->
+        require(source)
+        val editor = prefs.edit()
+        if (state.value == null) editor.remove("machine-selected")
+        else editor.putString("machine-selected", state.value.toString())
+        editor.putString("machine-selection-revision", state.revision)
+        check(editor.commit()) { "Could not update source machine storage" }
+    }, oauthLock)
+
+    fun machineState(profileKey: String): MorayMachineState = machines.state(profileKey)
+    fun machineRevision(): String? = machines.revision()
+    fun machine(profileKey: String): JSONObject? = machineState(profileKey).value
+    fun removeMachine(profileKey: String) = machines.remove(profileKey)
+    fun replaceMachine(profileKey: String, expectedRevision: String?, value: JSONObject) =
+        machines.replace(profileKey, expectedRevision, value)
 
     private fun readConnection(server: String): StoredConnection {
         val mode = prefs.getString("auth-mode.$server", null)?.let {

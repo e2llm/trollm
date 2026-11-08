@@ -60,7 +60,10 @@ fn builtin_discovery_and_dispatch_need_no_remote_configuration() {
             "calculate",
             "collection_total",
             "extract_decimal",
+            "filter_records",
+            "order_records",
             "prepare_worklist",
+            "select_matching",
             "select_unique",
         ]
     );

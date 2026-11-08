@@ -124,6 +124,33 @@ fn malformed_arguments_and_invalid_json_pointers_fail_closed() {
 }
 
 #[test]
+fn array_membership_keeps_original_object_identity_and_refuses_ambiguity() {
+    let original = json!({"ids":["other","target","target"],"changes":[{"field":"value","to":"original query"}]});
+    let input = json!({"items":[{"ids":["different"]},original],"field":"/ids","equals":"#target","prefix":"#","matchMode":"array-contains"});
+    assert_eq!(local::select_unique(&input).unwrap()["selected"], original);
+    for (items, expected) in [
+        (json!([original, original]), "ambiguous"),
+        (json!([{"ids":["target",17]}]), "no-match"),
+        (json!([{"ids":"target"}]), "no-match"),
+    ] {
+        let mut value = input.clone();
+        value["items"] = items;
+        assert_eq!(
+            local::select_unique(&value).unwrap_err().to_string(),
+            format!("local.select_unique: {expected}")
+        );
+    }
+    for mode in [json!(null), json!(true), json!("substring")] {
+        let mut value = input.clone();
+        value["matchMode"] = mode;
+        assert!(local::select_unique(&value).is_err());
+    }
+    let mut scalar = args(json!([{"attributes":{"id":"scope"}}]));
+    scalar["matchMode"] = json!("equals");
+    assert!(local::select_unique(&scalar).is_ok());
+}
+
+#[test]
 fn complete_arrays_are_never_truncated_and_oversized_sources_are_rejected() {
     let large = args(
         json!([{"attributes":{"id":"other"},"body":"x".repeat(300_000)}, {"id":"last","attributes":{"id":"scope"}}]),

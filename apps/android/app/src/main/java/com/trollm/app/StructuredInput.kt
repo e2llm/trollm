@@ -89,6 +89,19 @@ object StructuredInput {
         }
     }
 
+    /** Independently normalize a private launcher's ORIGINAL structured bytes.
+     * The original string still goes to native admission and execution unchanged.
+     */
+    fun normalizeOriginal(fields: List<StructuredInputField>, original: String): String {
+        require(original.toByteArray(Charsets.UTF_8).size <= MAX_JSON_BYTES)
+        require(fields.isNotEmpty())
+        validateFields(fields)
+        val values = JSONObject(original)
+        require(values.keys().asSequence().toSet() == fields.map { it.key }.toSet())
+        val strings = fields.associate { field -> field.key to values.sourceString(field.key) }
+        return serialize(fields, strings, "")
+    }
+
     private fun validUrl(value: String): Boolean = try {
         val uri = URI(value)
         uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank() &&

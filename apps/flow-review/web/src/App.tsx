@@ -833,6 +833,7 @@ export function App() {
                               onError: node.onError,
                               onEmpty: node.onEmpty,
                               onComplete: node.onComplete,
+                              onItemOutcome: node.onItemOutcome,
                               onLimit: node.onLimit,
                             }}
                           />

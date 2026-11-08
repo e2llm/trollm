@@ -16,9 +16,39 @@ pub type TokenGetter = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 /// Operator-provisioned trust anchors, added alongside the built-in Mozilla roots.
 /// Empty/default leaves the existing trust policy unchanged.
 #[derive(Clone, Default)]
-pub struct RootCertificates(Vec<reqwest::Certificate>);
+pub struct RootCertificates(
+    Vec<reqwest::Certificate>,
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+);
 
 impl RootCertificates {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(crate) fn selected_tls_config(&self) -> Result<rustls::ClientConfig> {
+        let mut store =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for certificate in &self.1 {
+            store.add(certificate.clone())?;
+        }
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(store)
+        .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.enable_early_data = false;
+        Ok(config)
+    }
+
+    pub(crate) fn blocking_client(&self, timeout: Duration) -> Result<reqwest::blocking::Client> {
+        let mut builder = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout);
+        for certificate in &self.0 {
+            builder = builder.add_root_certificate(certificate.clone());
+        }
+        builder.build().context("building trusted HTTP client")
+    }
     pub fn from_pem(pem: &[u8]) -> Result<Self> {
         let certificates = reqwest::Certificate::from_pem_bundle(pem)
             .context("invalid MCP root certificate PEM")?;
@@ -33,7 +63,10 @@ impl RootCertificates {
             validator = validator.add_root_certificate(certificate.clone());
         }
         validator.build().context("invalid MCP root certificates")?;
-        Ok(Self(certificates))
+        use rustls::pki_types::pem::PemObject;
+        let der = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self(certificates, der))
     }
 }
 
@@ -41,11 +74,14 @@ impl RootCertificates {
 pub struct McpClient {
     url: String,
     http: reqwest::blocking::Client,
+    roots: RootCertificates,
     token_getter: Option<TokenGetter>,
     require_token: bool,
     session_id: Option<String>,
     next_id: u64,
     initialized: bool,
+    protocol_version: String,
+    strict_protocol: bool,
 }
 
 impl McpClient {
@@ -106,19 +142,32 @@ impl McpClient {
         let mut builder = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30));
-        for certificate in roots.0 {
-            builder = builder.add_root_certificate(certificate);
+        for certificate in &roots.0 {
+            builder = builder.add_root_certificate(certificate.clone());
         }
         let http = builder.build().context("building HTTP client")?;
         Ok(Self {
             url,
             http,
+            roots,
             token_getter,
             require_token: false,
             session_id: None,
             next_id: 1,
             initialized: false,
+            protocol_version: "2025-03-26".into(),
+            strict_protocol: false,
         })
+    }
+
+    pub fn with_protocol_version(mut self, version: &str) -> Result<Self> {
+        anyhow::ensure!(
+            matches!(version, "2025-03-26" | "2025-06-18"),
+            "unsupported MCP protocol version"
+        );
+        self.protocol_version = version.into();
+        self.strict_protocol = true;
+        Ok(self)
     }
 
     pub(crate) fn require_grant_credentials(mut self) -> Self {
@@ -135,13 +184,19 @@ impl McpClient {
         let result = self.rpc_raw(
             "initialize",
             json!({
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": self.protocol_version,
                 "capabilities": {},
                 "clientInfo": { "name": "trollm-mcp", "version": env!("CARGO_PKG_VERSION") }
             }),
             timeout,
         )?;
-        let _ = result;
+        if self.strict_protocol {
+            anyhow::ensure!(
+                result.get("protocolVersion").and_then(Value::as_str)
+                    == Some(&self.protocol_version),
+                "MCP negotiated protocol mismatch"
+            );
+        }
         self.notify(
             "notifications/initialized",
             json!({}),
@@ -175,12 +230,61 @@ impl McpClient {
         args: &Value,
         timeout: Option<Duration>,
     ) -> Result<Value> {
+        self.call_tool_checked(tool, args, timeout, None)
+    }
+
+    /// Generic pre-method check. Prepared native effects use the separate
+    /// connection-ready first-write path below.
+    pub fn call_tool_checked(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        timeout: Option<Duration>,
+        before_send: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<Value> {
+        self.call_tool_using(tool, args, timeout, before_send, false, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn call_prepared_tool_checked(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        timeout: Option<Duration>,
+        before_write: &dyn Fn() -> Result<()>,
+    ) -> Result<Value> {
+        self.call_prepared_tool_acquired(tool, args, timeout, &|| Ok(()), before_write)
+    }
+
+    pub(crate) fn call_prepared_tool_acquired(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        timeout: Option<Duration>,
+        acquire: &dyn Fn() -> Result<()>,
+        before_write: &dyn Fn() -> Result<()>,
+    ) -> Result<Value> {
+        self.call_tool_using(tool, args, timeout, Some(before_write), true, Some(acquire))
+    }
+
+    fn call_tool_using(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        timeout: Option<Duration>,
+        before_send: Option<&dyn Fn() -> Result<()>>,
+        first_write: bool,
+        acquire: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<Value> {
         let started = Instant::now();
         self.ensure_session(timeout)?;
-        let mut result = self.rpc_raw(
+        let mut result = self.rpc_raw_using(
             "tools/call",
             json!({ "name": tool, "arguments": args }),
             remaining_timeout(timeout, started)?,
+            before_send,
+            first_write,
+            acquire,
         )?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let tool_context: String = tool
@@ -215,6 +319,9 @@ impl McpClient {
         if let Some(session) = &self.session_id {
             req = req.header(MCP_SESSION_HEADER, session);
         }
+        if self.strict_protocol {
+            req = req.header("MCP-Protocol-Version", &self.protocol_version);
+        }
         req = self.with_auth(req)?;
         if let Some(timeout) =
             remaining_timeout(Some(timeout.unwrap_or(Duration::from_secs(30))), started)?
@@ -232,6 +339,28 @@ impl McpClient {
     }
 
     fn rpc_raw(&mut self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value> {
+        self.rpc_raw_checked(method, params, timeout, None)
+    }
+
+    fn rpc_raw_checked(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        before_send: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<Value> {
+        self.rpc_raw_using(method, params, timeout, before_send, false, None)
+    }
+
+    fn rpc_raw_using(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        before_send: Option<&dyn Fn() -> Result<()>>,
+        first_write: bool,
+        acquire: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<Value> {
         let started = Instant::now();
         let id = self.next_id;
         self.next_id += 1;
@@ -245,48 +374,109 @@ impl McpClient {
         if let Some(session) = &self.session_id {
             req = req.header(MCP_SESSION_HEADER, session.clone());
         }
+        if self.strict_protocol {
+            req = req.header("MCP-Protocol-Version", &self.protocol_version);
+        }
         req = self.with_auth(req)?;
+        if !first_write {
+            if let Some(check) = before_send {
+                check()?;
+            }
+        }
         if let Some(timeout) =
             remaining_timeout(Some(timeout.unwrap_or(Duration::from_secs(30))), started)?
         {
             req = req.timeout(timeout);
         }
-        let resp = req
-            .send()
-            .map_err(|error| post_send_error(error, &format!("MCP {method} POST failed")))?;
-        let status = resp.status();
-        if !status.is_success() {
+        let (status, headers, bytes) = if first_write {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                let request = req.build().map_err(|error| {
+                    post_send_error(error, "MCP selected request building failed")
+                })?;
+                let authorization = request
+                    .headers()
+                    .get(reqwest::header::AUTHORIZATION)
+                    .cloned();
+                let acquisition = || {
+                    // A refresh or credential-store wait may occur here. Require
+                    // the exact credential already bound to this request, then
+                    // run native authority/clock/cancel checks after that wait.
+                    let current =
+                        self.with_auth(self.http.post(&self.url))?
+                            .build()
+                            .map_err(|error| {
+                                post_send_error(
+                                    error,
+                                    "MCP selected credential request building failed",
+                                )
+                            })?;
+                    anyhow::ensure!(
+                        current.headers().get(reqwest::header::AUTHORIZATION)
+                            == authorization.as_ref(),
+                        "selected credential changed before first write"
+                    );
+                    if let Some(acquire) = acquire {
+                        acquire()?;
+                    }
+                    Ok(())
+                };
+                let response = crate::checked_write::send_acquired(
+                    request,
+                    &self.roots,
+                    remaining_timeout(Some(timeout.unwrap_or(Duration::from_secs(30))), started)?
+                        .context("selected transport deadline unavailable")?,
+                    &acquisition,
+                    before_send.context("selected final write check unavailable")?,
+                )?;
+                (response.status, response.headers, response.bytes)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            {
+                bail!("selected first-write transport unsupported on this platform");
+            }
+        } else {
+            let resp = req
+                .send()
+                .map_err(|error| post_send_error(error, &format!("MCP {method} POST failed")))?;
+            let status = resp.status().as_u16();
+            let headers = resp.headers().clone();
+            const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+            let mut bytes = Vec::new();
+            resp.take(MAX_RESPONSE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .context("reading MCP response body")?;
+            ensure_response_size(&bytes)?;
+            (status, headers, bytes)
+        };
+        if !(200..300).contains(&status) {
             bail!("MCP {method} failed: HTTP {status}");
         }
         if method == "initialize" {
-            if let Some(session) = resp
-                .headers()
+            if let Some(session) = headers
                 .get(MCP_SESSION_HEADER)
                 .and_then(|v| v.to_str().ok())
             {
                 self.session_id = Some(session.to_string());
             }
         }
-        let content_type = resp
-            .headers()
+        let content_type = headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
-        let mut bytes = Vec::new();
-        resp.take(MAX_RESPONSE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .context("reading MCP response body")?;
-        if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-            bail!("MCP response exceeds byte limit");
-        }
+            .unwrap_or("");
         let body = String::from_utf8(bytes).context("MCP response is not UTF-8")?;
         let message = if content_type.contains("text/event-stream") {
             parse_sse_response(&body, id)?
         } else {
             serde_json::from_str(&body).context("parsing MCP JSON response")?
         };
+        if self.strict_protocol {
+            anyhow::ensure!(
+                message.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+                    && message.get("id").and_then(Value::as_u64) == Some(id),
+                "MCP response identity mismatch"
+            );
+        }
         if let Some(error) = message.get("error") {
             if let Some(code) = error.get("code").and_then(Value::as_i64) {
                 return Err(received_response_error(
@@ -431,6 +621,14 @@ pub fn find_items_field(payload: &Value) -> Option<(String, Vec<Value>)> {
         }
         _ => None,
     }
+}
+
+fn ensure_response_size(bytes: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        bytes.len() <= 32 * 1024 * 1024,
+        "MCP response exceeds byte limit"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

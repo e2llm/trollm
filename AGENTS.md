@@ -105,7 +105,9 @@ For a first session, read in this order:
 
 | Working on | Read next |
 | --- | --- |
+| Writing or improving a flow's model instructions | [Flow prompting](docs/FLOW-PROMPTING.md): use each execution model to help phrase its task, review the contract and test real choices; this is authoring work, not a new runtime step |
 | Flow control, step instructions or generation limits | [ADAPTIVE-FLOWS.md](docs/ADAPTIVE-FLOWS.md); the executable `flows/examples/adaptive-routing.flow.yaml` and its registry |
+| Repeated child invocations, child outcome exits, original-record selection or fixture replays | [Flow reliability](docs/FLOW-RELIABILITY.md); scoped cursors and `onItemOutcome` are implemented and independent |
 | Built-in tools and calculator arguments/results | [BUILTIN-TOOLS.md](docs/BUILTIN-TOOLS.md) |
 | Prepared lists, repeated item subflows, compact returns or run measurements | [Count-independent workflow contracts](docs/amazon-generalization/README.md), especially [child returns](docs/amazon-generalization/G2-CONTRACT.md) and [measurement boundaries](docs/amazon-generalization/PERFORMANCE.md) |
 | Runtime behavior or formats | [ARCHITECTURE-ANDROID.md](docs/ARCHITECTURE-ANDROID.md), including its later implementation qualifications; relevant `schemas/`, reader and tests |
@@ -123,6 +125,10 @@ Its [repeated step groups](docs/FLOW-PRACTICES.md#repeated-step-groups) describe
 preparing intent once, selecting from original evidence, then acting, observing
 and assessing through existing tasks. Apply fixes across corresponding item and
 recovery paths; do not patch only the latest recorded failure.
+
+When revising prompts, test the actual coder and reasoner separately. Model-proposed
+wording needs review and supported/no-answer cases; a correct explanation does not
+prove the next tool decision. Keep original evidence and existing tool contracts.
 
 `docs/ADAPTIVE-FLOWS.md` describes **implemented** routing.
 `docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` contain

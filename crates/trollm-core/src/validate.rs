@@ -115,7 +115,10 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
         {
             problems.push(format!("{}: promptSupplement exceeds 16 KiB", at(name)));
         }
-        if let Some(routes) = &node.routes {
+        for routes in [node.routes.as_ref(), node.on_item_outcome.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             if routes.is_empty()
                 || routes.len() > 16
                 || routes.keys().any(|key| {
@@ -148,6 +151,28 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
                     if !plan.nodes.contains_key(target) {
                         problems.push(format!(
                             "{}: route targets unknown node '{target}'",
+                            at(name)
+                        ));
+                    }
+                }
+            }
+        }
+        if node.on_item_outcome.is_some() && node.kind != NodeKind::Foreach {
+            problems.push(format!(
+                "{}: onItemOutcome is only valid on foreach nodes",
+                at(name)
+            ));
+        }
+        if let (Some(routes), Some(body)) = (&node.on_item_outcome, &node.body) {
+            if let Some(child) = plan.find_plan(&body.flow_ref) {
+                for outcome in routes.keys() {
+                    if !child
+                        .nodes
+                        .values()
+                        .any(|n| n.kind == NodeKind::End && n.outcome.as_ref() == Some(outcome))
+                    {
+                        problems.push(format!(
+                            "{}: onItemOutcome '{outcome}' is not a declared body end outcome",
                             at(name)
                         ));
                     }
@@ -392,6 +417,9 @@ fn foreign_foreach_fields(node: &Node) -> Vec<&'static str> {
     }
     if node.on_empty.is_some() {
         out.push("onEmpty");
+    }
+    if node.on_item_outcome.is_some() {
+        out.push("onItemOutcome");
     }
     if node.on_complete.is_some() {
         out.push("onComplete");

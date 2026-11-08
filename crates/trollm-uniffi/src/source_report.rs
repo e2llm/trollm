@@ -15,6 +15,9 @@ pub(crate) fn retain(
     source: &str,
     status: &RunStatusInfo,
 ) -> Result<String> {
+    if status.worker_active {
+        bail!("native worker still active");
+    }
     if device.is_empty()
         || device.len() > 128
         || !device
@@ -46,7 +49,13 @@ pub(crate) fn retain(
     let snapshot_hash = hex_sha256(&snapshot);
     let root = dir.canonicalize()?;
     let mut committed_artifacts = std::collections::BTreeMap::new();
-    trollm_core::EventLog::visit(&dir.join("events.jsonl"), Some(run), |event, _| {
+    let journal_path = dir.join("events.jsonl");
+    if fs::metadata(&journal_path)?.len() > 32 * 1024 * 1024 {
+        bail!("native journal report limit");
+    }
+    let journal = fs::read(&journal_path)?;
+    let journal_hash = hex_sha256(&journal);
+    let last_seq = trollm_core::EventLog::visit(&journal_path, Some(run), |event, _| {
         let committed = event["seq"]
             .as_u64()
             .is_some_and(|seq| seq <= state.event_watermark)
@@ -60,8 +69,27 @@ pub(crate) fn retain(
             committed_artifacts.insert(path.to_string(), (sha.to_string(), bytes));
         }
     })?;
-    for (node, cursor) in &state.foreach_cursors {
-        // The runtime's cursor namespace is flat. Do not guess a nested source join.
+    if last_seq == 0
+        || state.event_watermark > last_seq
+        || last_seq != status.last_seq
+        || fs::read(&journal_path)? != journal
+    {
+        bail!("native snapshot/journal observation changed or exceeds retained progress");
+    }
+    retained.push((format!("{journal_hash}.events.jsonl"), journal));
+    let source_hash = hex_sha256(source.as_bytes());
+    retained.push((
+        format!("{source_hash}.source-association.json"),
+        source.as_bytes().to_vec(),
+    ));
+    let root_cursors = state
+        .stack
+        .first()
+        .map(|frame| &frame.foreach_cursors)
+        .filter(|cursors| !cursors.is_empty())
+        .unwrap_or(&state.foreach_cursors);
+    for (node, cursor) in root_cursors {
+        // Only root collections have a source association; do not guess child joins.
         let definition = plan
             .nodes
             .get(node)
@@ -173,11 +201,52 @@ pub(crate) fn retain(
     };
     let mut observation = json!({"schema":"trollm.native-source-observation.v1","source":association,
         "nativeStatus":match &status.phase { RunPhaseApi::Succeeded=>"succeeded", RunPhaseApi::Failed{..}=>"failed", _=>"unknown" },
+        "workerActive":false,"snapshotStatus":state.status,
+        "progressDisposition":if matches!(state.status, trollm_core::state::StateStatus::Running | trollm_core::state::StateStatus::Paused) {"interrupted"} else {"terminal"},
+        "journalSha256":journal_hash,"sourceAssociationSha256":source_hash,
         "nativeFailureReason":match &status.phase { RunPhaseApi::Failed{reason}=>Some(reason.as_str()),_=>None },
         "terminalReason":state.terminal_reason,"eventWatermark":state.event_watermark,"counters":state.counters,
         "snapshotSha256":snapshot_hash,"items":mappings,"businessVerification":"not-assessed"});
     if let Some(admission) = admission {
         observation["inputAdmission"] = admission;
+    }
+    let cause_path = dir.join("cancellation-cause.json");
+    match fs::metadata(&cause_path) {
+        Ok(metadata) => {
+            if metadata.len() > 4096 {
+                bail!("native cancellation cause exceeds bound");
+            }
+            let raw = fs::read(&cause_path)?;
+            let cause: Value = serde_json::from_slice(&raw)?;
+            let valid = [
+                "OPERATOR_CANCELLED",
+                "SELECTED_ACTOR_EXPIRED",
+                "SELECTED_CLOCK_STALE",
+                "SELECTED_CLOCK_DEADLINE",
+                "SELECTED_CLOCK_DISCONTINUITY",
+                "SELECTED_CLOCK_SOURCE_UNAVAILABLE",
+                "SELECTED_CLOCK_RETIRED",
+                "SELECTED_CLOCK_UNAVAILABLE",
+                "SELECTED_CLOCK_REFRESH_TIMEOUT",
+            ];
+            if cause["schema"] != "trollm.native-cancellation-cause.v1-proposal"
+                || cause["nativeRunId"] != run
+                || cause["meaning"] != "cooperative-stop-cause-only"
+                || cause["effectDisposition"] != "unknown"
+                || !cause["cause"]
+                    .as_str()
+                    .is_some_and(|code| valid.contains(&code))
+                || cause.as_object().is_none_or(|object| object.len() != 5)
+            {
+                bail!("native cancellation cause association invalid");
+            }
+            let digest = hex_sha256(&raw);
+            observation["cooperativeStopCause"] = cause;
+            observation["cooperativeStopCauseSha256"] = json!(digest);
+            retained.push((format!("{digest}.cancellation-cause.json"), raw));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let bytes = serde_json::to_vec(&observation)?;
     let observation_hash = hex_sha256(&bytes);

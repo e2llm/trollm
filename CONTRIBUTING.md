@@ -16,7 +16,9 @@ responsible for the patch and its validation regardless of the tools used.
 - Browse [good first issues](https://github.com/e2llm/trollm/labels/good%20first%20issue)
   for bounded starting points and [help wanted](https://github.com/e2llm/trollm/labels/help%20wanted)
   for larger contributions. The [product plan](docs/PRODUCT-PLAN.md) gives context;
-  a planned feature is not necessarily ready to implement.
+  a planned feature is not necessarily ready to implement. Issues marked
+  `validation` ask for checks of implemented behavior; read their remaining
+  acceptance criteria before proposing a replacement implementation.
 - Describe the problem, intended behavior, relevant source/build revision and
   how to reproduce it. Include only sanitized examples and diagnostics.
 - Discuss specification, architecture and product design changes with the
@@ -54,6 +56,24 @@ For a small end-to-end source example, follow [Anatomy of a
 flow](docs/ANATOMY-OF-A-FLOW.md). It uses the current format and an existing
 scripted executor test before introducing MCP-backed flows. Check
 [third-party notices](THIRD_PARTY_NOTICES.md) when adding or changing dependencies.
+
+### A starting point for your environment
+
+| Contribution | What you need |
+| --- | --- |
+| Documentation, example diagnostics or replay fixtures | Python and `scripts/requirements.txt`; no Android SDK or model weights |
+| Executor, local tools or bundle contracts | The pinned Rust toolchain and relevant scripted/stub tests; no model weights |
+| Flow review companion | Its Rust server and Node/browser tooling; no Android build |
+| Android presentation or lifecycle validation | The Android build environment and an emulator or phone; state which build you checked |
+| Prompt quality experiments | The intended coder/reasoner models and reviewed observations; report these separately from scripted tests |
+
+For flow changes, use [Flow prompting](docs/FLOW-PROMPTING.md) and
+[Flow reliability](docs/FLOW-RELIABILITY.md) alongside the current schemas.
+Keep original evidence, reasoner advice and expected answers distinct. Test
+supported choices and no-answer cases, with actual model identity, context,
+thinking settings and generation bounds recorded. A scripted model verifies
+wiring, not the quality of the prompt. Keep private captures and credentials out
+of contributions; label synthetic examples as synthetic.
 
 ## Find the implementation
 

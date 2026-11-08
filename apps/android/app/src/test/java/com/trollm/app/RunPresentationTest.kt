@@ -6,6 +6,15 @@ import uniffi.trollm_uniffi.RunActivityApi
 import uniffi.trollm_uniffi.RunPhaseApi
 
 class RunPresentationTest {
+    @Test fun passiveReportEligibilityFollowsActualWorkerForEveryPhase() {
+        val phases = listOf(RunPhaseApi.Running, RunPhaseApi.Paused("saved"),
+            RunPhaseApi.Succeeded, RunPhaseApi.Failed("cancelled"), RunPhaseApi.Failed("worker failure"))
+        for (phase in phases) {
+            assertFalse(presentRun(phase, true, null).canRetainSourceReport)
+            assertTrue(presentRun(phase, false, null).canRetainSourceReport)
+        }
+    }
+
     @Test fun cancelledTerminalRunIsNeverPresentedAsFailure() {
         val view = presentRun(RunPhaseApi.Failed("cancelled"), false, null)
         assertEquals("Cancelled", view.text)

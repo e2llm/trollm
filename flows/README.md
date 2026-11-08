@@ -10,6 +10,11 @@ For larger procedures, use the [repeated step groups](../docs/FLOW-PRACTICES.md#
 to prepare intent once, select from original evidence, and act/observe/assess.
 They are authoring patterns using existing tasks and routes, not new node types.
 
+When writing or revising prompts, follow [Flow prompting](../docs/FLOW-PROMPTING.md):
+ask the intended coder and reasoner separately to help phrase their tasks, review
+the suggestions and test both successful selections and appropriate declines.
+The guide includes copyable authoring questions and a selection-or-decline example.
+
 To keep separate results from the same remote read tool, use the implemented
 [task-specific result artifact](../docs/TASK-RESULT-ARTIFACTS.md) field. It names
 native results without model copying; the guide explains restrictions, replacement

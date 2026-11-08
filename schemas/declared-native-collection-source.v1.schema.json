@@ -1,0 +1,124 @@
+{
+  "$id": "moray.declared-native-collection.v1-proposal",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "moray.declared-native-collection.v1-proposal"
+    },
+    "origin": {
+      "const": "DECLARED"
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registrationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tenantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "workerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "registrationId",
+        "tenantId",
+        "subject",
+        "workerId",
+        "runId",
+        "epoch"
+      ]
+    },
+    "fixtureId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "versionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "selectionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^art_[a-f0-9]{32}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "tenantId",
+        "artifactId",
+        "sha256"
+      ]
+    },
+    "selectionRawSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "profileId": {
+      "enum": [
+        "trollm.native-collection-members.v1-proposal",
+        "trollm.native-collection-members.v3-proposal"
+      ]
+    },
+    "profileSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "installationSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "qualification": {
+      "const": "unqualified"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "origin",
+    "owner",
+    "fixtureId",
+    "versionId",
+    "selectionRef",
+    "selectionRawSha256",
+    "profileId",
+    "profileSha256",
+    "installationSha256",
+    "qualification"
+  ]
+}

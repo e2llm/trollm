@@ -31,7 +31,12 @@ impl MockMcpServer {
     }
 
     pub fn start_with_session(stateful: bool) -> Self {
-        Self::start_configured(stateful, None)
+        Self::start_configured(stateful, None, "2025-03-26")
+    }
+
+    #[allow(dead_code)]
+    pub fn start_with_protocol(version: &'static str) -> Self {
+        Self::start_configured(true, None, version)
     }
 
     /// Override tools/list's JSON-RPC result/error fields; the fixture fills the ID.
@@ -47,10 +52,14 @@ impl MockMcpServer {
             !responses.is_empty(),
             "tools/list responses must not be empty"
         );
-        Self::start_configured(true, Some(responses))
+        Self::start_configured(true, Some(responses), "2025-03-26")
     }
 
-    fn start_configured(stateful: bool, tools_responses: Option<Vec<Value>>) -> Self {
+    fn start_configured(
+        stateful: bool,
+        tools_responses: Option<Vec<Value>>,
+        protocol: &'static str,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let counts = Arc::new(Mutex::new(HashMap::new()));
@@ -67,11 +76,11 @@ impl MockMcpServer {
                     Ok(stream) => handle_connection(
                         stream,
                         &counts_thread,
-                        stateful,
-                        tools_responses.as_deref(),
+                        (stateful, tools_responses.as_deref()),
                         &list_params_thread,
                         &request_auth_thread,
                         &tool_payloads_thread,
+                        protocol,
                     ),
                     Err(_) => break,
                 }
@@ -100,12 +109,13 @@ fn bump(counts: &Arc<Mutex<HashMap<String, usize>>>, key: &str) {
 fn handle_connection(
     stream: TcpStream,
     counts: &Arc<Mutex<HashMap<String, usize>>>,
-    stateful: bool,
-    tools_responses: Option<&[Value]>,
+    catalog: (bool, Option<&[Value]>),
     list_params: &Arc<Mutex<Vec<Value>>>,
     request_auth: &RequestAuth,
     tool_payloads: &Mutex<HashMap<String, Value>>,
+    protocol: &str,
 ) {
+    let (stateful, tools_responses) = catalog;
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut writer = stream;
 
@@ -158,7 +168,7 @@ fn handle_connection(
         "initialize" => {
             bump(counts, "initialize");
             let result = json!({
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": protocol,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "mock-mcp", "version": "0.1.0" }
             });

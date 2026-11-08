@@ -41,12 +41,18 @@ to be established on an APK containing it.
 
 ## Current evidence and limits
 
-Current source prepares **0.1.0-rc.8 / Android code 43**, adding prepared
-worklists, complete-collection arithmetic, reusable child returns with original
-evidence retained, bounded live progress and correlated timing/size observations.
-[The contracts and implementation record](docs/amazon-generalization/README.md)
-describe the scripted checks and limits. These changes do not establish
-real-model selection accuracy or acceptance of an rc.8 APK.
+Current source metadata remains **0.1.0-rc.8 / Android code 43**. Source-only
+refreshes are identified by their source commit, not a new APK version; see
+[versioning](docs/VERSIONING.md).
+
+The runtime now supports prepared worklists, reusable child returns,
+invocation-owned iteration and authored exits on child outcomes. Built-in tools
+filter, select and order original records as well as perform exact arithmetic.
+Bindings retain the evidence needed by later tasks. The
+[reliability guide](docs/FLOW-RELIABILITY.md) includes a read-only selection replay
+helper; [flow prompting](docs/FLOW-PROMPTING.md) describes how to test wording with
+each execution model. Host/scripted checks cover these contracts. They do not
+establish real-model selection accuracy or acceptance of a current-source APK.
 
 On 2026-10-19, the signed **0.1.0-rc.5 / Android code 6** candidate completed
 email-OTP OAuth login and callback, retained the connection after cold reopen,
@@ -55,11 +61,13 @@ check on an 8 GiB API 36 x86_64 emulator. The Qwen3.5-0.8B Q4_K_M coder and
 Gemma 4 E2B IT Q4_K_M reasoner returned the expected answer and exact source
 information. Service and wake-lock cleanup passed.
 
-Actual OAuth refresh, ordinary download transfer/recovery, Doze-specific behavior
-and physical-phone acceptance remain open. Downloads are currently blocked by
-Android validated-network connectivity. Emulator checks do not establish phone
-performance or arbitrary-page accuracy. A consumer APK/public release is not
-ready; source updates do not renew acceptance of different APK bytes.
+Acceptance of actual OAuth refresh, ordinary download transfer/recovery,
+Doze-specific behavior and physical-phone operation remains open for the current
+main build. The earlier emulator download attempt had a validated-network
+connectivity failure; that is a historical test limitation, not a current claim
+that downloads fail on every device. Emulator checks do not establish phone
+performance or arbitrary-page accuracy. Experimental flows and other APKs require
+their own acceptance; the main source preview is not a ready consumer release.
 
 ## Start here
 
@@ -69,8 +77,11 @@ ready; source updates do not renew acceptance of different APK bytes.
   [implementation record](docs/flow-review/IMPLEMENTATION.md) tracks acceptance
 - [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md): a small current-format example
   and its scripted executor test, with no Android SDK or model weights required
+- [Flow prompting](docs/FLOW-PROMPTING.md): use each execution model to help phrase
+  its task, then test the wording against original evidence and permitted choices
 - [Agent onboarding](AGENTS.md): reading order, runtime path and source map
-- [Contributing](CONTRIBUTING.md): portable checks and change workflow
+- [Contributing](CONTRIBUTING.md): portable checks, change workflow and
+  [help-wanted tasks](https://github.com/e2llm/trollm/labels/help%20wanted)
 - [Product direction and current limits](docs/PRODUCT-PLAN.md)
 - [Coder-directed flows](docs/ADAPTIVE-FLOWS.md): authored routes, control tools
   and step context, with a scripted source example

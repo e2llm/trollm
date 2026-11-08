@@ -196,9 +196,9 @@ fn pause_mid_foreach_then_resume_completes_identically() {
     )
     .unwrap();
     assert_eq!(snap["status"], "paused");
-    assert_eq!(snap["foreachCursors"]["each"]["index"], 2);
+    assert_eq!(snap["stack"][0]["foreachCursors"]["each"]["index"], 2);
     assert_eq!(
-        snap["foreachCursors"]["each"]["results"]
+        snap["stack"][0]["foreachCursors"]["each"]["results"]
             .as_array()
             .unwrap()
             .len(),
