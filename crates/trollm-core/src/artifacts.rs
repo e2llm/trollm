@@ -25,6 +25,29 @@ pub struct WrittenArtifact {
     pub sha256: String,
 }
 
+/// Original foreach JSONL and content address, shared by writer and consumers.
+pub fn foreach_snapshot_bytes(items: &[serde_json::Value]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for item in items {
+        bytes.extend_from_slice(item.to_string().as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+pub fn foreach_snapshot_name(node: &str, bytes: &[u8]) -> String {
+    format!("{node}.{}.snapshot.jsonl", hex_sha256(bytes))
+}
+
+pub fn write_foreach_snapshot(
+    directory: &Path,
+    node: &str,
+    items: &[serde_json::Value],
+) -> std::io::Result<WrittenArtifact> {
+    let bytes = foreach_snapshot_bytes(items);
+    write_atomic(directory, &foreach_snapshot_name(node, &bytes), &bytes)
+}
+
 /// Atomic write (tmp + rename) of `bytes` to `dir/<name>`; returns path, size
 /// and sha256 for the event log.
 pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<WrittenArtifact> {
@@ -108,4 +131,47 @@ pub fn logical_name(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn actual_foreach_writer_preserves_zero_one_many_and_distinct_revisions() {
+        let root = std::env::temp_dir().join(format!("foreach-writer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for items in [
+            vec![],
+            vec![json!({"id":"one","value":"é"})],
+            vec![
+                json!({"id":"one"}),
+                json!({"id":"two"}),
+                json!({"id":"three"}),
+            ],
+        ] {
+            let written = write_foreach_snapshot(&root, "items", &items).unwrap();
+            let raw = std::fs::read(&written.path).unwrap();
+            assert_eq!(written.sha256, hex_sha256(&raw));
+            assert_eq!(written.bytes, raw.len() as u64);
+            assert_eq!(
+                written.path.file_name().unwrap().to_str().unwrap(),
+                format!("items.{}.snapshot.jsonl", written.sha256)
+            );
+            let decoded: Vec<serde_json::Value> = std::str::from_utf8(&raw)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(decoded, items);
+            let repeated = write_foreach_snapshot(&root, "items", &items).unwrap();
+            assert_eq!(repeated.path, written.path);
+            let changed =
+                write_foreach_snapshot(&root, "items", &[json!({"id":"different"})]).unwrap();
+            assert_ne!(changed.path, written.path);
+            assert_eq!(std::fs::read(&written.path).unwrap(), raw);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

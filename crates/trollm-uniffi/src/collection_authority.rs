@@ -26,6 +26,12 @@ impl SelectedClock {
             Self::Calibrated(clock) => clock.acquire(),
         }
     }
+    fn acquire_for_context(&self, context: &str) -> Result<()> {
+        match self {
+            Self::Kernel(_) => Ok(()),
+            Self::Calibrated(clock) => clock.acquire_for_context(context),
+        }
+    }
     fn sample(&self) -> Result<UtcSample> {
         match self {
             Self::Kernel(clock) => {
@@ -148,7 +154,9 @@ impl ApplicationSelectedEnvironment {
             source.schema_version == crate::collection_members::SOURCE_SCHEMA
                 && matches!(
                     source.profile_id.as_str(),
-                    crate::collection_members::PROFILE | crate::collection_members::MATCHED_PROFILE
+                    crate::collection_members::PROFILE
+                        | crate::collection_members::MATCHED_PROFILE
+                        | crate::collection_members::WORKLOAD_600_PROFILE
                 )
                 && source.qualification == "unqualified"
                 && source.selection_ref == selection.selection_ref
@@ -252,7 +260,7 @@ impl InstalledSelectedEnvironment for ApplicationSelectedEnvironment {
             .acquired
             .lock()
             .map_err(|_| anyhow::anyhow!("authority state unavailable"))? = None;
-        self.clock.acquire()?;
+        self.clock.acquire_for_context(&context.raw()?.sha256)?;
         let before = self.sample()?;
         ensure!(
             self.provider

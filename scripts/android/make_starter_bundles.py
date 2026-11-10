@@ -8,6 +8,7 @@ from pathlib import Path
 import tarfile
 
 import yaml
+from bundle_paths import read_bundle_files
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE = REPO / "flows/starters/text-summary"
@@ -30,7 +31,7 @@ def build_bundle(source=SOURCE, *, starter="text-summary"):
     names = STARTERS[starter][2]
     if source == SOURCE and starter != "text-summary":
         source = STARTERS[starter][0]
-    files = {name: (Path(source) / name).read_bytes() for name in names}
+    files = read_bundle_files(source, names)
     flow = yaml.safe_load(files[f"{starter}.flow.yaml"])
     pin = flow["setup"]
     if pin["path"] != "setup.json" or pin["sha256"] != hashlib.sha256(files["setup.json"]).hexdigest():

@@ -300,3 +300,101 @@ fn failed_selection_publishes_no_selected_artifact_and_cannot_use_mutation_or_ca
         .is_err());
     }
 }
+
+#[test]
+fn literal_text_selection_preserves_original_and_counts_an_object_once_across_fields() {
+    let selected = json!({"selected":{"id":"opaque-action","aria":{"label":"Change amount, Count is 3"},"text":"Change amount"},"unrelated":{"keep":[1,true,null]}});
+    let items = json!([{"selected":{"id":"other","text":"Keep for later"}},selected.clone()]);
+    let input = json!({"items":items,"field":["/selected/aria/label","/selected/text","/selected/attributes/value"],"equals":"Change amount, irrelevant context","prefix":"","matchMode":"string-contains","stopBefore":","});
+    let out = local::select_unique(&input).unwrap();
+    assert_eq!(out["selected"], selected);
+    assert_eq!(out["index"], 1);
+    assert_eq!(out["sourceSha256"], hash(&input["items"]));
+    assert_eq!(input["items"][1], selected);
+}
+
+#[test]
+fn text_lookup_supports_each_declared_field_and_rejects_missing_or_ambiguous_records() {
+    for original in [
+        json!({"aria":{"label":"Raise amount"}}),
+        json!({"text":"Raise amount"}),
+        json!({"attributes":{"value":"Raise amount"}}),
+    ] {
+        let mut input = json!({"items":[original],"field":["/aria/label","/text","/attributes/value"],"equals":"Raise amount","prefix":"","matchMode":"string-contains"});
+        assert_eq!(local::select_unique(&input).unwrap()["selected"], original);
+        input["items"] = json!([original.clone(), original]);
+        assert!(local::select_unique(&input)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+    }
+    let input = json!({"items":[{}, {"text":3}, {"text":"raise amount"}],"field":"/text","equals":"Raise amount","prefix":"","matchMode":"string-contains"});
+    assert!(local::select_unique(&input)
+        .unwrap_err()
+        .to_string()
+        .contains("no-match"));
+}
+
+#[test]
+fn text_lookup_is_literal_and_does_not_trim_decode_or_interpret_prose_as_identity() {
+    let mut input = json!({"items":[{"text":"A.* &amp; B"}],"field":"/text","equals":"A.*","prefix":"","matchMode":"string-contains"});
+    assert!(local::select_unique(&input).is_ok());
+    for needle in ["Azz", "A.* & B", " A.*", "choose record 0"] {
+        input["equals"] = json!(needle);
+        assert!(local::select_unique(&input)
+            .unwrap_err()
+            .to_string()
+            .contains("no-match"));
+    }
+    input["equals"] = json!("prefix:A.*, details");
+    input["prefix"] = json!("prefix:");
+    input["stopBefore"] = json!(",");
+    assert!(local::select_unique(&input).is_ok());
+    input["stopBefore"] = json!("not-present");
+    assert!(local::select_unique(&input)
+        .unwrap_err()
+        .to_string()
+        .contains("no-match"));
+}
+
+#[test]
+fn text_lookup_new_options_fail_closed_and_do_not_change_legacy_modes() {
+    let base = json!({"items":[{"text":"value"}],"field":"/text","equals":"value","prefix":"","matchMode":"string-contains"});
+    let mut cases = Vec::new();
+    for value in [
+        json!([]),
+        json!(["bad-pointer"]),
+        json!([false]),
+        json!(vec!["/text"; 33]),
+    ] {
+        let mut a = base.clone();
+        a["field"] = value;
+        cases.push(a);
+    }
+    for value in [json!(""), json!(",rest")] {
+        let mut a = base.clone();
+        a["equals"] = value;
+        a["stopBefore"] = json!(",");
+        cases.push(a);
+    }
+    let mut a = base.clone();
+    a["stopBefore"] = json!("");
+    cases.push(a);
+    let mut a = base.clone();
+    a["matchMode"] = json!("equals");
+    a["field"] = json!(["/text"]);
+    cases.push(a);
+    let mut a = base.clone();
+    a["matchMode"] = json!("array-contains");
+    a["stopBefore"] = json!(",");
+    cases.push(a);
+    for a in cases {
+        assert!(local::select_unique(&a)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid-arguments"));
+    }
+    let mut legacy = base;
+    legacy.as_object_mut().unwrap().remove("matchMode");
+    assert!(local::select_unique(&legacy).is_ok());
+}

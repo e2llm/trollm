@@ -172,6 +172,15 @@ one object still identify one object; two matching objects are ambiguous. Mixed
 type arrays do not match. Omission or `equals` preserves the original scalar
 contract. This is membership checking, not interpretation of adviser text.
 
+
+### Explicit literal text lookup
+
+The opt-in matchMode: string-contains searches a nonempty literal substring in declared string fields. ield may be one JSON pointer or up to32 pointers; a record matching several fields counts once. Missing or non-string fields do not match. Zero matches and multiple original records fail without a selected result. Returned records, indices and complete-source hashes are unchanged. Default equality and array membership retain their original contracts.
+
+Optional stopBefore uses the portion of equals before the first literal marker, after existing prefix removal; without a marker occurrence it uses all of the supplied string. Empty markers or empty resulting search strings are rejected. This option is allowed only for string-contains. There is no trimming, case folding, HTML decoding, regex evaluation, ID inference or modification of source records. Fields remain explicit authored data. Lists of fields are allowed only in string-contains mode.
+
+This is evidence retrieval, not semantic approval or freshness. A matching record still needs the flow's identity/ownership and fresh-observation checks before any action.
+
 ## Prepared worklist contract
 
 `local.prepare_worklist` accepts exactly `{input: string}`. The string contains
@@ -473,3 +482,34 @@ or fallback to an arbitrary first match. Existing gateway grants, argument
 validation, artifacts and response-size telemetry apply.
 
 Validation: `cargo test --locked -p trollm-mcp --test record_tools`.
+
+### Optional literal ordering-key window
+
+`local.order_records` additionally accepts optional `keyExtraction` with required
+`stopBefore` (at most 16 nonempty literal markers, 256 UTF-8 bytes each) and
+`repeated: identical`. This requires a nonempty prefix. The numeric window ends
+before the earliest exact, case-sensitive marker and is trimmed. It must consist
+only of one or more prefixed decimal strings, separated by optional whitespace.
+Every parsed amount must be identical. Distinct amounts, arbitrary prose, missing
+values and malformed decimals fail the entire operation, without partial output.
+For example, an authored `stopBefore: ["("]` admits `$6.97$6.97 ($0.56/unit)` as
+key `6.97`. It does not establish that `6.97` is a retail price. The model/flow still
+checks semantic price role and source ownership. Original objects and source hash
+are preserved. Omitting this option preserves the previous strict whole-field
+contract. Installing a flow with this option requires an updated native APK.
+
+### Choosing between literal identity and semantic judgment
+
+The [readable-record example](../flows/examples/record-lookup.flow.yaml) uses the
+text lookup mode to resolve a coder's observed phrase to an unchanged original.
+Do not use a phrase match to infer product suitability, ticket priority or source
+freshness. The selected artifact proves unique literal membership only. A delimiter
+such as a comma is an authored boundary, never a general rule for removing irrelevant
+text. Keep ambiguity and no-match paths available.
+
+Likewise, an ordering key extracted from repeated identical decimals establishes
+numeric order for the declared text window. It does not identify a price's role,
+convert units or verify a budget forecast. Tests include a non-currency score label
+and reject conflicting repetitions without partial sorting. All new options are
+explicit; older default operations keep their existing contracts. The schema,
+fixed-argument validator and full bound gateway call must agree on these options.

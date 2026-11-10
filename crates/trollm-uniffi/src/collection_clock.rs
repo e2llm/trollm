@@ -1,6 +1,10 @@
 //! Explicit installed Android/KVM calibration profile. Not selected by source,
 //! model arguments, framework confidence or a kernel synchronized flag.
 use crate::collection::{raw_sha256, SelectionRecord};
+use crate::collection_members::{
+    WORKLOAD_CLOCK_ATTEMPTS_PER_CONTEXT, WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS,
+    WORKLOAD_CLOCK_PREPARATION_CONTEXTS, WORKLOAD_CLOCK_STARTUP_ATTEMPTS,
+};
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
@@ -44,6 +48,41 @@ impl CalibratedClockPolicy {
         ElapsedRate::new(self.minimum_rate_numerator, self.minimum_rate_denominator)
     }
 }
+// Explicit v4 resource reservations, not elapsed-time or completion guarantees.
+#[derive(Default)]
+struct AcquisitionBudget {
+    startup: u64,
+    maintenance: u64,
+    contexts: std::collections::BTreeMap<String, u64>,
+}
+impl AcquisitionBudget {
+    fn reserve(&mut self, context: Option<&str>, maintenance: bool) -> Result<()> {
+        let refuse = || ClockFailure("SELECTED_CLOCK_ACQUISITION_LIMIT");
+        if maintenance {
+            if self.maintenance >= WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS {
+                return Err(refuse().into());
+            }
+            self.maintenance += 1;
+        } else if let Some(context) = context {
+            if !self.contexts.contains_key(context)
+                && self.contexts.len() >= WORKLOAD_CLOCK_PREPARATION_CONTEXTS
+            {
+                return Err(refuse().into());
+            }
+            let count = self.contexts.entry(context.to_owned()).or_default();
+            if *count >= WORKLOAD_CLOCK_ATTEMPTS_PER_CONTEXT {
+                return Err(refuse().into());
+            }
+            *count += 1;
+        } else {
+            if self.startup >= WORKLOAD_CLOCK_STARTUP_ATTEMPTS {
+                return Err(refuse().into());
+            }
+            self.startup += 1;
+        }
+        Ok(())
+    }
+}
 struct Calibration {
     anchor: VerifiedUtcAnchor,
     oldest_lower_ms: u64,
@@ -53,6 +92,7 @@ struct State {
     source_identity: Option<String>,
     calibration: Option<Calibration>,
     ordinal: u64,
+    budget: AcquisitionBudget,
 }
 pub(crate) struct CalibratedClock {
     policy: CalibratedClockPolicy,
@@ -63,12 +103,15 @@ pub(crate) struct CalibratedClock {
     selection: Value,
     assurance: Value,
     max_host_error_us: u64,
+    bounded_workload: bool,
     original_expires_at: String,
     publication_cutoff: u64,
     evidence_directory: PathBuf,
     invalid: AtomicBool,
     failure: AtomicU8,
     acquisition: Mutex<()>,
+    #[cfg(test)]
+    requested_test_refresh: AtomicBool,
     maintenance: Mutex<Option<Maintenance>>,
     state: Mutex<State>,
 }
@@ -151,18 +194,23 @@ impl CalibratedClock {
             selection: serde_json::to_value(&selection.selection_ref)?,
             assurance: clock["assuranceRef"].clone(),
             max_host_error_us,
+            bounded_workload: ready["nativeProfileId"]
+                == crate::collection_members::WORKLOAD_600_NATIVE_PROFILE,
             original_expires_at,
             publication_cutoff,
             evidence_directory,
             invalid: false.into(),
             failure: AtomicU8::new(0),
             acquisition: Mutex::new(()),
+            #[cfg(test)]
+            requested_test_refresh: AtomicBool::new(false),
             maintenance: Mutex::new(None),
             state: Mutex::new(State {
                 witness,
                 source_identity: None,
                 calibration: None,
                 ordinal: 0,
+                budget: AcquisitionBudget::default(),
             }),
         })
     }
@@ -174,7 +222,9 @@ impl CalibratedClock {
             4 => "SELECTED_CLOCK_SOURCE_UNAVAILABLE",
             5 => "SELECTED_CLOCK_RETIRED",
             6 => "SELECTED_CLOCK_REFRESH_TIMEOUT",
-            _ => "SELECTED_CLOCK_UNAVAILABLE",
+            20 => "SELECTED_CLOCK_ACQUISITION_LIMIT",
+            other => trollm_mcp::private_guard::GuardClockFailure::code_from_id(other)
+                .unwrap_or("SELECTED_CLOCK_UNAVAILABLE"),
         }
     }
     fn fence<T>(&self, result: Result<T>) -> Result<T> {
@@ -189,10 +239,20 @@ impl CalibratedClock {
                 {
                     6
                 }
+                None if error
+                    .downcast_ref::<trollm_mcp::private_guard::GuardClockFailure>()
+                    .is_some() =>
+                {
+                    error
+                        .downcast_ref::<trollm_mcp::private_guard::GuardClockFailure>()
+                        .unwrap()
+                        .id()
+                }
                 None => {
                     if let Some(failure) = error.downcast_ref::<ClockFailure>() {
                         match failure.0 {
                             "SELECTED_CLOCK_DISCONTINUITY" => 3,
+                            "SELECTED_CLOCK_ACQUISITION_LIMIT" => 20,
                             _ => 4,
                         }
                     } else {
@@ -209,13 +269,28 @@ impl CalibratedClock {
     }
     /// Network and custody occur only here, before bounded local admission.
     pub fn acquire(&self) -> Result<()> {
+        self.acquire_reserved(None, false)
+    }
+    pub fn acquire_for_context(&self, context: &str) -> Result<()> {
+        self.acquire_reserved(Some(context), false)
+    }
+    fn acquire_reserved(&self, context: Option<&str>, maintenance: bool) -> Result<()> {
         self.fence((|| {
             ensure!(!self.invalid.load(Ordering::SeqCst), "calibrated clock permanently fenced");
             // Serialize acquisitions independently. Network/custody must never
             // hold the state mutex needed by model-control or final local reads.
             let _acquisition = self.acquisition.lock().map_err(|_| anyhow::anyhow!("clock acquisition unavailable"))?;
+            // A queued caller may have passed its first check before another request fenced.
+            ensure!(!self.invalid.load(Ordering::SeqCst), ClockFailure(self.failure_code()));
             let (ordinal, budget_ms) = {
                 let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("clock state unavailable"))?;
+                if self.bounded_workload {
+                    if let Err(error) = state.budget.reserve(context, maintenance) {
+                        let raw = serde_json::to_vec(&serde_json::json!({"schema":"trollm.clock-acquisition-limit.v1-proposal", "cause":"SELECTED_CLOCK_ACQUISITION_LIMIT", "authorityRenewed":false, "requestDispatched":false, "startupAttempts":state.budget.startup, "maintenanceAttempts":state.budget.maintenance, "contextAttempts":state.budget.contexts, "refusedContextSha256":context, "refusedMaintenance":maintenance}))?;
+                        let _ = retain_original(&self.evidence_directory, "clock-acquisition-limit.json", &raw);
+                        return Err(error);
+                    }
+                }
                 state.witness = state.witness.intersect(&ElapsedWitness::read(&self.policy.guest_boot_id)?)
                     .map_err(|_| ClockFailure("SELECTED_CLOCK_DISCONTINUITY"))?;
                 let budget_ms = if let Some(previous) = &state.calibration {
@@ -228,20 +303,32 @@ impl CalibratedClock {
                 / u128::from(self.policy.minimum_rate_denominator);
             ensure!(guest_budget_ns > 0 && guest_budget_ns <= u128::from(u64::MAX), "calibration request budget exhausted");
             let deadline = Instant::now().checked_add(Duration::from_nanos(guest_budget_ns as u64)).context("calibration request deadline overflow")?;
-            let response = self.client.acquire_clock(&self.invocation, &self.policy.guest_boot_id,
+            let name = format!("clock-calibration-{ordinal:06}");
+            let acquired = self.client.acquire_clock(&self.invocation, &self.policy.guest_boot_id,
                 &self.original_expires_at, deadline,
                 &|| {
                     ensure!(!self.invalid.load(Ordering::SeqCst), "calibration invalidated");
                     Ok(())
-                })?;
-            let name = format!("clock-calibration-{ordinal:06}");
+                }, &|suffix,bytes| retain_original(&self.evidence_directory, &format!("{name}.{suffix}"),bytes));
+            let response = match acquired {
+                Ok(response) => response,
+                Err(error) => {
+                    let cause = if error.downcast_ref::<trollm_mcp::private_guard::GuardClockTimeout>().is_some() {
+                        "SELECTED_CLOCK_REFRESH_TIMEOUT"
+                    } else if let Some(cause) = error.downcast_ref::<trollm_mcp::private_guard::GuardClockFailure>() {
+                        cause.code()
+                    } else { "SELECTED_CLOCK_SOURCE_UNAVAILABLE" };
+                    let record=serde_json::to_vec(&serde_json::json!({"schema":"trollm.clock-acquisition-failure.v1-proposal",
+                        "cause":cause,"originalsMayBePartial":true,"authorityRenewed":false}))?;
+                    let _=retain_original(&self.evidence_directory,&format!("{name}.failure.json"),&record);
+                    return Err(error);
+                }
+            };
             let brackets = serde_json::to_vec(&serde_json::json!({
                 "schema":"trollm.clock-calibration-bracket.v1-proposal",
                 "sent":response.sent,"received":response.received,
                 "sentEndpoint":response.sent_endpoint,"receivedEndpoint":response.received_endpoint,
                 "requestSha256":raw_sha256(&response.request_bytes),"responseSha256":response.sha256}))?;
-            retain_original(&self.evidence_directory, &format!("{name}.request.json"), &response.request_bytes)?;
-            retain_original(&self.evidence_directory, &format!("{name}.response.json"), &response.bytes)?;
             retain_original(&self.evidence_directory, &format!("{name}.bracket.json"), &brackets)?;
             ensure!(raw_sha256(&response.bytes) == response.sha256, "clock raw custody mismatch");
             let sample = &response.value.sample;
@@ -357,10 +444,18 @@ impl CalibratedClock {
             Ok(calibration.anchor.remaining_age_ms(&now.boot)?
                 <= self.policy.max_calibration_age_ms / 2)
         })())?;
+        // Component controls can request an early refresh without replacing clock
+        // readings or weakening the real mapping age/deadline checks in acquire.
+        #[cfg(test)]
+        let due = due || self.requested_test_refresh.swap(false, Ordering::SeqCst);
         if due {
-            self.acquire()?;
+            self.acquire_reserved(None, true)?;
         }
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn request_test_refresh(&self) {
+        self.requested_test_refresh.store(true, Ordering::SeqCst);
     }
     /// Clock syscalls and try_lock only. No credential, file or network wait.
     pub fn sample(&self) -> Result<(u64, u64)> {
@@ -393,6 +488,32 @@ impl CalibratedClock {
 #[cfg(test)]
 pub(crate) mod controls {
     use super::*;
+    #[test]
+    fn bounded_workload_reserves_every_attempt_and_refuses_each_dimension() {
+        let mut budget = AcquisitionBudget::default();
+        for _ in 0..WORKLOAD_CLOCK_STARTUP_ATTEMPTS {
+            budget.reserve(None, false).unwrap();
+        }
+        assert!(budget.reserve(None, false).is_err());
+        for context in 0..11 {
+            let key = format!("context-{context}");
+            for _ in 0..12 {
+                budget.reserve(Some(&key), false).unwrap();
+            }
+            assert!(budget.reserve(Some(&key), false).is_err());
+        }
+        assert!(budget.reserve(Some("foreign-12"), false).is_err());
+        for _ in 0..WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS {
+            budget.reserve(None, true).unwrap();
+        }
+        assert!(budget.reserve(None, true).is_err());
+        assert_eq!(
+            budget.startup + budget.maintenance + budget.contexts.values().sum::<u64>(),
+            183
+        );
+        assert_eq!(budget.contexts.len(), 11);
+    }
+
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
     use std::sync::{atomic::AtomicUsize, Arc};
@@ -487,7 +608,11 @@ pub(crate) mod controls {
             &url,
             Arc::new(move || {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Some("declared-clock-only-token".into())
+                if mode == "missing-token" {
+                    None
+                } else {
+                    Some("declared-clock-only-token".into())
+                }
             }),
             RootCertificates::from_pem(tls::ROOT_1_PEM).unwrap(),
         )
@@ -497,7 +622,12 @@ pub(crate) mod controls {
             guest_boot_id: boot.boot_id().into(),
             minimum_rate_numerator: if matches!(
                 mode,
-                "refresh" | "late-refresh" | "source-loss" | "stop-held" | "binding"
+                "refresh"
+                    | "refresh-positive"
+                    | "late-refresh"
+                    | "source-loss"
+                    | "stop-held"
+                    | "binding"
             ) {
                 9
             } else {
@@ -505,13 +635,18 @@ pub(crate) mod controls {
             },
             minimum_rate_denominator: if matches!(
                 mode,
-                "refresh" | "late-refresh" | "source-loss" | "stop-held" | "binding"
+                "refresh"
+                    | "refresh-positive"
+                    | "late-refresh"
+                    | "source-loss"
+                    | "stop-held"
+                    | "binding"
             ) {
                 10
             } else {
                 2
             },
-            max_calibration_age_ms: if mode == "binding" {
+            max_calibration_age_ms: if matches!(mode, "binding" | "refresh-positive") {
                 30000
             } else if mode == "late" {
                 100
@@ -627,6 +762,9 @@ pub(crate) mod controls {
                 let mut original = vec![0; length];
                 reader.read_exact(&mut original).unwrap();
                 let request: Value = serde_json::from_slice(&original).unwrap();
+                if mode == "dropped-response" {
+                    return;
+                }
                 assert_eq!(request["invocationKey"], "test-invocation");
                 let sample = serde_json::json!({"sampleUtcMs":std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
@@ -644,7 +782,7 @@ pub(crate) mod controls {
                             serde_json::json!("0".repeat(64))
                     }
                     "late" => std::thread::sleep(Duration::from_millis(200)),
-                    "refresh" if response_index > 0 => {
+                    "refresh" | "refresh-positive" if response_index > 0 => {
                         std::thread::sleep(Duration::from_millis(150))
                     }
                     "late-refresh" if response_index > 0 => {
@@ -658,16 +796,110 @@ pub(crate) mod controls {
                     }
                     _ => {}
                 }
-                let bytes = serde_json::to_vec(&value).unwrap();
+                let bytes = match mode {
+                    "bad-json" => b"original non-json response".to_vec(),
+                    "oversized" => vec![b'x'; 40000],
+                    _ => serde_json::to_vec(&value).unwrap(),
+                };
+                let status = if mode == "http-refusal" {
+                    "503 Service Unavailable"
+                } else {
+                    "200 OK"
+                };
+                let hash_header = if mode == "missing-hash" {
+                    String::new()
+                } else {
+                    format!(
+                        "x-response-sha256: {}\r\n",
+                        if mode == "wrong-hash" {
+                            "0".repeat(64)
+                        } else {
+                            raw_sha256(&bytes)
+                        }
+                    )
+                };
+                let declared_size = bytes.len() + if mode == "partial-body" { 10 } else { 0 };
                 // Late response may encounter a legitimately closed native request.
-                let _ = write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nx-response-sha256: {}\r\nConnection: close\r\n\r\n",
-                bytes.len(), raw_sha256(&bytes));
+                let _ = write!(reader.get_mut(), "HTTP/1.1 {status}\r\nContent-Length: {declared_size}\r\n{hash_header}Connection: close\r\n\r\n");
                 let _ = reader.get_mut().write_all(&bytes);
                 let _ = reader.get_mut().flush();
             }
         });
         (clock, server, calls, directory)
     }
+    #[test]
+    fn acquisition_limit_does_not_alias_existing_transport_cause_ids() {
+        let (clock, server, _, directory) = clock_fixture_responses("positive", 0);
+        server.join().unwrap();
+        for id in 7..=19 {
+            clock.failure.store(id, Ordering::SeqCst);
+            assert_eq!(
+                clock.failure_code(),
+                trollm_mcp::private_guard::GuardClockFailure::code_from_id(id).unwrap()
+            );
+        }
+        clock.failure.store(20, Ordering::SeqCst);
+        assert_eq!(clock.failure_code(), "SELECTED_CLOCK_ACQUISITION_LIMIT");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn v4_actual_tls_limit_fences_before_next_probe_and_retains_originals() {
+        for kind in ["startup", "context", "maintenance"] {
+            let (mut clock, server, calls, directory) = clock_fixture("positive");
+            clock.bounded_workload = true;
+            if kind == "startup" {
+                clock.state.lock().unwrap().budget.startup = WORKLOAD_CLOCK_STARTUP_ATTEMPTS - 1;
+            }
+            if kind == "context" {
+                clock
+                    .state
+                    .lock()
+                    .unwrap()
+                    .budget
+                    .contexts
+                    .insert("original-context".into(), 11);
+            } else if kind == "maintenance" {
+                clock.state.lock().unwrap().budget.maintenance =
+                    WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS - 1;
+            }
+            let acquire = || match kind {
+                "context" => clock.acquire_for_context("original-context"),
+                "maintenance" => clock.acquire_reserved(None, true),
+                _ => clock.acquire(),
+            };
+            acquire().unwrap();
+            server.join().unwrap();
+            let original =
+                std::fs::read(directory.join("clock-calibration-000001.response.json")).unwrap();
+            assert!(acquire()
+                .unwrap_err()
+                .to_string()
+                .contains("SELECTED_CLOCK_ACQUISITION_LIMIT"));
+            assert!(clock
+                .sample()
+                .unwrap_err()
+                .to_string()
+                .contains("SELECTED_CLOCK_ACQUISITION_LIMIT"));
+            assert!(clock.acquire_for_context("another-context").is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(!directory
+                .join("clock-calibration-000002.request.json")
+                .exists());
+            assert_eq!(
+                std::fs::read(directory.join("clock-calibration-000001.response.json")).unwrap(),
+                original
+            );
+            let diagnostic: Value = serde_json::from_slice(
+                &std::fs::read(directory.join("clock-acquisition-limit.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(diagnostic["requestDispatched"], false);
+            assert_eq!(diagnostic["authorityRenewed"], false);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
     #[test]
     fn actual_private_tls_calibration_preserves_originals_and_final_read_is_local() {
         let (clock, server, calls, directory) = clock_fixture("positive");
@@ -680,7 +912,7 @@ pub(crate) mod controls {
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect();
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 7);
         let bracket: Value = serde_json::from_slice(
             &std::fs::read(directory.join("clock-calibration-000001.bracket.json")).unwrap(),
         )
@@ -710,18 +942,149 @@ pub(crate) mod controls {
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
-    fn owned_refresh_spans_multiple_mapping_lifetimes_without_blocking_local_reads() {
-        let (clock, server, calls, directory) = clock_fixture_responses("refresh", 3);
+    fn refused_clock_responses_keep_early_originals_and_closed_first_cause() {
+        for (mode, expected) in [
+            ("http-refusal", "SELECTED_CLOCK_HTTP_STATUS"),
+            ("missing-hash", "SELECTED_CLOCK_HASH_MISSING"),
+            ("wrong-hash", "SELECTED_CLOCK_HASH_MISMATCH"),
+            ("bad-json", "SELECTED_CLOCK_RESPONSE_FORMAT"),
+            ("partial-body", "SELECTED_CLOCK_BODY_READ"),
+            ("oversized", "SELECTED_CLOCK_BODY_LIMIT"),
+            ("challenge", "SELECTED_CLOCK_RESPONSE_ASSOCIATION"),
+        ] {
+            let (clock, server, calls, directory) = clock_fixture(mode);
+            let error = clock.acquire().unwrap_err();
+            server.join().unwrap();
+            assert_eq!(
+                error.downcast_ref::<ClockFailure>().unwrap().0,
+                expected,
+                "{mode}"
+            );
+            assert_eq!(
+                clock
+                    .sample()
+                    .unwrap_err()
+                    .downcast_ref::<ClockFailure>()
+                    .unwrap()
+                    .0,
+                expected
+            );
+            assert!(clock.acquire().is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let prefix = "clock-calibration-000001";
+            for suffix in [
+                "request.json",
+                "sent-bracket.json",
+                "response-metadata.json",
+                "response.json",
+                "body-read.json",
+                "received-bracket.json",
+                "failure.json",
+            ] {
+                let bytes = std::fs::read(directory.join(format!("{prefix}.{suffix}"))).unwrap();
+                assert!(!bytes
+                    .windows(b"declared-clock-only-token".len())
+                    .any(|value| value == b"declared-clock-only-token"));
+            }
+            let failure: Value = serde_json::from_slice(
+                &std::fs::read(directory.join(format!("{prefix}.failure.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(failure["cause"], expected);
+            assert_eq!(failure["authorityRenewed"], false);
+            assert!(!directory.join(format!("{prefix}.bracket.json")).exists());
+            if mode == "partial-body" || mode == "oversized" {
+                let body: Value = serde_json::from_slice(
+                    &std::fs::read(directory.join(format!("{prefix}.body-read.json"))).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(body["complete"], false);
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn closed_transport_and_credentials_refusals_keep_request_without_inventing_response() {
+        for (mode, expected, responses) in [
+            ("closed-port", "SELECTED_CLOCK_CONNECT_FAILED", 0),
+            ("dropped-response", "SELECTED_CLOCK_REQUEST_FAILED", 1),
+            ("missing-token", "SELECTED_CLOCK_CREDENTIALS", 0),
+        ] {
+            let (clock, server, calls, directory) = clock_fixture_responses(mode, responses);
+            let mut server = Some(server);
+            if mode == "closed-port" {
+                server.take().unwrap().join().unwrap();
+            }
+            let error = clock.acquire().unwrap_err();
+            if let Some(server) = server {
+                server.join().unwrap();
+            }
+            assert_eq!(error.downcast_ref::<ClockFailure>().unwrap().0, expected);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(directory
+                .join("clock-calibration-000001.request.json")
+                .is_file());
+            assert!(directory
+                .join("clock-calibration-000001.sent-bracket.json")
+                .is_file());
+            assert!(!directory
+                .join("clock-calibration-000001.response.json")
+                .exists());
+            assert!(!directory
+                .join("clock-calibration-000001.bracket.json")
+                .exists());
+            assert!(clock.acquire().is_err());
+            assert!(clock.sample().is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn early_clock_custody_refusal_never_sends_or_overwrites_originals() {
+        let (clock, server, calls, directory) = clock_fixture_responses("positive", 0);
+        let path = directory.join("clock-calibration-000001.request.json");
+        std::fs::write(&path, b"held original collision").unwrap();
+        let error = clock.acquire().unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            error.downcast_ref::<ClockFailure>().unwrap().0,
+            "SELECTED_CLOCK_EVIDENCE_IO"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"held original collision");
+        assert!(!directory
+            .join("clock-calibration-000001.response.json")
+            .exists());
+        assert!(clock.sample().is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn owned_early_refresh_preserves_local_reads_and_original_clock_checks() {
+        let (clock, server, calls, directory) = clock_fixture_responses("refresh-positive", 3);
         let clock = Arc::new(clock);
         clock.acquire().unwrap();
         clock.start_maintenance().unwrap();
         let started = Instant::now();
-        let deadline = started + Duration::from_secs(5);
+        let deadline = started + Duration::from_secs(15);
+        clock.request_test_refresh();
+        let mut requested_third = false;
         loop {
             assert!(Instant::now() < deadline);
             match clock.sample() {
                 Ok(_) => {}
                 Err(error) => assert!(error.downcast_ref::<ClockReadBusy>().is_some(), "{error:#}"),
+            }
+            if !requested_third
+                && directory
+                    .join("clock-calibration-000002.bracket.json")
+                    .exists()
+                && clock.acquisition.try_lock().is_ok()
+            {
+                clock.request_test_refresh();
+                requested_third = true;
             }
             if directory
                 .join("clock-calibration-000003.bracket.json")
@@ -732,7 +1095,9 @@ pub(crate) mod controls {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(started.elapsed() > Duration::from_millis(900));
+        // This proves owned acquisition/read concurrency, not a scheduler bound
+        // or success across a one-second mapping under coverage instrumentation.
+        assert!(requested_third);
         clock.sample().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         clock.stop_maintenance();
@@ -746,7 +1111,7 @@ pub(crate) mod controls {
         for (mode, responses, expected) in [
             ("cutoff", 1, "SELECTED_CLOCK_DEADLINE"),
             ("late-refresh", 2, "SELECTED_CLOCK_REFRESH_TIMEOUT"),
-            ("source-loss", 2, "SELECTED_CLOCK_SOURCE_UNAVAILABLE"),
+            ("source-loss", 2, "SELECTED_CLOCK_RESPONSE_ASSOCIATION"),
         ] {
             let (clock, server, _, directory) = clock_fixture_responses(mode, responses);
             let clock = Arc::new(clock);

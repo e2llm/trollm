@@ -50,6 +50,17 @@ Never parse a reasoner's “pass”, “done” or JSON as a routing instruction
 
 ## Repeated step groups
 
+For each group, state the immediate question, the original evidence required,
+the model-owned arguments, what native checks establish, and the missing-evidence
+exit. A forwarding coder carries advice into a call; an independent reviewer
+needs the decisive original facts. These are different contracts. Review each
+corresponding normal and recovery path when changing one of them.
+
+Keep only output views that a later task actually uses. All declared output
+contracts are evaluated before transition: even an unused capped view can stop
+a task. Preserve the complete artifact, filter the candidate set, then project
+the fields needed for the next decision. Bounds are not instructions to truncate.
+
 Repair a recurring procedure, then apply it to every corresponding path. A
 failure on one product or recovery branch is a test case for that procedure,
 not a reason to teach the runtime that product's identity or page layout.
@@ -123,6 +134,51 @@ observed scope. The user's search words may differ from the actual title or
 brand. Repeating the initial search phrase can miss the selected offer or switch
 to another one. Preserve the observed navigation attributes and verify the
 selected target and resulting page before treating it as the same offer.
+
+### Worked example: readable reference to original record
+
+The [record-lookup plan](../flows/examples/record-lookup.flow.yaml),
+[registry](../flows/tasks/record-lookup.tasks.yaml) and
+[scripted integration test](../crates/trollm-core/tests/record_lookup.rs) form a
+small executable example. It uses two synthetic tickets, not a live service.
+Supply a request such as `Find the printer incident`:
+
+1. A fully bound coder call retains the complete original records. Only ID,
+   title and label are projected into the selection prompt.
+2. The coder proposes literal observed title/label text through
+   `local.select_unique`, or calls `flow.choose` to decline. The source collection,
+   lookup fields and matching mode are bound. Native lookup requires exactly one
+   original record; finding the same record through two fields is still one match.
+3. The tool-free reasoner receives the complete selected original, including
+   fields omitted from the selection view, and the original request. It explains
+   suitability and uncertainty in prose. No external action is granted.
+
+A missing or ambiguous reference pauses before advice; the explicit no-selection
+route also pauses, with an authored reason and fresh-observation Resume target.
+A successful end means the authored path completed, not that the semantic judgment
+is proven correct. The test also changes record
+order and IDs and attempts to override the bound field. It uses real local tools
+with scripted models, not measured model accuracy.
+The [small native check](FLOW-RELIABILITY.md#small-native-presentation-check)
+also demonstrates why a valid lookup does not establish a suitable choice.
+
+This is an alternative to copying an opaque ID, not a mandatory extra step. Use
+the current exact-ID path when it works reliably. A readable phrase can still
+identify the wrong original; fresh ownership and semantic checks remain necessary
+before acting. `stopBefore` is an optional authored literal query boundary, not
+automatic punctuation cleanup. A comma may be part of the distinguishing label.
+
+Once an entity is established, carry its original identity and requirements
+forward. Later tasks obtain fresh state and verify ownership rather than repeatedly
+guessing which entity was selected. Retaining an original title does not establish
+that current observations still refer to that entity. Per-item semantic checks
+and exact numerical checks can establish an authored completion contract without
+an additional model rejudging every number at the end.
+
+```sh
+cargo test --locked -p trollm-core --test record_lookup --no-default-features
+python3 scripts/validate-examples.py
+```
 
 ### Act, observe, assess
 

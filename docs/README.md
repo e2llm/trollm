@@ -21,6 +21,9 @@ Start with the [project overview](../README.md), then
 | Prepare source or APK releases | [Versioning](VERSIONING.md), [third-party notices](../THIRD_PARTY_NOTICES.md) |
 | Report or assess security issues | [Security policy](../SECURITY.md), [enterprise security](SECURITY-ENTERPRISE.md) |
 
+For a complete example of selecting by observed text while retaining the original
+record, see [readable record lookup](FLOW-PRACTICES.md#worked-example-readable-reference-to-original-record).
+
 The schemas, Rust readers and architecture implementation qualifications define
 the current contract. Host/scripted tests establish wiring and recovery rules;
 they do not establish small-model accuracy or acceptance on a physical phone.

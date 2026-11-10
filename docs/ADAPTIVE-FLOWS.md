@@ -54,8 +54,9 @@ connection or gateway policy. The only control tool in this contract is:
 ```
 
 Arguments contain exactly one string field, `route`, naming an exit of the
-current node. The runtime provides the current allowed names and destinations
-as context; the coder does not invent destinations. Unknown tools, unauthorized
+current node. The runtime automatically provides allowed names; destinations
+remain available through the author's `runtime.routes` binding. The coder does
+not invent destinations. Unknown tools, unauthorized
 routes, missing choices and reasoner grants fail closed.
 
 A generation containing `flow.choose` must contain exactly one tool call.
@@ -85,15 +86,21 @@ assess_next:
 Task nodes may add `promptSupplement`, an inline template capped at 16 KiB of
 UTF-8 bytes. JSON Schema's `maxLength` counts characters; the runtime's byte
 check is authoritative and can reject a shorter non-ASCII template.
-Rendering uses the existing variable substitution, not expressions. Compose
-the registry prompt, then the supplement, then runtime context, with labelled
-boundaries. Nodes with either a supplement or routes opt into this context;
-legacy nodes without either retain their prompt behavior.
+Rendering uses the existing variable substitution, not expressions. For nodes
+with a supplement or routes, automatic choices and diagnostic data come first,
+followed by mechanical tool-argument guidance, then the labelled registry prompt
+and supplement. The current authored question and evidence come last. Nodes
+without either a supplement or routes retain their existing prompt assembly.
 
 For opted-in nodes, the reserved template variable `runtime` contains the
 current `node`, `taskRef`, the declared `routes`, and `lastError` (initially
-null). The same bounded context is appended automatically so a routing model
-always sees its legal choices. Do not dump the whole run into the prompt.
+null). Automatic presentation includes `availableRoutes` and the complete bounded
+`lastError`, including its originating node. It omits routine current-node/task
+identifiers and future destinations. All explicit `runtime.*` bindings remain
+available. A read error or mutation outcome stays visible across recovery nodes
+and successful observations until another failure replaces it; it is not hidden
+merely because this is not a retry of the original node. Do not dump the whole run
+into the prompt.
 Labelled sections distinguish authored instructions, runtime context and bound
 outputs; they are not a trust boundary for model interpretation. In particular,
 `lastError.detail` can contain gateway or remote-service error text and must be

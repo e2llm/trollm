@@ -337,7 +337,7 @@ impl Selection {
     }
 }
 
-/// Native-owned parsed tool envelope artifact, not original network bytes and
+/// Native-owned parsed tool payload artifact, not original network bytes and
 /// never independent cart/business verification. The caller must separately
 /// bind its hash/path to the retained native journal and installed authority.
 pub struct RetainedRelayObservation {
@@ -367,12 +367,51 @@ pub fn retained_relay_observation(
                 == 1,
         "selected result artifact association unavailable"
     );
-    let root = native_artifact_root.canonicalize()?;
-    let actual = artifact.canonicalize()?;
+    let root_metadata = std::fs::symlink_metadata(native_artifact_root)?;
+    for directory in [
+        native_artifact_root.parent(),
+        native_artifact_root
+            .parent()
+            .and_then(std::path::Path::parent),
+    ] {
+        let metadata =
+            std::fs::symlink_metadata(directory.context("selected result native root missing")?)?;
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "selected result native directory alias refused"
+        );
+    }
     ensure!(
-        actual.starts_with(&root) && actual == artifact,
-        "selected result artifact path drift"
+        root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+        "selected result artifact root type refused"
     );
+    let root = native_artifact_root.canonicalize()?;
+    let actual_result = artifact.canonicalize();
+    let relative = artifact.strip_prefix(native_artifact_root)?;
+    // Only the installed policy's one immediate regular artifact is selected.
+    // A trusted app-root spelling may be an OS alias; an alias *inside* this
+    // native artifact directory must never select another file or directory.
+    let immediate = relative.components().count() == 1
+        && matches!(
+            relative.components().next(),
+            Some(std::path::Component::Normal(_))
+        );
+    let expected = root.join(relative);
+    let confined = immediate
+        && actual_result
+            .as_ref()
+            .is_ok_and(|actual| *actual == expected);
+    let diagnostic = serde_json::json!({
+        "schema":"trollm.selected-result-path-diagnostic.v1",
+        "scope":"original-local-path-operands-not-outcome-or-settlement",
+        "logicalArtifactRoot":native_artifact_root,"logicalArtifact":artifact,
+        "canonicalRoot":root,"canonicalArtifact":actual_result.as_ref().ok(),
+        "canonicalArtifactError":actual_result.as_ref().err().map(ToString::to_string),
+        "expectedCanonicalArtifact":expected,"immediateMember":immediate,"confined":confined
+    });
+    let diagnostic_result = retain_result_path_diagnostic(&root, &diagnostic);
+    ensure!(confined, "selected result artifact path drift");
+    diagnostic_result.context("selected result path diagnostic unavailable")?;
     let before = std::fs::symlink_metadata(artifact)?;
     ensure!(
         before.is_file() && !before.file_type().is_symlink() && before.len() <= 1_048_576,
@@ -388,12 +427,27 @@ pub fn retained_relay_observation(
     let mut bytes = Vec::new();
     file.by_ref().take(1_048_577).read_to_end(&mut bytes)?;
     let after = file.metadata()?;
+    let named = std::fs::symlink_metadata(artifact)?;
+    let root_after = std::fs::symlink_metadata(native_artifact_root)?;
     ensure!(
         bytes.len() <= 1_048_576
             && before.len() == bytes.len() as u64
             && opened.len() == after.len()
             && opened.mtime() == after.mtime()
-            && opened.mtime_nsec() == after.mtime_nsec(),
+            && opened.mtime_nsec() == after.mtime_nsec()
+            && before.dev() == named.dev()
+            && before.ino() == named.ino()
+            && named.is_file()
+            && !named.file_type().is_symlink()
+            && named.len() == after.len()
+            && named.mtime() == after.mtime()
+            && named.mtime_nsec() == after.mtime_nsec()
+            && root_after.is_dir()
+            && !root_after.file_type().is_symlink()
+            && root_metadata.dev() == root_after.dev()
+            && root_metadata.ino() == root_after.ino()
+            && native_artifact_root.canonicalize()? == root
+            && artifact.canonicalize()? == expected,
         "selected result artifact drift"
     );
     let metadata_path = std::path::PathBuf::from(format!("{}.meta.json", artifact.display()));
@@ -402,42 +456,51 @@ pub fn retained_relay_observation(
         metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 4096,
         "selected result completion metadata unavailable"
     );
-    let complete: serde_json::Value =
-        serde_json::from_reader(std::fs::File::open(&metadata_path)?.take(4097))?;
+    let mut metadata_file = std::fs::File::open(&metadata_path)?;
+    let metadata_opened = metadata_file.metadata()?;
+    ensure!(
+        metadata.dev() == metadata_opened.dev() && metadata.ino() == metadata_opened.ino(),
+        "selected result completion metadata replaced during open"
+    );
+    let mut metadata_bytes = Vec::new();
+    metadata_file
+        .by_ref()
+        .take(4097)
+        .read_to_end(&mut metadata_bytes)?;
+    let metadata_after = metadata_file.metadata()?;
+    let metadata_named = std::fs::symlink_metadata(&metadata_path)?;
+    ensure!(
+        metadata_bytes.len() <= 4096
+            && metadata_bytes.len() as u64 == metadata.len()
+            && metadata_after.len() == metadata.len()
+            && metadata_named.len() == metadata.len()
+            && metadata_named.is_file()
+            && !metadata_named.file_type().is_symlink()
+            && metadata_named.dev() == metadata.dev()
+            && metadata_named.ino() == metadata.ino()
+            && metadata_after.mtime() == metadata.mtime()
+            && metadata_named.mtime() == metadata.mtime()
+            && metadata_after.mtime_nsec() == metadata.mtime_nsec()
+            && metadata_named.mtime_nsec() == metadata.mtime_nsec(),
+        "selected result completion metadata drift"
+    );
+    let complete: serde_json::Value = serde_json::from_slice(&metadata_bytes)?;
     ensure!(
         complete["complete"] == true,
         "selected result artifact incomplete"
     );
-    let envelope: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     ensure!(
-        envelope == result.content_for_model && envelope.is_object(),
-        "selected result envelope was shaped or mismatched"
+        value == result.content_for_model && value.is_object(),
+        "selected result payload was shaped or mismatched"
     );
     ensure!(
-        envelope.get("isError").is_none_or(|value| value == false),
+        value.get("isError").is_none_or(|value| value == false),
         "selected tool error remains unresolved"
     );
-    let value = if let Some(value) = envelope.get("structuredContent") {
-        ensure!(value.is_object(), "selected structured result invalid");
-        value.clone()
-    } else {
-        let content = envelope["content"]
-            .as_array()
-            .context("selected result content missing")?;
-        let texts: Vec<_> = content
-            .iter()
-            .filter(|item| item["type"] == "text")
-            .collect();
-        ensure!(
-            texts.len() == 1,
-            "selected result requires one JSON text observation"
-        );
-        serde_json::from_str(
-            texts[0]["text"]
-                .as_str()
-                .context("selected result text missing")?,
-        )?
-    };
+    // McpGateway::finish_result persists extract_tool_payload's output. A
+    // second MCP unwrap would reject the actual producer or reinterpret a
+    // payload field as transport authority. Preserve these exact bytes.
     ensure!(
         !value
             .get("approvalRequired")
@@ -469,10 +532,115 @@ pub fn retained_relay_observation(
     })
 }
 
+fn retain_result_path_diagnostic(root: &std::path::Path, value: &serde_json::Value) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes = serde_json::to_vec(value)?;
+    ensure!(
+        bytes.len() <= 65_536,
+        "selected result path diagnostic bound"
+    );
+    let path = root.join(format!("native-result-path-{}.json", raw_sha256(&bytes)));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() == bytes.len() as u64
+                    && std::fs::read(&path)? == bytes,
+                "selected result path diagnostic conflict"
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    std::fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod relay_result_controls {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn original_app_root_alias_is_distinct_from_in_run_symlink_or_foreign_file() {
+        let parent = std::env::temp_dir().join(format!(
+            "selected-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = parent.join("real-app");
+        let alias = parent.join("app-prefix-alias");
+        let root = base.join("runs/original-run/artifacts");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&base, &alias).unwrap();
+        let logical_root = alias.join("runs/original-run/artifacts");
+        let artifact = logical_root.join("actual.json");
+        let payload = json!({"result":"mutation","actionClassification":"mutation-observed"});
+        let raw = serde_json::to_vec(&payload).unwrap();
+        std::fs::write(&artifact, &raw).unwrap();
+        std::fs::write(
+            format!("{}.meta.json", artifact.display()),
+            b"{\"complete\":true}",
+        )
+        .unwrap();
+        let result = trollm_mcp::ToolResult {
+            content_for_model: payload,
+            artifacts: vec![artifact.clone()],
+            provenance: trollm_mcp::Provenance::Live,
+        };
+        assert_ne!(artifact.canonicalize().unwrap(), artifact);
+        assert_eq!(
+            retained_relay_observation(&result, &artifact, &logical_root)
+                .unwrap()
+                .bytes,
+            raw
+        );
+        let diagnostic = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("native-result-path-")
+            })
+            .unwrap();
+        let bytes = std::fs::read(&diagnostic).unwrap();
+        let operands: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(operands["logicalArtifact"], artifact.to_str().unwrap());
+        assert_eq!(
+            operands["canonicalArtifact"],
+            root.join("actual.json").to_str().unwrap()
+        );
+        assert_eq!(operands["confined"], true);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(diagnostic).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let linked = logical_root.join("linked.json");
+        std::os::unix::fs::symlink(&artifact, &linked).unwrap();
+        let mut foreign = result.clone();
+        foreign.artifacts = vec![linked.clone()];
+        assert!(retained_relay_observation(&foreign, &linked, &logical_root).is_err());
+        std::fs::remove_file(format!("{}.meta.json", artifact.display())).unwrap();
+        std::os::unix::fs::symlink(&artifact, format!("{}.meta.json", artifact.display())).unwrap();
+        assert!(retained_relay_observation(&result, &artifact, &logical_root).is_err());
+        std::fs::remove_dir_all(parent).unwrap();
+    }
     #[test]
     fn retained_live_artifact_refuses_uncertain_preview_shape_cache_and_symlink() {
         let root = std::env::temp_dir().join(format!(
@@ -487,7 +655,7 @@ mod relay_result_controls {
         let artifact = root.join("actual.json");
         let meta = root.join("actual.json.meta.json");
         std::fs::write(&meta, b"{\"complete\":true}").unwrap();
-        let observation = json!({"structuredContent":{"result":"mutation","actionClassification":"mutation-observed"}});
+        let observation = json!({"result":"mutation","actionClassification":"mutation-observed"});
         let result = trollm_mcp::ToolResult {
             content_for_model: observation.clone(),
             artifacts: vec![artifact.clone()],
@@ -504,7 +672,7 @@ mod relay_result_controls {
             ("no-change", "dispatched-no-dom-change"),
             ("navigation", "navigation"),
         ] {
-            let envelope = json!({"structuredContent":{"result":disposition,"actionClassification":classification}});
+            let envelope = json!({"result":disposition,"actionClassification":classification});
             std::fs::write(&artifact, serde_json::to_vec(&envelope).unwrap()).unwrap();
             let mut returned = result.clone();
             returned.content_for_model = envelope;
@@ -516,15 +684,16 @@ mod relay_result_controls {
             );
         }
         for value in [
-            json!({"structuredContent":{"result":"mutation"}}),
-            json!({"structuredContent":{"result":"mutation","actionClassification":"navigation"}}),
-            json!({"structuredContent":{"result":"dispatched-indeterminate"}}),
-            json!({"structuredContent":{"result":"dispatched-unconfirmed"}}),
-            json!({"structuredContent":{"result":"mutation","approvalRequired":true}}),
-            json!({"structuredContent":{"result":"partial"}}),
-            json!({"structuredContent":{"result":"navigation"}}),
-            json!({"structuredContent":{"result":"navigation","actionClassification":"dispatched-unconfirmed"}}),
-            json!({"isError":true,"structuredContent":{"result":"mutation"}}),
+            json!({"result":"mutation"}),
+            json!({"result":"mutation","actionClassification":"navigation"}),
+            json!({"result":"dispatched-indeterminate"}),
+            json!({"result":"dispatched-unconfirmed"}),
+            json!({"result":"mutation","approvalRequired":true}),
+            json!({"result":"partial"}),
+            json!({"result":"navigation"}),
+            json!({"result":"navigation","actionClassification":"dispatched-unconfirmed"}),
+            json!({"isError":true,"result":"mutation","actionClassification":"mutation-observed"}),
+            json!({"structuredContent":{"result":"mutation","actionClassification":"mutation-observed"}}),
         ] {
             std::fs::write(&artifact, serde_json::to_vec(&value).unwrap()).unwrap();
             let mut returned = result.clone();
@@ -604,7 +773,9 @@ pub fn retained_outcome_request(
         "selected resultArtifact name unsupported"
     );
     let root = run_directory.join("artifacts");
-    let artifact = root.join(format!("{name}.json"));
+    let artifact = root.join(trollm_mcp::preparation::selected_result_artifact_name(
+        name, context,
+    )?);
     ensure!(
         result_event["artifacts"]
             .as_array()
@@ -621,16 +792,23 @@ pub fn retained_outcome_request(
         "retained navigation receipt does not match original sent action"
     );
     let mut artifact_record = None;
+    let mut conflicting_artifact = false;
     trollm_core::EventLog::visit(&journal, Some(&context.run_id), |event, raw| {
-        if event["type"] == "artifact_written"
-            && event["path"].as_str() == artifact.to_str()
-            && event["seq"].as_u64().is_some_and(|seq| seq > sequences.1)
-            && event["sha256"] == observed.sha256
-            && event["bytes"].as_u64() == Some(observed.bytes.len() as u64)
-        {
-            artifact_record = Some(raw.to_owned());
+        if event["type"] == "artifact_written" && event["path"].as_str() == artifact.to_str() {
+            if event["seq"].as_u64().is_some_and(|seq| seq > sequences.1)
+                && event["sha256"] == observed.sha256
+                && event["bytes"].as_u64() == Some(observed.bytes.len() as u64)
+            {
+                artifact_record = Some(raw.to_owned());
+            } else {
+                conflicting_artifact = true;
+            }
         }
     })?;
+    ensure!(
+        !conflicting_artifact,
+        "native retained artifact commitment conflict"
+    );
     let artifact_record =
         artifact_record.context("native retained artifact hash association unavailable")?;
     let evidence = serde_json::to_vec(&json!({
@@ -674,6 +852,24 @@ mod outcome_association_controls {
         }
     }
     fn check_original_journal(action: &str, disposition: &str, accepted: bool) {
+        let _ = check_original_journal_size(action, disposition, accepted, 0);
+    }
+    #[test]
+    fn original_artifact_is_not_truncated_to_fit_outcome_evidence() {
+        // Measure the actual native association representation, including
+        // original journal record text, before choosing adjacent bounded cases.
+        let base = check_original_journal_size("click", "mutation", true, 0).unwrap();
+        let below = (16_384 - base - 64) * 3 / 4;
+        let size = check_original_journal_size("click", "mutation", true, below).unwrap();
+        assert!((16_200..=16_384).contains(&size));
+        assert!(check_original_journal_size("click", "mutation", false, below + 256).is_none());
+    }
+    fn check_original_journal_size(
+        action: &str,
+        disposition: &str,
+        accepted: bool,
+        padding: usize,
+    ) -> Option<usize> {
         let parent = std::env::temp_dir().join(format!(
             "native-outcome-{}-{}",
             std::process::id(),
@@ -685,16 +881,9 @@ mod outcome_association_controls {
         let run = parent.join("actual-run");
         let artifacts = run.join("artifacts");
         std::fs::create_dir_all(&artifacts).unwrap();
-        let artifact = artifacts.join("returned.json");
-        let envelope = json!({"structuredContent":{"result":disposition,
-            "actionClassification":if disposition == "navigation" { "navigation" } else { "mutation-observed" }}});
+        let envelope = json!({"result":disposition,"padding":"x".repeat(padding),
+            "actionClassification":if disposition == "navigation" { "navigation" } else { "mutation-observed" }});
         let raw = serde_json::to_vec(&envelope).unwrap();
-        std::fs::write(&artifact, &raw).unwrap();
-        std::fs::write(
-            artifacts.join("returned.json.meta.json"),
-            b"{\"complete\":true}",
-        )
-        .unwrap();
         let selection = super::tests::decode(&super::tests::body()).unwrap();
         let context = trollm_mcp::preparation::PreparationContext {
             run_id: "actual-run".into(),
@@ -711,6 +900,15 @@ mod outcome_association_controls {
                 call: 1,
             },
         };
+        let artifact = artifacts.join(
+            trollm_mcp::preparation::selected_result_artifact_name("returned", &context).unwrap(),
+        );
+        std::fs::write(&artifact, &raw).unwrap();
+        std::fs::write(
+            format!("{}.meta.json", artifact.display()),
+            b"{\"complete\":true}",
+        )
+        .unwrap();
         let call = trollm_mcp::ToolCall {
             server: "fixture".into(),
             tool: "act".into(),
@@ -763,15 +961,65 @@ mod outcome_association_controls {
             (i, r),
             "returned",
         );
-        if accepted {
+        let retained_size = if accepted {
             let outcome = outcome.unwrap();
             assert_eq!(outcome["outcome"], "OBSERVATION_RETURNED");
             assert_eq!(outcome["contextSha256"], context.raw().unwrap().sha256);
+            use base64::Engine;
+            let evidence = base64::engine::general_purpose::STANDARD
+                .decode(outcome["journalEvidence"]["bytesBase64"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(outcome["journalEvidence"]["sha256"], raw_sha256(&evidence));
+            let decoded: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(
+                        decoded["parsedEnvelopeArtifact"]["bytesBase64"]
+                            .as_str()
+                            .unwrap()
+                    )
+                    .unwrap(),
+                raw
+            );
+            Some(evidence.len())
         } else {
+            if padding > 0 {
+                assert!(outcome
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exceeds wire bound"));
+            }
             assert!(
                 outcome.is_err(),
                 "mismatched native action/receipt must not acknowledge"
             );
+            None
+        };
+        assert_eq!(
+            std::fs::read(&artifact).unwrap(),
+            raw,
+            "refusal must retain the whole original artifact, not a fitted projection"
+        );
+        if accepted && padding == 0 {
+            log.append(
+                trollm_core::EventType::ArtifactWritten,
+                json!({"path":artifact,"bytes":raw.len(),"sha256":"f".repeat(64)}),
+            )
+            .unwrap();
+            assert!(retained_outcome_request(
+                &selection,
+                &context,
+                &call,
+                &result,
+                &run,
+                (i, r),
+                "returned"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("commitment conflict"));
+            assert_eq!(std::fs::read(&artifact).unwrap(), raw);
         }
         std::fs::write(&artifact, b"{}").unwrap();
         assert!(retained_outcome_request(
@@ -786,5 +1034,6 @@ mod outcome_association_controls {
         .is_err());
         drop(log);
         std::fs::remove_dir_all(parent).unwrap();
+        retained_size
     }
 }

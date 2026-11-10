@@ -1263,3 +1263,19 @@ Pause/Resume without `resumeAt` retains the active snapshot and cursor; an expli
 declared exit. It consumes authored end outcomes, never model prose.
 [Flow reliability](FLOW-RELIABILITY.md) defines migration, partial collections,
 paused exits and the unchanged treatment of execution failures.
+
+
+### Generic reference lookup and task presentation
+
+Literal substring lookup across authored record fields and opt-in identical repeated
+numeric ordering keys are isolated built-in operations. Original objects remain saved;
+the tools establish literal membership or numeric order, not semantic suitability.
+Their defaults preserve the prior exact-selection and strict-decimal contracts; see
+[the built-in tool contracts](BUILTIN-TOOLS.md).
+
+For nodes with routes or a prompt supplement, automatic presentation contains allowed
+route names and the full bounded last failure. Mechanical tool guidance comes before
+the current authored instructions/evidence. Explicit runtime bindings, graph edges,
+mutation journaling and persisted state are unchanged. Unopted legacy prompt assembly
+is unchanged. Recovery keeps the failure origin and mutation outcome across nodes;
+see [adaptive flows](ADAPTIVE-FLOWS.md#step-instructions-and-recovery-context).

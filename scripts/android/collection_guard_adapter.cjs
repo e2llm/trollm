@@ -43,7 +43,7 @@ function decodeRequest(bytes, ready, selectionRef) {
   if (!value.guardRequest || typeof value.guardRequest !== 'object' || Array.isArray(value.guardRequest) ||
       Buffer.byteLength(JSON.stringify(value.guardRequest)) > MAX_GUARD_BYTES) fail('GUARD_REQUEST_INVALID');
   if (ready.schema === 'controlled-collection-selected-ready.v3' &&
-      ready.nativeProfileId !== 'controlled-collection-native-selected.v3-proposal') fail('SELECTED_READY_MISMATCH');
+      !['controlled-collection-native-selected.v3-proposal','controlled-collection-native-selected.v4-proposal'].includes(ready.nativeProfileId)) fail('SELECTED_READY_MISMATCH');
   const selected = ready.schema === 'controlled-collection-selected-ready.v2' || ready.schema === 'controlled-collection-selected-ready.v3';
   if (value.guardRequest.kind === 'prepare') {
     if (!selected) fail('SELECTED_READY_REQUIRED');

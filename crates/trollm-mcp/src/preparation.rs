@@ -70,6 +70,26 @@ pub fn raw_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// One immutable selected result destination per original preparation context.
+/// The policy label remains independently selected; this is not a dispatch permit.
+pub fn selected_result_artifact_name(
+    policy_name: &str,
+    context: &PreparationContext,
+) -> Result<String> {
+    ensure!(
+        !policy_name.is_empty()
+            && policy_name.len() <= 128
+            && policy_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "selected resultArtifact name unsupported"
+    );
+    let identity = serde_json::to_vec(&serde_json::json!({
+        "policyName":policy_name,"contextSha256":context.raw()?.sha256
+    }))?;
+    Ok(format!("selected-result-{}.json", raw_sha256(&identity)))
+}
+
 /// The supplier/private-IPC contracts use JavaScript key order and safe integer
 /// JSON. This is serialization only, never a profiled logical digest.
 pub fn js_sorted_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {

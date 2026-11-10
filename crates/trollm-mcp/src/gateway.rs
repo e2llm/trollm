@@ -490,6 +490,32 @@ impl McpGateway {
         Ok(Some(p))
     }
 
+    fn require_unused_selected_result(
+        &self,
+        call: &ToolCall,
+        context: &PreparationContext,
+    ) -> Result<()> {
+        if let Some(name) = self
+            .policies
+            .get(&call.server, &call.tool)
+            .and_then(|policy| policy.result_artifact.as_ref())
+        {
+            let path = self
+                .artifact_dir
+                .join(crate::preparation::selected_result_artifact_name(
+                    name, context,
+                )?);
+            let metadata_path = PathBuf::from(format!("{}.meta.json", path.display()));
+            for candidate in [&path, &metadata_path] {
+                match std::fs::symlink_metadata(candidate) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => bail!("selected result destination already exists or is unavailable"),
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_catalog_for(&self, server: &str) -> Result<()> {
         if server != local::SERVER {
             self.server(server)?.catalog(self.deadline)?;
@@ -603,6 +629,7 @@ impl McpGateway {
                         gate()?;
                     }
                     if let Some(p) = self.prepared_for(&call)? {
+                        self.require_unused_selected_result(&call, &p.context)?;
                         anyhow::ensure!(self.send_gate.is_some(), "native send gate unavailable");
                         self.preparer
                             .as_ref()
@@ -823,6 +850,7 @@ impl ToolGateway for McpGateway {
             "native preparation context already used"
         );
         self.preparation_fenced = true;
+        self.require_unused_selected_result(call, context)?;
         self.ensure_catalog_for(&call.server)?;
         let prepared = self
             .preparer
@@ -1058,6 +1086,25 @@ impl ToolGateway for McpGateway {
             }
             result
         })();
+        // Includes initialization/catalog failures before dispatch as well as
+        // a received failure after a possible selected write. Retention never
+        // changes the original refusal into an acknowledgement or a retry.
+        let result = match result {
+            Err(error) => {
+                if let Some(received) =
+                    error.downcast_ref::<crate::transport::HttpResponseFailure>()
+                {
+                    if self.retain_http_response(call, received).is_err() {
+                        Err(error.context("MCP_HTTP_DIAGNOSTIC_UNAVAILABLE"))
+                    } else {
+                        Err(error)
+                    }
+                } else {
+                    Err(error)
+                }
+            }
+            ok => ok,
+        };
         if let Some(active) = self.active_preparation.take() {
             if result.is_ok() {
                 self.awaiting_retained_result = Some(active);
@@ -1084,6 +1131,60 @@ impl McpGateway {
         *target = Some(target.unwrap_or_default().saturating_add(started.elapsed()));
         self.timings.set(metrics);
         result
+    }
+
+    fn retain_http_response(
+        &self,
+        call: &ToolCall,
+        response: &crate::transport::HttpResponseFailure,
+    ) -> Result<()> {
+        use std::io::Write;
+        let args_hash = CacheStore::hash_args(&call.args, None, None);
+        let original = serde_json::to_vec(&json!({
+            "response": response.private,
+            "server": call.server, "tool": call.tool, "argsHash": args_hash,
+            "callContext": self.call_context,
+            "scope": "private-http-originals-not-effect-settlement"
+        }))?;
+        anyhow::ensure!(original.len() <= 512 * 1024, "MCP_HTTP_DIAGNOSTIC_LIMIT");
+        let digest = format!("{:x}", Sha256::digest(&original));
+        std::fs::create_dir_all(&self.artifact_dir)?;
+        let path = self
+            .artifact_dir
+            .join(format!("mcp-http-failure-{digest}.json"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(&original)?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                anyhow::ensure!(
+                    std::fs::symlink_metadata(&path)?.file_type().is_file()
+                        && std::fs::metadata(&path)?.len() == original.len() as u64
+                        && std::fs::read(&path)? == original,
+                    "MCP_HTTP_DIAGNOSTIC_CONFLICT"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::File::open(&self.artifact_dir)?.sync_all()?;
+        self.emit(ProxyEvent::HttpResponseRefused {
+            server: call.server.clone(),
+            tool: call.tool.clone(),
+            args_hash,
+            status: response.status,
+            cause: response.cause.to_owned(),
+            diagnostic_path: path,
+            diagnostic_sha256: digest,
+            call_context: self.call_context.clone(),
+        })
     }
 
     fn response_size(
@@ -1541,10 +1642,25 @@ impl McpGateway {
     ) -> Result<Option<PathBuf>> {
         self.measured("admission", || {
             self.require_tool_credentials(&call.server, &call.tool)?;
+            let selected = self.prepared_for(call)?;
             let result_path = policy
                 .and_then(|p| p.result_artifact.as_ref())
-                .map(|name| self.artifact_dir.join(format!("{name}.json")));
+                .map(|name| {
+                    let filename = if let Some(prepared) = selected {
+                        crate::preparation::selected_result_artifact_name(name, &prepared.context)?
+                    } else {
+                        format!("{name}.json")
+                    };
+                    Ok::<_, anyhow::Error>(self.artifact_dir.join(filename))
+                })
+                .transpose()?;
             if let Some(path) = &result_path {
+                if selected.is_some() {
+                    match std::fs::symlink_metadata(path) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        _ => bail!("selected result artifact already exists or is unavailable"),
+                    }
+                }
                 let meta_path = PathBuf::from(format!("{}.meta.json", path.display()));
                 // A failed replacement must never leave new data marked complete.
                 write_file_atomic(
@@ -1584,7 +1700,21 @@ impl McpGateway {
             let mut artifacts = Vec::new();
             let result_path = self.prepare_result(call, policy, &payload)?;
             if let Some(path) = &result_path {
-                write_file_atomic(path, &serde_json::to_vec(&payload)?)?;
+                let bytes = serde_json::to_vec(&payload)?;
+                if self.prepared_for(call)?.is_some() {
+                    use std::io::Write;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(path)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    std::fs::File::open(&self.artifact_dir)?.sync_all()?;
+                } else {
+                    write_file_atomic(path, &bytes)?;
+                }
             }
             let content = match policy.and_then(|p| p.shape.as_ref()) {
                 Some(shape) => {

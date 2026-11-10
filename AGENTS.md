@@ -65,6 +65,12 @@ These are structural contracts, not expressions or semantic extraction; see the
 architecture and small-model practices below. Preserve original evidence alongside
 model advice.
 
+For a readable label instead of an opaque ID, see the small
+[record-lookup example](flows/examples/record-lookup.flow.yaml) and its
+[walkthrough](docs/FLOW-PRACTICES.md#worked-example-readable-reference-to-original-record).
+Literal lookup still requires one original match; it does not establish semantic
+suitability or freshness. Existing exact-ID selection remains available.
+
 **Edit the registry-linked prompt to change model instructions.** The plan's
 `input.promptTemplate` field is reserved and inactive.
 

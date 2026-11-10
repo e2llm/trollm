@@ -26,7 +26,10 @@ fn run() -> Result<()> {
     let matched = args
         .first()
         .is_some_and(|value| value == "--matched-pending");
-    if n1_offer || matched {
+    let workload_600 = args
+        .first()
+        .is_some_and(|value| value == "--matched-pending-600");
+    if n1_offer || matched || workload_600 {
         args.remove(0);
     }
     ensure!(args.len() == 6, "expected six member compiler arguments");
@@ -34,7 +37,9 @@ fn run() -> Result<()> {
     let owner: Owner = serde_json::from_slice(&read(&args[2], 4096)?)?;
     let selection = SelectionRecord::decode(&read(&args[0], 65536)?, &reference, &owner)?;
     let context = read(&args[3], 2048)?;
-    let members = if matched {
+    let members = if workload_600 {
+        CollectionMembers::compile_matched_600(&selection, &context, &args[4])?
+    } else if matched {
         CollectionMembers::compile_matched(&selection, &context, &args[4])?
     } else if n1_offer {
         CollectionMembers::compile_n1_offer(&selection, &context, &args[4])?
@@ -42,7 +47,9 @@ fn run() -> Result<()> {
         CollectionMembers::compile(&selection, &context, &args[4])?
     };
     members.write_new(Path::new(&args[5]))?;
-    let inspected = if matched {
+    let inspected = if workload_600 {
+        CollectionMembers::inspect_matched_600(Path::new(&args[5]), &selection, &context, &args[4])?
+    } else if matched {
         CollectionMembers::inspect_matched(Path::new(&args[5]), &selection, &context, &args[4])?
     } else if n1_offer {
         CollectionMembers::inspect_n1_offer(Path::new(&args[5]), &selection, &context, &args[4])?
@@ -51,13 +58,13 @@ fn run() -> Result<()> {
     };
     println!(
         "{}",
-        serde_json::json!({"profile":inspected.member_profile,"manifestSha256":trollm_uniffi::collection::raw_sha256(&members.files["manifest.json"]),"files":members.files.len(),"rootPlanPin":inspected.root_plan_pin,"bindings":inspected.bindings.iter().map(|b|serde_json::json!({"planPin":b.plan_pin,"node":b.node,"taskRef":b.task_ref,"purpose":b.purpose,"cursorNode":b.cursor_node,"resultArtifact":b.result_artifact})).collect::<Vec<_>>(),"runtimeAdmissionSupported":false})
+        serde_json::json!({"profile":inspected.member_profile,"profileSha256":trollm_uniffi::collection::raw_sha256(&members.files["collection-profile.json"]),"manifestSha256":trollm_uniffi::collection::raw_sha256(&members.files["manifest.json"]),"files":members.files.len(),"rootPlanPin":inspected.root_plan_pin,"bindings":inspected.bindings.iter().map(|b|serde_json::json!({"planPin":b.plan_pin,"node":b.node,"taskRef":b.task_ref,"purpose":b.purpose,"cursorNode":b.cursor_node,"resultArtifact":b.result_artifact})).collect::<Vec<_>>(),"runtimeAdmissionSupported":false})
     );
     Ok(())
 }
 fn main() {
     if let Err(error) = run().context("collection member compilation refused") {
-        eprintln!("{error:#}\nUsage: collection-members [--n1-offer|--matched-pending] /abs/selection.json /abs/selection-ref.json /abs/owner.json /abs/context.txt https://api.e2llm.dev/mcp /abs/new-output");
+        eprintln!("{error:#}\nUsage: collection-members [--n1-offer|--matched-pending|--matched-pending-600] /abs/selection.json /abs/selection-ref.json /abs/owner.json /abs/context.txt https://api.e2llm.dev/mcp /abs/new-output");
         std::process::exit(2);
     }
 }

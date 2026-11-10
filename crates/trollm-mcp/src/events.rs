@@ -26,6 +26,19 @@ pub enum ProxyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timings: Option<serde_json::Value>,
     },
+    /// Reference to bounded private original HTTP failure evidence. Never an
+    /// acknowledgement, business verdict or permission to retry an effect.
+    HttpResponseRefused {
+        server: String,
+        tool: String,
+        args_hash: String,
+        status: u16,
+        cause: String,
+        diagnostic_path: PathBuf,
+        diagnostic_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_context: Option<crate::CallContext>,
+    },
     CacheHit {
         server: String,
         tool: String,
@@ -91,6 +104,7 @@ impl ProxyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::ResponseSize { .. } => "response_size",
+            Self::HttpResponseRefused { .. } => "http_response_refused",
             Self::CacheHit { .. } => "cache_hit",
             Self::CacheMiss { .. } => "cache_miss",
             Self::FetchStarted { .. } => "fetch_started",

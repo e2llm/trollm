@@ -115,6 +115,58 @@ impl std::fmt::Display for GuardClockTimeout {
 }
 impl std::error::Error for GuardClockTimeout {}
 
+/// Closed acquisition categories. Connect includes TLS/DNS/connect failures;
+/// it deliberately does not guess a lower-level cause from an error string.
+#[derive(Clone, Copy, Debug)]
+pub enum GuardClockFailure {
+    Connect,
+    Request,
+    HttpStatus,
+    BodyRead,
+    BodyLimit,
+    HashMissing,
+    HashMismatch,
+    ResponseFormat,
+    Association,
+    EvidenceIo,
+    GuestRead,
+    ChallengeSource,
+    Credentials,
+}
+impl GuardClockFailure {
+    pub fn id(self) -> u8 {
+        self as u8 + 7
+    }
+    pub fn code_from_id(id: u8) -> Option<&'static str> {
+        [
+            "SELECTED_CLOCK_CONNECT_FAILED",
+            "SELECTED_CLOCK_REQUEST_FAILED",
+            "SELECTED_CLOCK_HTTP_STATUS",
+            "SELECTED_CLOCK_BODY_READ",
+            "SELECTED_CLOCK_BODY_LIMIT",
+            "SELECTED_CLOCK_HASH_MISSING",
+            "SELECTED_CLOCK_HASH_MISMATCH",
+            "SELECTED_CLOCK_RESPONSE_FORMAT",
+            "SELECTED_CLOCK_RESPONSE_ASSOCIATION",
+            "SELECTED_CLOCK_EVIDENCE_IO",
+            "SELECTED_CLOCK_GUEST_READ",
+            "SELECTED_CLOCK_CHALLENGE_SOURCE",
+            "SELECTED_CLOCK_CREDENTIALS",
+        ]
+        .get(id.checked_sub(7)? as usize)
+        .copied()
+    }
+    pub fn code(self) -> &'static str {
+        Self::code_from_id(self.id()).expect("closed clock cause")
+    }
+}
+impl std::fmt::Display for GuardClockFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for GuardClockFailure {}
+
 /// Original runtime request bracket and raw transport bytes, never restored as
 /// a fresh anchor. Installed composition must validate selected source/owner,
 /// rate/lifecycle profile and all original expiry minima before using a sample.
@@ -261,26 +313,40 @@ impl PrivateGuardClient {
         original_expires_at: &str,
         deadline: Instant,
         before_io: &dyn Fn() -> Result<()>,
+        retain: &dyn Fn(&str, &[u8]) -> Result<()>,
     ) -> Result<GuardClockResponse> {
-        let sent_endpoint = crate::clock::ClockEndpoint::read()?;
+        let keep =
+            |name: &str, bytes: &[u8]| retain(name, bytes).context(GuardClockFailure::EvidenceIo);
+        let sent_endpoint =
+            crate::clock::ClockEndpoint::read().context(GuardClockFailure::GuestRead)?;
+        keep(
+            "sent-bracket.json",
+            &serde_json::to_vec(&serde_json::json!({
+            "schema":"trollm.clock-calibration-sent.v1-proposal", "sentEndpoint":sent_endpoint,
+            "receivedEndpoint":null}))?,
+        )?;
         let sent = sent_endpoint.boot.clone();
         ensure!(
             sent.boot_id() == guest_boot_id,
-            "clock acquisition guest boot mismatch"
+            GuardClockFailure::Association
         );
         before_io()?;
         let mut random = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut random))
+            .context(GuardClockFailure::ChallengeSource)?;
         let challenge: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let bytes = js_sorted_json_bytes(&serde_json::json!({
+        let request_bytes = js_sorted_json_bytes(&serde_json::json!({
             "schema":"trollm.private-guard-clock-request.v1-proposal",
             "invocationKey":invocation_key,"challenge":challenge,"guestBootId":guest_boot_id
         }))?;
-        let token = required_grant_token(Some(&self.token))?;
+        keep("request.json", &request_bytes)?;
+        let token =
+            required_grant_token(Some(&self.token)).context(GuardClockFailure::Credentials)?;
         before_io()?;
         let timeout = deadline
             .checked_duration_since(Instant::now())
-            .context("clock acquisition deadline expired")?;
+            .context(GuardClockTimeout)?;
         let mut url = self.url.clone();
         url.set_path("/control");
         let response = self
@@ -289,52 +355,74 @@ impl PrivateGuardClient {
             .bearer_auth(token)
             .header("content-type", "application/json")
             .timeout(timeout.min(Duration::from_secs(30)))
-            .body(bytes.clone())
+            .body(request_bytes.clone())
             .send()
             .map_err(|error| {
                 if error.is_timeout() {
                     anyhow::Error::new(GuardClockTimeout)
+                } else if error.is_connect() {
+                    anyhow::Error::new(error).context(GuardClockFailure::Connect)
                 } else {
-                    error.into()
+                    anyhow::Error::new(error).context(GuardClockFailure::Request)
                 }
             })?;
-        ensure!(
-            response.status().as_u16() == 200,
-            "private clock acquisition refused"
-        );
+        let status = response.status().as_u16();
         let advertised = response
             .headers()
             .get("x-response-sha256")
             .and_then(|value| value.to_str().ok())
-            .context("clock response hash missing")?
-            .to_owned();
-        let request_bytes = bytes;
+            .map(str::to_owned);
+        keep(
+            "response-metadata.json",
+            &serde_json::to_vec(&serde_json::json!({
+            "status":status,"advertisedSha256":advertised}))?,
+        )?;
         let mut bytes = Vec::new();
-        response
-            .take(32769)
-            .read_to_end(&mut bytes)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::TimedOut
-                    || error
-                        .get_ref()
-                        .and_then(|source| source.downcast_ref::<reqwest::Error>())
-                        .is_some_and(reqwest::Error::is_timeout)
-                {
-                    anyhow::Error::new(GuardClockTimeout)
-                } else {
-                    error.into()
-                }
-            })?;
-        let received_endpoint = crate::clock::ClockEndpoint::read()?;
+        let body_result = response.take(32769).read_to_end(&mut bytes);
+        keep("response.json", &bytes)?;
+        keep(
+            "body-read.json",
+            &serde_json::to_vec(&serde_json::json!({
+            "complete":body_result.is_ok() && bytes.len()<=32768,"sizeBytes":bytes.len(),
+            "boundedPrefix":bytes.len()>32768}))?,
+        )?;
+        let received_endpoint = crate::clock::ClockEndpoint::read();
+        if let Ok(endpoint) = &received_endpoint {
+            keep(
+                "received-bracket.json",
+                &serde_json::to_vec(&serde_json::json!({
+                "receivedEndpoint":endpoint,"responseSha256":raw_sha256(&bytes)}))?,
+            )?;
+        } else {
+            keep(
+                "received-unavailable.json",
+                &serde_json::to_vec(&serde_json::json!({
+                "cause":GuardClockFailure::GuestRead.code(),"receivedEndpoint":null}))?,
+            )?;
+        }
+        body_result.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut
+                || error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                    .is_some_and(reqwest::Error::is_timeout)
+            {
+                anyhow::Error::new(GuardClockTimeout)
+            } else {
+                anyhow::Error::new(error).context(GuardClockFailure::BodyRead)
+            }
+        })?;
+        let received_endpoint = received_endpoint.context(GuardClockFailure::GuestRead)?;
         let received = received_endpoint.boot.clone();
-        ensure!(
-            bytes.len() <= 32768 && Instant::now() < deadline,
-            "clock acquisition late or oversized"
-        );
+        ensure!(bytes.len() <= 32768, GuardClockFailure::BodyLimit);
+        ensure!(Instant::now() < deadline, GuardClockTimeout);
         before_io()?;
+        ensure!(status == 200, GuardClockFailure::HttpStatus);
+        let advertised = advertised.context(GuardClockFailure::HashMissing)?;
         let sha256 = raw_sha256(&bytes);
-        ensure!(sha256 == advertised, "private clock response hash mismatch");
-        let value: GuardClockControl = serde_json::from_slice(&bytes)?;
+        ensure!(sha256 == advertised, GuardClockFailure::HashMismatch);
+        let value: GuardClockControl =
+            serde_json::from_slice(&bytes).context(GuardClockFailure::ResponseFormat)?;
         ensure!(
             value.schema == "trollm.private-guard-clock.v1-proposal"
                 && value.invocation_key == invocation_key
@@ -344,7 +432,7 @@ impl PrivateGuardClient {
                 && value.expires_at == original_expires_at
                 && !value.aborted
                 && value.sample.association.invocation_key == invocation_key,
-            "private clock response association mismatch"
+            GuardClockFailure::Association
         );
         Ok(GuardClockResponse {
             request_bytes,

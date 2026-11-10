@@ -42,6 +42,45 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 32
+    },
+    "keyExtraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stopBefore",
+        "repeated"
+      ],
+      "properties": {
+        "stopBefore": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "repeated": {
+          "const": "identical"
+        }
+      },
+      "description": "Opt-in literal window before the earliest exact stop marker; repeated prefixed decimals must all be identical. Original records remain unchanged; one invalid admitted key fails the entire operation."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "keyExtraction"
+        ]
+      },
+      "then": {
+        "properties": {
+          "prefix": {
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
 }

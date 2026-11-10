@@ -1,0 +1,33 @@
+schemaVersion: ledger.execution-plan.v1
+id: record-lookup
+version: 1
+limits: {maxSteps: 3, maxReasonerCalls: 1, maxTokensTotal: 8192, timeoutS: 120, artifactMaxMb: 1}
+onLimit: abort
+models:
+  coder: {ctx: 4096}
+  reasoner: {ctx: 4096}
+entryStep: observe
+mcp:
+  servers: []
+  policies:
+    local.filter_records: {resultArtifact: candidates}
+    local.select_unique: {resultArtifact: selected-record}
+nodes:
+  observe:
+    kind: task
+    taskRef: lookup-observe
+    onVerified: select
+  select:
+    kind: task
+    taskRef: lookup-select
+    onVerified: explain
+    routes:
+      no_selection: {status: paused, reason: No suitable original record was established., resumeAt: observe}
+    onError:
+      retry: 0
+      then: {status: paused, reason: The reference did not identify one original record., resumeAt: observe}
+  explain:
+    kind: task
+    taskRef: lookup-explain
+    onVerified: done
+  done: {kind: end, outcome: succeeded}

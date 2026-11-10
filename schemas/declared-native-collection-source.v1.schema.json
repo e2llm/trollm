@@ -93,7 +93,8 @@
     "profileId": {
       "enum": [
         "trollm.native-collection-members.v1-proposal",
-        "trollm.native-collection-members.v3-proposal"
+        "trollm.native-collection-members.v3-proposal",
+        "trollm.native-collection-members.v4-proposal"
       ]
     },
     "profileSha256": {

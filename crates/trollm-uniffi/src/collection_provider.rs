@@ -177,7 +177,7 @@ impl SelectedRunInstallation {
             let selection = SelectionRecord::decode(&raw, &source.selection_ref, &source.owner)?;
             let suffix = selection.selection.items.len()
                 - selection.selection.continuation.prefix_length as usize;
-            let matched = inspected.member_profile == crate::collection_members::MATCHED_PROFILE;
+            let matched = crate::collection_members::is_matched_profile(&inspected.member_profile);
             ensure!(
                 source.profile_id == inspected.member_profile && (matched || suffix <= 1),
                 "selected multi-page navigation installation unavailable"
@@ -383,7 +383,7 @@ impl InstalledCollectionPreparer {
             selection,
             ready,
             bindings,
-            (target.0, target.1, false),
+            (target.0, target.1, None),
             run_directory,
             client,
             environment,
@@ -400,7 +400,7 @@ impl InstalledCollectionPreparer {
         environment: Arc<dyn InstalledSelectedEnvironment>,
     ) -> Result<Self> {
         ensure!(
-            inspected.member_profile == crate::collection_members::MATCHED_PROFILE,
+            crate::collection_members::is_matched_profile(&inspected.member_profile),
             "matched installed member profile required"
         );
         ensure!(
@@ -416,7 +416,17 @@ impl InstalledCollectionPreparer {
             selection,
             ready,
             inspected.bindings.clone(),
-            (target.0, target.1, true),
+            (
+                target.0,
+                target.1,
+                Some(
+                    if inspected.member_profile == crate::collection_members::WORKLOAD_600_PROFILE {
+                        crate::collection_members::WORKLOAD_600_NATIVE_PROFILE
+                    } else {
+                        crate::collection_members::MATCHED_NATIVE_PROFILE
+                    },
+                ),
+            ),
             run_directory,
             client,
             environment,
@@ -428,12 +438,12 @@ impl InstalledCollectionPreparer {
         selection: SelectionRecord,
         ready: Value,
         bindings: Vec<ActionBinding>,
-        target: (String, String, bool),
+        target: (String, String, Option<&'static str>),
         run_directory: PathBuf,
         client: PrivateGuardClient,
         environment: Arc<dyn InstalledSelectedEnvironment>,
     ) -> Result<Self> {
-        let matched = target.2;
+        let matched = target.2.is_some();
         let original = SelectionRecord::decode(
             &selection.original_bytes,
             &selection.selection_ref,
@@ -453,7 +463,7 @@ impl InstalledCollectionPreparer {
                 }
                 && ready["nativeProfileId"]
                     == if matched {
-                        crate::collection_members::MATCHED_NATIVE_PROFILE
+                        target.2.context("matched native profile unavailable")?
                     } else {
                         "controlled-collection-native-selected.v2-proposal"
                     },
@@ -585,7 +595,9 @@ impl InstalledCollectionPreparer {
         })
     }
     fn evidence_provider(&self) -> &'static str {
-        if self.ready["schema"] == crate::collection_members::MATCHED_READY {
+        if self.ready["nativeProfileId"] == crate::collection_members::WORKLOAD_600_NATIVE_PROFILE {
+            "rpa-installed-pending-selected-v4"
+        } else if self.ready["schema"] == crate::collection_members::MATCHED_READY {
             "rpa-installed-pending-selected-v3"
         } else {
             "rpa-2dadbf-installed-selected-v2"
@@ -726,8 +738,13 @@ impl InstalledCollectionPreparer {
             .expected_snapshot
             .as_ref()
             .context("selected inspected snapshot association unavailable")?;
+        let bytes = trollm_core::artifacts::foreach_snapshot_bytes(expected);
         ensure!(
-            cursor.snapshot_ref == format!("artifacts/{}.snapshot.jsonl", cursor.node),
+            cursor.snapshot_ref
+                == format!(
+                    "artifacts/{}",
+                    trollm_core::artifacts::foreach_snapshot_name(&cursor.node, &bytes)
+                ),
             "selected snapshot reference drift"
         );
         let logical = self.run_directory.join(&cursor.snapshot_ref);
@@ -737,31 +754,35 @@ impl InstalledCollectionPreparer {
                 && std::fs::symlink_metadata(&logical)?.is_file(),
             "selected snapshot escapes native custody"
         );
-        let mut bytes = Vec::new();
-        for item in expected {
-            bytes.extend_from_slice(serde_json::to_string(item)?.as_bytes());
-            bytes.push(b'\n');
-        }
         let actual =
             crate::setup::read_input_evidence(&self.run_directory, &cursor.snapshot_ref, 65536)?;
         ensure!(actual == bytes, "selected full suffix snapshot drift");
         let hash = raw_sha256(&actual);
-        let mut retained = false;
+        let mut committed = None;
+        let mut conflicting = false;
         trollm_core::EventLog::visit(
             &self.run_directory.join("events.jsonl"),
             Some(&context.run_id),
             |event, _| {
-                if event["type"] == "artifact_written"
-                    && event["path"].as_str() == logical.to_str()
-                    && event["sha256"].as_str() == Some(hash.as_str())
-                    && event["bytes"].as_u64() == Some(actual.len() as u64)
+                if event["type"] == "artifact_written" && event["path"].as_str() == logical.to_str()
                 {
-                    retained = true;
+                    let next = event["sha256"]
+                        .as_str()
+                        .zip(event["bytes"].as_u64())
+                        .map(|(hash, bytes)| (hash.to_owned(), bytes));
+                    if next.is_none()
+                        || committed
+                            .as_ref()
+                            .is_some_and(|previous| Some(previous) != next.as_ref())
+                    {
+                        conflicting = true;
+                    }
+                    committed = next;
                 }
             },
         )?;
         ensure!(
-            retained,
+            !conflicting && committed == Some((hash, actual.len() as u64)),
             "selected snapshot has no actual native artifact record"
         );
         Ok(())
@@ -1626,99 +1647,113 @@ pub(crate) mod controls {
                 true
             }
         }
-        let mut body = crate::collection::tests::body();
-        let context = b"declared full binding context";
-        body["contextRef"]["sha256"] = json!(raw_sha256(context));
-        let selection = crate::collection::tests::decode(&body).unwrap();
-        let members =
-            CollectionMembers::compile_matched(&selection, context, "https://api.e2llm.dev/mcp")
-                .unwrap();
-        let installation = raw_sha256(&members.files["manifest.json"]);
-        let root = std::env::temp_dir().join(format!(
-            "selected-positive-bind-{}",
-            trollm_core::RunDir::under(Path::new("unused")).run_id()
-        ));
-        std::fs::create_dir_all(root.join("bundle-revisions")).unwrap();
-        let directory = root.join("bundle-revisions").join(&installation);
-        members.write_new(&directory).unwrap();
-        let source = CollectionSource {
-            schema_version: SOURCE_SCHEMA.into(),
-            origin: "DECLARED".into(),
-            owner: selection.selection.owner.clone(),
-            fixture_id: "declared-fixture".into(),
-            version_id: "declared-version".into(),
-            selection_ref: selection.selection_ref.clone(),
-            selection_raw_sha256: raw_sha256(&selection.original_bytes),
-            profile_id: MATCHED_PROFILE.into(),
-            profile_sha256: raw_sha256(&members.files["collection-profile.json"]),
-            installation_sha256: installation.clone(),
-            qualification: "unqualified".into(),
-        };
-        let inspected = source
-            .inspect(&directory, "https://api.e2llm.dev/mcp")
+        for workload in [false, true] {
+            let mut body = crate::collection::tests::body();
+            let context = b"declared full binding context";
+            body["contextRef"]["sha256"] = json!(raw_sha256(context));
+            let selection = crate::collection::tests::decode(&body).unwrap();
+            let members = if workload {
+                CollectionMembers::compile_matched_600(
+                    &selection,
+                    context,
+                    "https://api.e2llm.dev/mcp",
+                )
+            } else {
+                CollectionMembers::compile_matched(&selection, context, "https://api.e2llm.dev/mcp")
+            }
             .unwrap();
-        let (client, policy, assurance, server, requests, clock_directory) =
-            crate::collection_clock::controls::binding_fixture(
-                crate::collection::tests::decode(&body).unwrap(),
-            );
-        let expiry = "2099-01-01T00:00:00.000Z";
-        let ready = json!({"schema":MATCHED_READY,"nativeProfileId":MATCHED_NATIVE_PROFILE,
+            let installation = raw_sha256(&members.files["manifest.json"]);
+            let root = std::env::temp_dir().join(format!(
+                "selected-positive-bind-{}",
+                trollm_core::RunDir::under(Path::new("unused")).run_id()
+            ));
+            std::fs::create_dir_all(root.join("bundle-revisions")).unwrap();
+            let directory = root.join("bundle-revisions").join(&installation);
+            members.write_new(&directory).unwrap();
+            let source = CollectionSource {
+                schema_version: SOURCE_SCHEMA.into(),
+                origin: "DECLARED".into(),
+                owner: selection.selection.owner.clone(),
+                fixture_id: "declared-fixture".into(),
+                version_id: "declared-version".into(),
+                selection_ref: selection.selection_ref.clone(),
+                selection_raw_sha256: raw_sha256(&selection.original_bytes),
+                profile_id: if workload {
+                    crate::collection_members::WORKLOAD_600_PROFILE
+                } else {
+                    MATCHED_PROFILE
+                }
+                .into(),
+                profile_sha256: raw_sha256(&members.files["collection-profile.json"]),
+                installation_sha256: installation.clone(),
+                qualification: "unqualified".into(),
+            };
+            let inspected = source
+                .inspect(&directory, "https://api.e2llm.dev/mcp")
+                .unwrap();
+            let (client, policy, assurance, server, requests, clock_directory) =
+                crate::collection_clock::controls::binding_fixture(
+                    crate::collection::tests::decode(&body).unwrap(),
+                );
+            let expiry = "2099-01-01T00:00:00.000Z";
+            let ready = json!({"schema":MATCHED_READY,"nativeProfileId":if workload { crate::collection_members::WORKLOAD_600_NATIVE_PROFILE } else { MATCHED_NATIVE_PROFILE },
             "invocationKey":body["invocationKey"],"selectionRawSha256":raw_sha256(&selection.original_bytes),
             "selectionRef":selection.selection_ref,"owner":body["owner"],"selection":body,"navigationSupported":true,
             "expiresAt":expiry,"originalCaseExpiresAt":expiry,"preparationPolicy":{
                 "maxObservationAgeMs":1000,"minPreparationRemainingMs":100,"selectionExpiresAt":expiry,"authorityExpiresAt":expiry,
                 "clockPolicy":{"basis":"bounded-utc","maxClockErrorMs":1000,"assuranceRef":assurance}}});
-        let run = trollm_core::RunDir::under(&root);
-        run.create_dirs().unwrap();
-        let association = json!({"nativeRunId":run.run_id(),"installation":{"installationSha256":installation},
+            let run = trollm_core::RunDir::under(&root);
+            run.create_dirs().unwrap();
+            let association = json!({"nativeRunId":run.run_id(),"installation":{"installationSha256":installation},
             "descriptor":{"source":source,"expiresAt":expiry,"identity":{"manifestSha256":installation}}});
-        let calls = Arc::new(AtomicUsize::new(0));
-        let provider: crate::SharedTokenProvider = Arc::new(Box::new(Provider {
-            id: run.run_id().to_owned(),
-            calls: calls.clone(),
-        }));
-        let installed = SelectedRunInstallation::new_calibrated(
-            ready,
-            client,
-            policy,
-            raw_sha256(b"declared-static-key"),
-        )
-        .unwrap()
-        .with_private_installation_key("a".repeat(64));
-        let preparer = installed
-            .bind(
-                &root,
-                run.path(),
-                &association,
-                &inspected,
-                provider,
-                "https://api.e2llm.dev/mcp",
+            let calls = Arc::new(AtomicUsize::new(0));
+            let provider: crate::SharedTokenProvider = Arc::new(Box::new(Provider {
+                id: run.run_id().to_owned(),
+                calls: calls.clone(),
+            }));
+            let installed = SelectedRunInstallation::new_calibrated(
+                ready,
+                client,
+                policy,
+                raw_sha256(b"declared-static-key"),
             )
-            .unwrap();
-        server.join().unwrap();
-        assert_eq!(requests.load(Ordering::SeqCst), 3);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            std::fs::read_dir(run.path())
-                .unwrap()
-                .filter(|e| e
-                    .as_ref()
+            .unwrap()
+            .with_private_installation_key("a".repeat(64));
+            let preparer = installed
+                .bind(
+                    &root,
+                    run.path(),
+                    &association,
+                    &inspected,
+                    provider,
+                    "https://api.e2llm.dev/mcp",
+                )
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(requests.load(Ordering::SeqCst), 3);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                std::fs::read_dir(run.path())
                     .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("clock-calibration-"))
-                .count(),
-            6
-        );
-        assert!(run
-            .path()
-            .join("selected-private-installation.json")
-            .exists());
-        assert!(run.path().join("selected-invocation.json").exists());
-        assert!(!run.path().join("events.jsonl").exists()); // Binding alone starts no worker/model.
-        drop(preparer);
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(clock_directory).unwrap();
+                    .filter(|e| e
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("clock-calibration-"))
+                    .count(),
+                14
+            );
+            assert!(run
+                .path()
+                .join("selected-private-installation.json")
+                .exists());
+            assert!(run.path().join("selected-invocation.json").exists());
+            assert!(!run.path().join("events.jsonl").exists()); // Binding alone starts no worker/model.
+            drop(preparer);
+            std::fs::remove_dir_all(root).unwrap();
+            std::fs::remove_dir_all(clock_directory).unwrap();
+        }
     }
 
     #[test]
@@ -1876,7 +1911,7 @@ pub(crate) mod controls {
         .unwrap()
     }
     #[test]
-    fn matched_constructor_requires_v3_members_ready_and_exact_full_suffix() {
+    fn matched_constructor_requires_exact_v3_or_v4_members_ready_and_full_suffix() {
         for (variant, prefix) in [
             ("original", 0),
             ("changed", 0),
@@ -1982,21 +2017,78 @@ pub(crate) mod controls {
                 provider.evidence_provider(),
                 "rpa-installed-pending-selected-v3"
             );
+            let workload = crate::collection_members::CollectionMembers::compile_matched_600(
+                &selection,
+                b"controlled source context",
+                "https://api.e2llm.dev/mcp",
+            )
+            .unwrap();
+            let workload_directory = root.join("members-600");
+            workload.write_new(&workload_directory).unwrap();
+            let workload_inspected =
+                crate::collection_members::CollectionMembers::inspect_matched_600(
+                    &workload_directory,
+                    &selection,
+                    b"controlled source context",
+                    "https://api.e2llm.dev/mcp",
+                )
+                .unwrap();
+            // Native profile is selected by exact inspected members, not a free ready override.
+            assert!(InstalledCollectionPreparer::new_matched(
+                decode(),
+                ready.clone(),
+                &workload_inspected,
+                ("e2llm".into(), "act".into()),
+                root.join("run"),
+                client(),
+                environment.clone()
+            )
+            .is_err());
+            let mut workload_ready = ready.clone();
+            workload_ready["nativeProfileId"] =
+                json!(crate::collection_members::WORKLOAD_600_NATIVE_PROFILE);
+            assert!(InstalledCollectionPreparer::new_matched(
+                decode(),
+                workload_ready.clone(),
+                &inspected,
+                ("e2llm".into(), "act".into()),
+                root.join("run"),
+                client(),
+                environment.clone()
+            )
+            .is_err());
+            let workload_provider = InstalledCollectionPreparer::new_matched(
+                decode(),
+                workload_ready,
+                &workload_inspected,
+                ("e2llm".into(), "act".into()),
+                root.join("run"),
+                client(),
+                environment.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                workload_provider.evidence_provider(),
+                "rpa-installed-pending-selected-v4"
+            );
             if !inspected.expected_snapshot.is_empty() {
                 let run = root.join("run");
                 std::fs::create_dir_all(run.join("artifacts")).unwrap();
-                let raw = inspected
-                    .expected_snapshot
-                    .iter()
-                    .map(|item| format!("{item}\n"))
-                    .collect::<String>();
-                let path = run.join("artifacts/items.snapshot.jsonl");
-                std::fs::write(&path, &raw).unwrap();
+                let written = trollm_core::artifacts::write_foreach_snapshot(
+                    &run.join("artifacts"),
+                    "items",
+                    &inspected.expected_snapshot,
+                )
+                .unwrap();
+                let path = written.path;
+                let raw = std::fs::read(&path).unwrap();
+                let snapshot_ref =
+                    format!("artifacts/{}", path.file_name().unwrap().to_str().unwrap());
                 let mut log =
                     trollm_core::EventLog::open(&run.join("events.jsonl"), "run").unwrap();
                 log.append(
                     trollm_core::EventType::ArtifactWritten,
-                    json!({"path":path,"bytes":raw.len(),"sha256":raw_sha256(raw.as_bytes())}),
+                    json!({"path":path,"bytes":raw.len(),"sha256":raw_sha256(&raw)}),
                 )
                 .unwrap();
                 let first = &inspected.bindings[0];
@@ -2016,7 +2108,7 @@ pub(crate) mod controls {
                 ];
                 actual.cursors = vec![trollm_mcp::preparation::CursorPosition {
                     node: "items".into(),
-                    snapshot_ref: "artifacts/items.snapshot.jsonl".into(),
+                    snapshot_ref: snapshot_ref.clone(),
                     index: 0,
                     phase: "inBody".into(),
                 }];
@@ -2162,7 +2254,7 @@ pub(crate) mod controls {
             .cursors
             .push(trollm_mcp::preparation::CursorPosition {
                 node: "items".into(),
-                snapshot_ref: "artifacts/items.snapshot.jsonl".into(),
+                snapshot_ref: String::new(),
                 index: 0,
                 phase: "inBody".into(),
             });
@@ -2181,13 +2273,16 @@ pub(crate) mod controls {
             selection_input_json: String::new(),
         };
         let provider = provider.with_inspected_snapshot(&inspected).unwrap();
-        let path = run.join("artifacts/items.snapshot.jsonl");
-        let raw = inspected
-            .expected_snapshot
-            .iter()
-            .map(|v| format!("{v}\n"))
-            .collect::<String>();
-        std::fs::write(&path, &raw).unwrap();
+        let written = trollm_core::artifacts::write_foreach_snapshot(
+            &run.join("artifacts"),
+            "items",
+            &inspected.expected_snapshot,
+        )
+        .unwrap();
+        let path = written.path;
+        let raw = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        let snapshot_ref = format!("artifacts/{}", path.file_name().unwrap().to_str().unwrap());
+        context.cursors[0].snapshot_ref = snapshot_ref.clone();
         let mut log =
             trollm_core::EventLog::open(&run.join("events.jsonl"), "fixture-run").unwrap();
         assert!(
@@ -2207,10 +2302,34 @@ pub(crate) mod controls {
             std::fs::write(&path, changed).unwrap();
             assert!(provider.item_request(&call, &context).is_err());
         }
-        std::fs::write(&path, raw).unwrap();
-        context.cursors[0].snapshot_ref = "../other.snapshot.jsonl".into();
-        assert!(provider.item_request(&call, &context).is_err());
-        context.cursors[0].snapshot_ref = "artifacts/items.snapshot.jsonl".into();
+        std::fs::write(&path, &raw).unwrap();
+        for dirty in [
+            "artifacts/items.snapshot.jsonl".to_owned(),
+            format!("artifacts/items.{}.snapshot.jsonl", "f".repeat(64)),
+            "../other.snapshot.jsonl".to_owned(),
+        ] {
+            context.cursors[0].snapshot_ref = dirty;
+            assert!(provider.item_request(&call, &context).is_err());
+        }
+        context.cursors[0].snapshot_ref = snapshot_ref;
+        log.append(
+            trollm_core::EventType::ArtifactWritten,
+            json!({"path":path,"bytes":raw.len(),"sha256":"f".repeat(64)}),
+        )
+        .unwrap();
+        assert!(
+            provider.item_request(&call, &context).is_err(),
+            "last committed identity must match"
+        );
+        log.append(
+            trollm_core::EventType::ArtifactWritten,
+            json!({"path":path,"bytes":raw.len(),"sha256":raw_sha256(raw.as_bytes())}),
+        )
+        .unwrap();
+        assert!(
+            provider.item_request(&call, &context).is_err(),
+            "later records cannot repair conflicting immutable commitments"
+        );
         context.frames[0].plan = "different@sha256:controlled".into();
         assert!(provider.item_request(&call, &context).is_err());
         drop(log);
@@ -2271,7 +2390,7 @@ pub(crate) mod controls {
             ];
             context.cursors = vec![trollm_mcp::preparation::CursorPosition {
                 node: "items".into(),
-                snapshot_ref: "artifacts/items.snapshot.jsonl".into(),
+                snapshot_ref: String::new(),
                 index: 0,
                 phase: "inBetween".into(),
             }];
@@ -2285,18 +2404,21 @@ pub(crate) mod controls {
                 selection_input_json: String::new(),
             };
             let mut provider = provider.with_inspected_snapshot(&inspected).unwrap();
-            let bytes = inspected
-                .expected_snapshot
-                .iter()
-                .map(|item| format!("{item}\n"))
-                .collect::<String>();
-            let path = run.join("artifacts/items.snapshot.jsonl");
-            std::fs::write(&path, &bytes).unwrap();
+            let written = trollm_core::artifacts::write_foreach_snapshot(
+                &run.join("artifacts"),
+                "items",
+                &inspected.expected_snapshot,
+            )
+            .unwrap();
+            let path = written.path;
+            let bytes = std::fs::read(&path).unwrap();
+            context.cursors[0].snapshot_ref =
+                format!("artifacts/{}", path.file_name().unwrap().to_str().unwrap());
             let mut log =
                 trollm_core::EventLog::open(&run.join("events.jsonl"), "fixture-run").unwrap();
             log.append(
                 trollm_core::EventType::ArtifactWritten,
-                json!({"path":path,"bytes":bytes.len(),"sha256":raw_sha256(bytes.as_bytes())}),
+                json!({"path":path,"bytes":bytes.len(),"sha256":raw_sha256(&bytes)}),
             )
             .unwrap();
             let call = ToolCall {
@@ -2645,12 +2767,15 @@ pub(crate) mod controls {
                 .is_err(),
             "guard response alone is not retained native intent"
         );
-        let artifact = run.join("artifacts/relay-envelope.json");
-        let envelope = json!({"structuredContent":{"result":"mutation","actionClassification":"mutation-observed"}});
+        let artifact = run.join("artifacts").join(
+            trollm_mcp::preparation::selected_result_artifact_name("relay-envelope", &context)
+                .unwrap(),
+        );
+        let envelope = json!({"result":"mutation","actionClassification":"mutation-observed"});
         let raw = serde_json::to_vec(&envelope).unwrap();
         std::fs::write(&artifact, &raw).unwrap();
         std::fs::write(
-            run.join("artifacts/relay-envelope.json.meta.json"),
+            format!("{}.meta.json", artifact.display()),
             b"{\"complete\":true}",
         )
         .unwrap();

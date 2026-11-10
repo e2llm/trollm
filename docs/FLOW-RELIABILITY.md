@@ -115,3 +115,46 @@ refusals separately. Keep raw captures and generated bundles private by default.
 The helper tests validate packaging and grants. Scripted Rust tests validate
 binding, selection, cursor and recovery behavior. Neither proves that a real
 model interprets the question correctly or completes the larger workflow.
+
+## Replay readable references
+
+The selection probe defaults to exact original IDs. To exercise literal text
+lookup instead, supply `--match-fields /private/match-fields.json`, containing an
+array such as `["/title", "/label"]`. These pointers address original records;
+the helper binds the actual wrapped collection and leaves only `equals` model-owned.
+Records need no synthetic IDs in text mode. Optional `--stop-before` supplies an
+explicit literal query boundary; it never activates automatically. Keep labels
+with meaningful punctuation in the case set and retain the complete originals.
+`--fields` still controls only the model-visible view, not the lookup source.
+
+Compare ID and text-reference paths against the same observations and advice.
+Include a unique supported reference, an absent target, duplicate labels, changed
+record order and a changed opaque ID. Use real captured observations for native
+model comparisons and label synthetic transfer fixtures. The
+[worked example](FLOW-PRACTICES.md#worked-example-readable-reference-to-original-record)
+and `record_lookup` test demonstrate the binding contract, not model reliability.
+
+For recovery, the `adaptive_routing` integration tests cover an unexecuted malformed
+call, a failed read followed by a successful observation, and returned/unknown
+mutation outcomes. The bounded original failure remains available to subsequent
+nodes. Their scripted choices establish preservation and routing, not that a model
+will always choose the right recovery. Keep the actual observation and uncertain
+write semantics when adapting the example to a remote service.
+
+### Small native presentation check
+
+A four-call CPU replay of the synthetic record-lookup example used
+Qwen3.5-0.8B Q4_K_M, thinking disabled, context 8192, output limit 160,
+temperature 0.1 and seed 42. Both the previous prompt presentation and the new
+presentation selected the supported printer record. Both also incorrectly selected
+that record for an unsupported hotel-reservation request, instead of declining.
+The new presentation removed 16 input tokens in these cases; this sample does
+not establish a latency or accuracy improvement.
+
+The new requests and tool grammar came from the executor; the previous presentation
+was reconstructed with the old assembly order and runtime context. This was a
+host llama.cpp replay with one attempt per case and presentation, not Android
+acceptance or a representative model benchmark. It illustrates the distinction:
+unique literal membership and a well-formed tool call can both pass while the
+selection is semantically wrong. The example is an executable contract lesson,
+not a validated recommendation prompt.

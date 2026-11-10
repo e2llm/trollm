@@ -321,22 +321,49 @@ pub fn assert_equal(args: &Value) -> Result<Value> {
     Ok(json!({"equal":true}))
 }
 
-/// Select one original object by literal string equality or array membership.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectMatchMode {
+    Equals,
+    ArrayContains,
+    StringContains,
+}
+
+struct SelectArguments<'a> {
+    items: &'a Vec<Value>,
+    fields: Vec<&'a str>,
+    literal: Option<&'a str>,
+    mode: SelectMatchMode,
+}
+
+/// Select one untouched original object using an explicit literal comparison.
 pub fn select_unique(args: &Value) -> Result<Value> {
-    let (items, field, equals, prefix, array_contains) = select_arguments(args)?;
+    let selection = select_arguments(args)?;
+    let items = selection.items;
     let mut found = None;
     for (index, item) in items.iter().enumerate() {
-        let literal = equals.strip_prefix(prefix);
-        let matches = if array_contains {
-            item.pointer(field)
-                .and_then(Value::as_array)
-                .filter(|values| values.iter().all(Value::is_string))
-                .is_some_and(|values| values.iter().any(|value| literal == value.as_str()))
-        } else {
-            item.pointer(field)
-                .and_then(Value::as_str)
-                .is_some_and(|value| literal == Some(value))
-        };
+        let matches = selection.fields.iter().any(|field| {
+            let value = item.pointer(field);
+            match selection.mode {
+                SelectMatchMode::ArrayContains => value
+                    .and_then(Value::as_array)
+                    .filter(|values| values.iter().all(Value::is_string))
+                    .is_some_and(|values| {
+                        values
+                            .iter()
+                            .any(|value| selection.literal == value.as_str())
+                    }),
+                SelectMatchMode::Equals => value
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| selection.literal == Some(value)),
+                SelectMatchMode::StringContains => {
+                    value.and_then(Value::as_str).is_some_and(|value| {
+                        selection
+                            .literal
+                            .is_some_and(|literal| value.contains(literal))
+                    })
+                }
+            }
+        });
         if matches {
             if found.is_some() {
                 bail!("local.select_unique: ambiguous");
@@ -370,23 +397,24 @@ pub(crate) fn validate_select_arguments(args: &Value) -> Result<()> {
     select_arguments(args).map(|_| ())
 }
 
-fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str, bool)> {
+fn select_arguments(args: &Value) -> Result<SelectArguments<'_>> {
     const INVALID: &str = "local.select_unique: invalid-arguments";
     let object = args.as_object().ok_or_else(|| anyhow!(INVALID))?;
-    if !(4..=5).contains(&object.len())
+    if !(4..=6).contains(&object.len())
         || object.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "items" | "field" | "equals" | "prefix" | "matchMode"
+                "items" | "field" | "equals" | "prefix" | "matchMode" | "stopBefore"
             )
         })
     {
         bail!(INVALID);
     }
-    let array_contains = match object.get("matchMode") {
-        None => false,
-        Some(Value::String(mode)) if mode == "equals" => false,
-        Some(Value::String(mode)) if mode == "array-contains" => true,
+    let mode = match object.get("matchMode") {
+        None => SelectMatchMode::Equals,
+        Some(Value::String(mode)) if mode == "equals" => SelectMatchMode::Equals,
+        Some(Value::String(mode)) if mode == "array-contains" => SelectMatchMode::ArrayContains,
+        Some(Value::String(mode)) if mode == "string-contains" => SelectMatchMode::StringContains,
         _ => bail!(INVALID),
     };
     let items = object
@@ -403,22 +431,55 @@ fn select_arguments(args: &Value) -> Result<(&Vec<Value>, &str, &str, &str, bool
             .filter(|value| value.len() <= bound)
             .ok_or_else(|| anyhow!(INVALID))
     };
-    let field = text("field", 4096)?;
-    let equals = text("equals", 16384)?;
-    let prefix = text("prefix", 16384)?;
-    if !field.is_empty() && !field.starts_with('/') {
-        bail!(INVALID);
-    }
-    let mut bytes = field.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+    let fields = match object.get("field") {
+        Some(Value::String(field)) => vec![field.as_str()],
+        Some(Value::Array(fields))
+            if mode == SelectMatchMode::StringContains
+                && !fields.is_empty()
+                && fields.len() <= 32 =>
+        {
+            fields
+                .iter()
+                .map(|field| field.as_str().ok_or_else(|| anyhow!(INVALID)))
+                .collect::<Result<Vec<_>>>()?
+        }
+        _ => bail!(INVALID),
+    };
+    for field in &fields {
+        if field.len() > 4096 || (!field.is_empty() && !field.starts_with('/')) {
             bail!(INVALID);
         }
+        let mut bytes = field.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+                bail!(INVALID);
+            }
+        }
     }
-    // Same complete-query byte allowance as the gateway, with no truncation.
+    let equals = text("equals", 16384)?;
+    let prefix = text("prefix", 16384)?;
+    let mut literal = equals.strip_prefix(prefix);
+    if object.contains_key("stopBefore") {
+        if mode != SelectMatchMode::StringContains {
+            bail!(INVALID);
+        }
+        let stop = text("stopBefore", 16384)?;
+        if stop.is_empty() {
+            bail!(INVALID);
+        }
+        literal = literal.map(|value| value.split_once(stop).map_or(value, |(head, _)| head));
+    }
+    if mode == SelectMatchMode::StringContains && literal.is_some_and(str::is_empty) {
+        bail!(INVALID);
+    }
     crate::schema::check_limits(&args["items"], SELECT_ITEMS_BYTES, 64, "selection items")?;
     crate::schema::check_limits(args, SELECT_ARGUMENT_BYTES, 64, "selection arguments")?;
-    Ok((items, field, equals, prefix, array_contains))
+    Ok(SelectArguments {
+        items,
+        fields,
+        literal,
+        mode,
+    })
 }
 
 /// Bounded literal text processing only. All content boundaries, numeric prefix,
