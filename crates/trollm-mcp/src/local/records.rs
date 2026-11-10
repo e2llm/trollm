@@ -20,7 +20,11 @@ fn arguments<'a>(tool: &str, args: &'a Value) -> Result<(&'a Vec<Value>, crate::
     } else {
         &["items", "schema"]
     };
-    if object.len() != names.len() || names.iter().any(|key| !object.contains_key(*key)) {
+    if object
+        .keys()
+        .any(|key| !(names.contains(&key.as_str()) || ordered && key == "keyExtraction"))
+        || names.iter().any(|key| !object.contains_key(*key))
+    {
         bail!(INVALID);
     }
     let items = args["items"].as_array().ok_or_else(|| anyhow!(INVALID))?;
@@ -41,6 +45,23 @@ fn arguments<'a>(tool: &str, args: &'a Value) -> Result<(&'a Vec<Value>, crate::
         let mut bytes = field.bytes();
         while let Some(byte) = bytes.next() {
             if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+                bail!(INVALID);
+            }
+        }
+        if let Some(extraction) = args.get("keyExtraction") {
+            let object = extraction.as_object().ok_or_else(|| anyhow!(INVALID))?;
+            if object.len() != 2 || extraction["repeated"] != "identical" {
+                bail!(INVALID);
+            }
+            let stops = extraction["stopBefore"]
+                .as_array()
+                .ok_or_else(|| anyhow!(INVALID))?;
+            if stops.len() > 16
+                || stops
+                    .iter()
+                    .any(|value| value.as_str().is_none_or(|s| s.is_empty() || s.len() > 256))
+                || args["prefix"].as_str().is_none_or(str::is_empty)
+            {
                 bail!(INVALID);
             }
         }
@@ -90,19 +111,37 @@ pub(super) fn invoke(tool: &str, args: &Value) -> Result<Value> {
         let digits = args["fractionDigits"].as_u64().expect("validated") as usize;
         let mut ordered = Vec::with_capacity(matches.len());
         for mut record in matches {
-            let text = record["selected"]
+            let original = record["selected"]
                 .pointer(field)
                 .and_then(Value::as_str)
-                .and_then(|text| text.strip_prefix(prefix))
                 .ok_or_else(|| anyhow!("local.order_records: invalid-decimal"))?;
-            let fractional = text
-                .split_once('.')
-                .map_or(0, |(_, fraction)| fraction.len());
-            if fractional != digits {
-                bail!("local.order_records: invalid-decimal");
-            }
-            let value =
-                parse_decimal(text).map_err(|_| anyhow!("local.order_records: invalid-decimal"))?;
+            let value = if let Some(extraction) = args.get("keyExtraction") {
+                let stop = extraction["stopBefore"]
+                    .as_array()
+                    .expect("validated")
+                    .iter()
+                    .filter_map(|marker| original.find(marker.as_str().expect("validated")))
+                    .min()
+                    .unwrap_or(original.len());
+                let window = original[..stop].trim();
+                let tail = window
+                    .strip_prefix(prefix)
+                    .ok_or_else(|| anyhow!("local.order_records: invalid-decimal"))?;
+                let mut key = None;
+                for part in tail.split(prefix) {
+                    let value = literal_decimal(part.trim(), digits)?;
+                    if key.is_some_and(|known| known != value) {
+                        bail!("local.order_records: ambiguous-decimal");
+                    }
+                    key = Some(value);
+                }
+                key.ok_or_else(|| anyhow!("local.order_records: invalid-decimal"))?
+            } else {
+                let text = original
+                    .strip_prefix(prefix)
+                    .ok_or_else(|| anyhow!("local.order_records: invalid-decimal"))?;
+                literal_decimal(text, digits)?
+            };
             record["decimal"] = json!(format_decimal(value));
             ordered.push((value, record));
         }
@@ -119,4 +158,14 @@ pub(super) fn invoke(tool: &str, args: &Value) -> Result<Value> {
     }
     Ok(json!({"matches":matches,"matchedCount":matched_count,
         "excludedCount":items.len()-matched_count,"sourceSha256":source_sha256}))
+}
+
+fn literal_decimal(text: &str, digits: usize) -> Result<i128> {
+    let fractional = text
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    if fractional != digits {
+        bail!("local.order_records: invalid-decimal");
+    }
+    parse_decimal(text).map_err(|_| anyhow!("local.order_records: invalid-decimal"))
 }

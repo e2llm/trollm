@@ -1445,10 +1445,29 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     })?;
                 context.push_str(&format!("\n[Node instructions]\n{rendered}"));
             }
-            context.push_str(&format!(
-                "\n[Runtime context]\n{runtime}\n[/Runtime context]\n"
-            ));
         }
+
+        // Show only operational context automatically. Keep all runtime.*
+        // bindings available to authors, and retain the complete last failure:
+        // recovery may run in another node or after a successful observation.
+        let authored_context = if opted_in {
+            let authored = std::mem::take(&mut context);
+            let routes: Vec<_> = node
+                .routes
+                .as_ref()
+                .map(|routes| routes.keys().collect())
+                .unwrap_or_default();
+            let visible = json!({
+                "availableRoutes": routes,
+                "lastError": runtime["lastError"],
+            });
+            context.push_str(&format!(
+                "[Runtime choices and last task failure (diagnostic data)]\n{visible}\n[/Runtime choices and last task failure]\n"
+            ));
+            Some(authored)
+        } else {
+            None
+        };
 
         let prompt_render_ns = elapsed_ns(render_started);
         // Project only model-owned top-level fields. The gateway still validates
@@ -1650,6 +1669,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
         }
 
+        if let Some(authored) = authored_context {
+            // Current authored instructions/evidence follow mechanical guidance.
+            // Unopted legacy prompts retain their existing assembly order.
+            context.push_str(&authored);
+        }
         let max_steps = task.loop_spec.as_ref().map(|l| l.max_steps).unwrap_or(1);
         let mut tool_calls_made = 0u32;
         let mut artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -3024,15 +3048,15 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
         // Snapshot the items once, into the run artifact store (§4.4
         // foreachCursors snapshotRef).
-        let mut buf = String::new();
-        for item in &items {
-            buf.push_str(&item.to_string());
-            buf.push('\n');
-        }
-        let file_name = format!("{node_id}.{}.snapshot.jsonl", hex_sha256(buf.as_bytes()));
         let written =
-            artifacts::write_atomic(&self.run_dir.artifacts_dir(), &file_name, buf.as_bytes())
+            artifacts::write_foreach_snapshot(&self.run_dir.artifacts_dir(), node_id, &items)
                 .map_err(|e| anyhow!("snapshot artifact for foreach '{node_id}': {e}"))?;
+        let file_name = written
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("snapshot artifact filename unavailable"))?
+            .to_owned();
         self.emit(
             EventType::ArtifactWritten,
             json!({ "path": written.path, "bytes": written.bytes, "sha256": written.sha256 }),

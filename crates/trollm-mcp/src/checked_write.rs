@@ -20,6 +20,12 @@ pub(crate) struct Response {
     pub bytes: Vec<u8>,
 }
 
+// An explicit standard HTTPS port is valid authority syntax. Keep it and fix
+// incompatible routing at its owner, rather than silently changing endpoint policy.
+fn selected_authority(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
 /// Guard caller-owned plaintext IO, before rustls can buffer any application
 /// bytes. A delegated error is ambiguous even when no count was returned.
 struct PlaintextIo<'a> {
@@ -169,7 +175,7 @@ pub(crate) fn send_acquired(
         .method("POST")
         .uri(path)
         .version(hyper::Version::HTTP_11)
-        .header("Host", format!("{host}:{port}"))
+        .header("Host", selected_authority(host, port))
         .header("Connection", "close");
     for (name, value) in request.headers() {
         outbound = outbound.header(name, value);
@@ -205,7 +211,10 @@ pub(crate) fn send_acquired(
     // The acquisition uses existing blocking clients outside the async runtime.
     // It may consume time, but cannot renew the original transport deadline.
     acquire()?;
-    runtime.block_on(async {
+    // Retain only bounded private response evidence after actual headers arrive.
+    // A timeout before headers does not invent a status or response body.
+    let capture = std::sync::Mutex::new(None::<crate::transport::HttpResponseCapture>);
+    let outcome = runtime.block_on(async {
         let work = async {
             let io = hyper_util::rt::TokioIo::new(PlaintextIo {
                 tls,
@@ -224,6 +233,10 @@ pub(crate) fn send_acquired(
                     .await
                     .context("selected request failed; possible send")?;
                 drop(sender);
+                *capture.lock().unwrap() = Some(crate::transport::HttpResponseCapture::new(
+                    response.status().as_u16(),
+                    response.headers(),
+                ));
                 ensure!(
                     response.version() == hyper::Version::HTTP_11
                         && response.status().as_u16() >= 200,
@@ -257,6 +270,7 @@ pub(crate) fn send_acquired(
                         "selected response trailers unsupported"
                     );
                     if let Ok(data) = frame.into_data() {
+                        capture.lock().unwrap().as_mut().unwrap().observe(&data);
                         ensure!(
                             data.len() <= MAX_BODY.saturating_sub(bytes.len()),
                             "selected response exceeds byte limit"
@@ -280,6 +294,20 @@ pub(crate) fn send_acquired(
         tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), work)
             .await
             .context("selected request deadline; possible send")?
+    });
+    outcome.map_err(|error| {
+        if let Some(observed) = capture.lock().unwrap().as_ref() {
+            let cause = if error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+            {
+                "deadline"
+            } else {
+                "response-read-or-framing"
+            };
+            return observed.failure(cause, false).into();
+        }
+        error
     })
 }
 
@@ -702,6 +730,14 @@ mod controls {
     }
 
     fn response_fixture(reply: &'static [u8]) -> Result<Response> {
+        response_fixture_with_delay(reply, Duration::ZERO, Duration::from_secs(2))
+    }
+
+    fn response_fixture_with_delay(
+        reply: &'static [u8],
+        delay: Duration,
+        timeout: Duration,
+    ) -> Result<Response> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let peer = std::thread::spawn(move || {
@@ -736,21 +772,34 @@ mod controls {
                     break;
                 }
             }
+            let head = String::from_utf8(received.clone()).unwrap();
+            assert!(head.starts_with("POST /mcp?declared=1 HTTP/1.1\r\n"));
+            assert!(head
+                .to_ascii_lowercase()
+                .contains(&format!("host: localhost:{port}\r\n")));
             // Consume the actual two-byte request body before responding.
             stream.read_exact(&mut [0; 2]).unwrap();
-            let _ = stream.write_all(reply);
+            if !delay.is_zero() {
+                let split = reply.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 5;
+                let _ = stream.write_all(&reply[..split]);
+                let _ = stream.flush();
+                std::thread::sleep(delay);
+                let _ = stream.write_all(&reply[split..]);
+            } else {
+                let _ = stream.write_all(reply);
+            }
             let _ = stream.flush();
             stream.conn.send_close_notify();
             let _ = stream.flush();
         });
         let request = reqwest::blocking::Client::new()
-            .post(format!("https://localhost:{port}/mcp"))
+            .post(format!("https://localhost:{port}/mcp?declared=1"))
             .body("{}")
             .build()?;
         let result = send(
             request,
             &super::super::RootCertificates::from_pem(tls::ROOT_1_PEM)?,
-            Duration::from_secs(2),
+            timeout,
             &|| Ok(()),
         );
         peer.join().unwrap();
@@ -767,6 +816,66 @@ mod controls {
             &b""[..],
         ] {
             assert!(response_fixture(bad).is_err());
+        }
+    }
+    #[test]
+    fn response_originals_survive_partial_framing_and_deadline_without_ack() {
+        for bad in [
+            &b"HTTP/1.1 421 Misdirected Request\r\nContent-Length: 9\r\n\r\nx"[..],
+            &b"HTTP/1.1 421 Misdirected Request\r\nContent-Length: 33554433\r\n\r\n"[..],
+        ] {
+            let error = response_fixture(bad).err().unwrap();
+            let observed = error
+                .downcast_ref::<crate::transport::HttpResponseFailure>()
+                .unwrap();
+            assert_eq!(observed.status, 421);
+            assert_eq!(observed.private["bodyComplete"], false);
+            assert!(observed.private["bodySha256"].is_null());
+        }
+        let error = response_fixture_with_delay(
+            b"HTTP/1.1 421 Misdirected Request\r\nContent-Length: 4\r\n\r\nlate",
+            Duration::from_millis(200),
+            Duration::from_millis(80),
+        )
+        .err()
+        .unwrap();
+        let observed = error
+            .downcast_ref::<crate::transport::HttpResponseFailure>()
+            .unwrap();
+        assert_eq!(observed.status, 421);
+        assert_eq!(observed.cause, "deadline");
+        assert_eq!(observed.private["bodyComplete"], false);
+        assert!(observed.private["bodySha256"].is_null());
+    }
+
+    #[test]
+    fn endpoint_authority_retains_default_nondefault_and_ipv6_ports_and_rejects_overrides() {
+        assert_eq!(selected_authority("api.example", 443), "api.example:443");
+        assert_eq!(selected_authority("api.example", 8443), "api.example:8443");
+        assert_eq!(selected_authority("[::1]", 443), "[::1]:443");
+        for name in [
+            "Host",
+            "Connection",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Expect",
+            "Upgrade",
+        ] {
+            let request = reqwest::blocking::Client::new()
+                .post("https://localhost:1/mcp")
+                .header(name, "forbidden-override")
+                .body("{}")
+                .build()
+                .unwrap();
+            let error = send(
+                request,
+                &super::super::RootCertificates::default(),
+                Duration::from_millis(20),
+                &|| Ok(()),
+            )
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("transport override"));
         }
     }
 }

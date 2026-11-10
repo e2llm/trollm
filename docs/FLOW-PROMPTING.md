@@ -169,3 +169,25 @@ When an extra step is justified, identify the difficulty it removes and the
 evidence its handoff must retain. See [small-model flow practices](FLOW-PRACTICES.md)
 for decomposition, repeated step groups and recovery. Model prose remains
 advisory; the coder's validated tool call remains the structured boundary.
+
+## Check the rendered task brief
+
+A registry prompt is only part of the actual model request. For nodes with routes
+or a supplement, automatic route choices and the bounded last failure precede
+tool-argument guidance and the authored instructions/evidence. Routine graph
+identifiers and future destinations are not automatically included. Explicit
+`runtime.*` bindings remain available; the failure keeps its originating node and
+mutation outcome even across recovery tasks. See [the contract](ADAPTIVE-FLOWS.md#step-instructions-and-recovery-context).
+
+When changing this presentation, freeze the model, native tool grammar, observation,
+advice and allowed choices. Compare the previous and new complete requests, including
+supported selection, appropriate refusal and recovery after an unknown write. Count
+incorrect selections and unnecessary refusals separately and record input tokens and
+elapsed time. Less context is useful only if the required facts still reach the task;
+its position is an empirical choice, not a model-independent guarantee.
+
+For each repeated family, review both the ordinary and fallback uses. A coder
+forwarding advice should not be asked to independently verify facts it cannot see.
+A semantic checker needs the original request and decisive observed attributes.
+Describe missing evidence calmly and map that outcome to an authored tool choice.
+Apply improvements to existing tasks before introducing another consultation.

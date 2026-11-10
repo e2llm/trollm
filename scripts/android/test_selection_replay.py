@@ -54,6 +54,34 @@ class SelectionReplayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replay.build_bundle(self.records, "a" * 4097)
 
+    def test_text_lookup_binds_original_fields_and_leaves_only_the_reference_model_owned(self):
+        files = self.files(match_fields=["/aria/label", "/text"], advice="Use the search label.")
+        registry = json.loads(files["selection-replay.tasks.yaml"])
+        binding = registry["tasks"]["select"]["toolArguments"]["local.select_unique"]
+        self.assertEqual(binding["modelFields"], ["equals"])
+        self.assertEqual(binding["fixed"], {
+            "field": ["/selected/aria/label", "/selected/text"],
+            "matchMode": "string-contains", "prefix": ""})
+        original = registry["tasks"]["observe"]["toolArguments"]["local.filter_records"]["fixed"]["items"]
+        self.assertEqual(original, self.records)
+        schema = json.loads((Path(__file__).resolve().parents[2] /
+                            "schemas/local-select-unique.v1.input.schema.json").read_text())
+        Draft202012Validator(schema).validate({**binding["fixed"], "items": [{"selected": r} for r in original], "equals": "Search catalog"})
+        self.assertIn(b"literal text observed", files["prompts/select.md"])
+        self.assertNotIn("stopBefore", binding["fixed"])
+
+    def test_text_lookup_allows_original_records_without_synthetic_ids(self):
+        replay.build_bundle([{"title": "An original ticket", "number": 123}],
+                            "Find this ticket", match_fields=["/title"])
+        for fields in ([], ["title"], ["/bad~2"], [7], ["/text"] * 33, "title"):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.files(match_fields=fields)
+        with self.assertRaises(ValueError):
+            self.files(stop_before=",")
+        files = self.files(match_fields=["/text"], stop_before=",")
+        registry = json.loads(files["selection-replay.tasks.yaml"])
+        self.assertEqual(registry["tasks"]["select"]["toolArguments"]["local.select_unique"]["fixed"]["stopBefore"], ",")
+
 
 if __name__ == "__main__":
     unittest.main()

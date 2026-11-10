@@ -23,5 +23,16 @@ class FixedArgumentTests(unittest.TestCase):
             validate_fixed_tool_arguments({"toolArguments": {"local.calculate": {"fixed": {"operator": "add"}}}}, schemas)
 
 
+    def test_unique_selection_conditional_schema_allows_a_bound_field(self):
+        schemas = Path(__file__).resolve().parents[1] / "schemas"
+        validate_fixed_tool_arguments({"toolArguments": {"local.select_unique": {
+            "fixed": {"prefix": ""}, "fromVars": {"field": "tier.field", "items": "original.items"}, "modelFields": ["equals"]}}}, schemas)
+        validate_fixed_tool_arguments({"toolArguments": {"local.select_unique": {
+            "fixed": {"prefix": "", "field": ["/text", "/aria/label"], "matchMode": "string-contains", "stopBefore": ","}, "modelFields": []}}}, schemas)
+        with self.assertRaises(ValidationError):
+            validate_fixed_tool_arguments({"toolArguments": {"local.select_unique": {
+                "fixed": {"prefix": "", "field": ["/text"], "matchMode": "equals"}, "modelFields": []}}}, schemas)
+
+
 if __name__ == "__main__":
     unittest.main()

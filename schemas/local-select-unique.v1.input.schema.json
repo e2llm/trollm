@@ -3,12 +3,106 @@
   "title": "local.select_unique v1 arguments",
   "type": "object",
   "additionalProperties": false,
-  "required": ["items", "field", "equals", "prefix"],
+  "required": [
+    "items",
+    "field",
+    "equals",
+    "prefix"
+  ],
   "properties": {
-    "matchMode": {"type": "string", "enum": ["equals", "array-contains"], "description": "Defaults to exact string equality. array-contains selects an object whose field is an array of strings containing the exact literal; uniqueness is still by original object."},
-    "items": {"type": "array", "maxItems": 100000, "items": {"type": "object"}, "description": "Complete original objects; at most 32 MiB of compact serialized JSON, no truncation."},
-    "field": {"type": "string", "maxLength": 4096, "pattern": "^(?:/(?:[^~]|~[01])*)?$", "description": "JSON pointer, at most 4096 UTF-8 bytes; no URI-fragment decoding."},
-    "equals": {"type": "string", "maxLength": 16384, "description": "Literal comparison value, at most 16384 UTF-8 bytes."},
-    "prefix": {"type": "string", "maxLength": 16384, "description": "Literal prefix, at most 16384 UTF-8 bytes; empty is allowed."}
-  }
+    "matchMode": {
+      "type": "string",
+      "enum": [
+        "equals",
+        "array-contains",
+        "string-contains"
+      ],
+      "description": "Defaults to exact equality. array-contains matches literal membership in a string array. string-contains matches a nonempty literal substring in one or more declared string fields. Uniqueness is by untouched original object."
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object"
+      },
+      "description": "Complete original objects; at most 32 MiB of compact serialized JSON, no truncation."
+    },
+    "field": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^(?:/(?:[^~]|~[01])*)?$"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^(?:/(?:[^~]|~[01])*)?$"
+          }
+        }
+      ],
+      "description": "JSON pointer of at most 4096 UTF-8 bytes; string-contains also permits up to 32 pointers with any-field matching. One object matching several fields is still one match. Missing/non-string fields do not match. No URI decoding."
+    },
+    "equals": {
+      "type": "string",
+      "maxLength": 16384,
+      "description": "Literal comparison value, at most 16384 UTF-8 bytes."
+    },
+    "prefix": {
+      "type": "string",
+      "maxLength": 16384,
+      "description": "Literal prefix, at most 16384 UTF-8 bytes; empty is allowed."
+    },
+    "stopBefore": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "description": "Only with string-contains. After literal prefix removal, use the part of equals before the first occurrence of this literal marker; if absent use all. No trimming, case folding, entity decoding or change to original records."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "field": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "field"
+        ]
+      },
+      "then": {
+        "required": [
+          "matchMode"
+        ],
+        "properties": {
+          "matchMode": {
+            "const": "string-contains"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "stopBefore"
+        ]
+      },
+      "then": {
+        "required": [
+          "matchMode"
+        ],
+        "properties": {
+          "matchMode": {
+            "const": "string-contains"
+          }
+        }
+      }
+    }
+  ]
 }

@@ -1,0 +1,62 @@
+schemaVersion: ledger.task-registry.v1
+id: record-lookup
+version: 1
+tasks:
+  lookup-observe:
+    model: coder
+    prompt: prompts/lookup-observe.md
+    tools: [local.filter_records]
+    completion: tool-result
+    maxOutputTokens: 80
+    generationTimeoutS: 60
+    loop: {maxSteps: 1}
+    toolArguments:
+      local.filter_records:
+        modelFields: []
+        fixed:
+          # Synthetic teaching records, not a live helpdesk connection.
+          items:
+            - {id: ticket-a, title: Printer offline, queue: office, description: Network printer no longer responds.}
+            - {id: ticket-b, title: Password reset, queue: access, description: Account owner requests a reset.}
+          schema: {type: object}
+    outputContract:
+      requireArtifactComplete: [candidates]
+      outputs:
+        data: {fromArtifact: candidates, format: json, type: object}
+        view:
+          fromArtifact: candidates
+          format: json
+          type: object
+          view:
+            fields: {matches: {selected: {id: true, title: true, label: true}}}
+            maxBytes: 8192
+  lookup-select:
+    model: coder
+    prompt: prompts/lookup-select.md
+    tools: [local.select_unique, flow.choose]
+    completion: tool-or-route
+    maxOutputTokens: 160
+    generationTimeoutS: 60
+    loop: {maxSteps: 1}
+    toolArguments:
+      local.select_unique:
+        modelFields: [equals]
+        fromVars: {items: observe.outputs.data.matches}
+        fixed:
+          field: [/selected/title, /selected/label]
+          matchMode: string-contains
+          prefix: ''
+    outputContract:
+      requireArtifactComplete: [selected-record]
+      outputs:
+        data: {fromArtifact: selected-record, format: json, type: object}
+  lookup-explain:
+    model: reasoner
+    prompt: prompts/lookup-explain.md
+    tools: []
+    maxOutputTokens: 256
+    generationTimeoutS: 60
+    loop: {maxSteps: 1}
+    outputContract:
+      outputs:
+        advice: {from: model, type: prose}

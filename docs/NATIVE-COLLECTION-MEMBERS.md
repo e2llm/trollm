@@ -32,6 +32,25 @@ The endpoint is explicit: the paired API or MCP DEV endpoint, with no fallback.
 Output must be a new absolute directory. Stdout reports only member identity,
 real loaded plan pins and derived task bindings, with runtime support false.
 
+## Host compiler artifact
+
+The existing `build:host-stub` job also retains a separate release compiler at
+`dist/collection-compiler/collection-members`. Its maintained recipe is
+`cargo build --locked --release -p trollm-uniffi --bin collection-members`.
+This Linux x86_64 ELF is independent of the debug stub library and Android APK.
+Its `build-info.json` records the checked-out source, lock/toolchain/recipe hashes,
+actual tool versions, CI job/image and binary size/SHA256. `SHA256SUMS` closes the
+retained compiler, receipt and all specimen files.
+
+The same retained binary compiles four declared original/subset/empty/changed
+specimens through `--matched-pending-600`. Each preserves exact input bytes,
+stdout inspection, stderr, generated members, raw collection profile and manifest.
+Inspection must match the raw profile/manifest hashes before a success receipt is
+written. Existing output refuses replacement. These are compilation specimens,
+not owned source registrations, device execution or runtime admission. A supplier
+must independently select the complete source and actual binary receipt; no old
+compiler or APK identity is implied by the artifact name.
+
 ## Exact generated members
 
 - `selection.json`: original canonical complete admitted selection bytes, no LF
@@ -89,6 +108,13 @@ actual in-body cursor, exact complete JSONL suffix values and original native
 `artifact_written` record before preparing an action. Missing, extra, reordered,
 rewritten or unrecorded snapshots refuse. Known-prefix parent/restoration custody
 still requires its actual independent source relation. It is not execution credit.
+
+The core writer and selected preparer share the original JSONL serialization and
+`artifacts/<node>.<raw SHA256>.snapshot.jsonl` address. The consumer checks that
+exact address, original full suffix bytes, real-path confinement and the final
+contiguous journal commitment for its path/hash/size. There is no fixed-name
+alias or regenerated snapshot fallback. Report retention follows the original
+cursor reference and retains the same raw bytes in its hash-named sidecar.
 
 Runtime admission remains unsupported until the real installed owner/authority,
 SameDeviceClock, invocation-to-worker and mandatory preparer bindings exist.
@@ -264,6 +290,53 @@ no-clobber app-private installation and request files, then verifies readback.
 It does not install APKs, import publications, issue credentials or alter app
 authentication. This profile requires the operator's existing private debug
 ADB capability; it does not authenticate a remote operator solely from a hash.
+
+Original custody separately retains the selected ADB executable path and actual
+spawned argv, plus raw `version` and `features` stdout/stderr and explicit child
+status through that same wrapper. Command-stream hashes and bounded-prefix
+coverage are not app-file originals. Feature names are exact tokens separated by
+commas or ASCII space/tab/line endings; only exact `shell_v2` satisfies the remote
+status requirement. Missing capability, malformed output and failed probe status
+remain distinct from later non-PTY remote/TAR checks. A capability refusal before
+file reads is not evidence of invalid archive framing. Version failure is retained
+while the independent feature probe is still collected.
+
+A file read still requires successful remote status through non-PTY `shell -T`.
+Its bounded archive must contain exactly one regular file at the FULL requested
+logical path. V7/USTAR regular members and one GNU LongLink name extension are
+supported. The extension must be `././@LongLink`, contain exactly the requested
+name plus one terminal NUL (at most2049 bytes), and immediately precede the regular
+header whose100 name bytes equal the same full name's100-byte prefix. The full
+name remains the custody identity; no truncated filename is opened or accepted
+as an alias. Both checksums, octal size bounds, zero payload padding and at least
+two zero trailer blocks are checked. Repeated extensions, foreign names/prefixes,
+link targets, PAX/other metadata, extra regular members and nonzero trailers refuse.
+Logical paths are bounded to2048 ASCII bytes and file data to the selected read
+limit, at most32MiB. Failed transport/frame bytes remain diagnostics, never file
+originals or repaired historical indexes.
+
+`inspectOriginalTar(rawTar, originalRequestedLogicalPath, {maxBytes})` exposes that
+same pure structural decoder for retained public transport probes. It returns
+only the requested member bytes. It does not establish a remote exit status,
+Android app-domain read, worker inactivity, source authenticity or report identity.
+Actual SDK/tar originals must keep their same-wrapper command/status/stdout/stderr
+and expected file bytes separately. Declared GNU/USTAR child fixtures and recorded
+frame replay are component evidence, not actual device execution.
+
+The optional public-client control uses a declared loopback ADB host-protocol
+fixture, without an Android device, credentials or task. It tests real selected
+CLI rendering and the maintained wrapper/custody path, not actual guest capability
+or remote file acceptance:
+
+```sh
+TROLLM_ADB_PUBLIC_CLIENT=/absolute/path/to/adb node --test \
+  --test-name-pattern='public ADB client' scripts/android/selected_native_custody.test.cjs
+```
+
+Set `TROLLM_ADB_PROBE_OUTPUT_DIRECTORY` to a fresh absolute directory to preserve
+its raw probe records and public executable hash receipt. Keep host helper source
+identity separate from the retained APK's actual build-source identity when only
+unpackaged Node code changes; a new helper source does not relabel an old APK.
 
 The existing MainActivity dispatches only the request-file hash to
 `SelectedNativeLauncher` when the actual app is debuggable. No secret or arbitrary
@@ -459,6 +532,18 @@ The independent API/web `TROLLM_ANDROID_BACKEND=llama` lane still requires its
 Android build and dependency scan. No unchanged APK is rebuilt solely for a new
 Git SHA, and no actual APK scan or runtime qualification is supplied by reuse.
 
+### First normal pipeline and MR association
+
+For an MR candidate, select the first normal through the supported GraphQL
+`pipelineCreate` input with `projectPath: "insitu/trollm"`, `ref: SOURCE_BRANCH`,
+`mergeRequestIid: "MR_IID"` and per-pipeline variables `TROLLM_ANDROID=0`,
+`TROLLM_ANDROID_BACKEND=stub`. Verify the resulting actual source is
+`merge_request_event`, ref is `refs/merge-requests/MR_IID/head`, exact source SHA
+matches, and the MR's `head_pipeline` is that pipeline. A successful branch API
+pipeline alone does not supply this MR association. No project-wide variable or
+status/protection change is part of selection. The separate single llama APK lane
+and protected-main follow-through retain their own required gates.
+
 ### Private completion callback
 
 `scripts/android/selected_native_completion.cjs` exports
@@ -580,7 +665,7 @@ separate from these focused source controls.
 
 The selected emulator clock path uses the existing private guard transport, not
 Android framework time confidence or a modified kernel synchronization flag.
-Its host counterpart is immutable RPA source
+Its historical v3 host counterpart is immutable RPA source
 `9c97f57a22e9b84256aecc9f6b3bf70b4bd97113`, module SHA256
 `a93523bbf4db75230a44f01b923f3e6f23e8f48fe27c6bdce15c6b5ee4d853f3`.
 The sample leaf is the original `sampleNow()` result. Earlier prospective
@@ -701,3 +786,207 @@ Local declared transport and timed model controls establish component behavior,
 not an Android device or real-model result. Fresh app/JNI clock reads, named KVM
 lifecycle assumptions, complete workload, original native outcome and report
 acceptance still require their actual qualification boundaries.
+
+The custody decoder also checks retained public SDK35 shell-UID TAR originals
+from `native-public-longpath/c4d7-20261108` in project190. The original archive
+SHA256 is `a4de348846305cb789f6bcf82a45a9a64a2de494e0446a6a5eb08ae24a120635`.
+Nine byte-bound vectors include 100/101-byte boundaries and seven GNU LongLink
+frames. Tests consume original header/payload bytes and compare the extracted
+binary with its independently retained original. This is transport-format
+coverage from that selected environment, not app-domain custody or native
+execution qualification. APK production inputs are unchanged; the host helper
+source role remains separate from the APK's original build revision.
+
+### MCP HTTP refusal originals
+
+The native HTTP transport preserves a bounded private response diagnostic after
+actual response headers have arrived. Non-success statuses remain refusals and
+never acknowledge an effect. The checked first-write transport keeps its original
+TLS/SNI, explicit host and resolved port, endpoint path/query, final plaintext
+gate, absolute transport timeout and single-send/no-redirect behavior. An explicit
+standard HTTPS port is valid; incompatible virtual-host routing must be corrected
+by the service owner rather than silently interpreted as an invalid client.
+
+Private diagnostics retain status, closed response cause, a selected bounded
+subset of original response header bytes, up to 65,536 original body bytes,
+observed body length, prefix hash and explicit completeness/truncation. A whole
+body hash is available only after complete bounded receipt. Body-read, framing or
+deadline failure after headers preserves only observed evidence and never invents
+a complete response. A timeout before headers does not manufacture a status.
+The five selected header names are server, content-type, date, retry-after and
+x-request-id; each value is bounded to 256 bytes and at most 16 values are retained.
+Cookies, authorization and MCP session headers are not copied into diagnostics.
+These are selected header-value bytes, not an original full HTTP wire capture.
+
+The gateway retains a private, content-addressed
+artifacts/mcp-http-failure-<rawSHA>.json before emitting
+http_response_refused with its file/hash, status, closed cause and original
+call context. The private file joins the requested server/tool and original
+argument hash, including failures in initialization or catalog acquisition before
+an act request. Public error strings and events omit arbitrary body/header text.
+Filesystem or audit failure preserves the primary HTTP refusal and exposes
+diagnostic unavailability; it does not make a failed response acceptable.
+
+Selected launch/inactive/partial custody includes these hash-named originals
+through the existing shell-v2, no-PTY, exact-member archive reader and app-root
+confinement. Malformed names, changed hashes, missing members and bounded-list
+failures remain explicit. This evidence is not a successful native report,
+settlement, authenticated inactivity or a whole app-tree capture. Operators still
+retain the full original app/run tree before retiring a temporary environment.
+Historical missing response bytes cannot be reconstructed by this implementation,
+and an independent final-readback failure remains separate from transport receipt.
+
+### Retained result and outcome acknowledgement
+
+The selected consumer reads the exact parsed payload persisted by
+`McpGateway::finish_result`, after MCP transport extraction. It does not unwrap
+that payload as another MCP envelope. The model-facing value must still match
+the original complete, live artifact; preview, partial, uncertain, cache and
+shaped results do not establish an outcome. The legacy `parsedEnvelopeArtifact`
+wire field retains the original payload bytes, raw hash and size without
+wrapping or reserializing them to fit a decoder.
+
+Prepared mutation results use the shared target-owned
+`preparation::selected_result_artifact_name` derivation over the installed policy
+label and original native context hash. Distinct contexts retain separate result
+and completion files even for the same tool and identical payloads. Completed
+selected artifacts are never overwritten. Ordinary unprepared tool-policy
+destinations retain their existing behavior. Native journal path strings retain
+the actual producer spelling; no historical artifact or journal is renamed.
+
+Artifact checks compare the immediate installed destination against its trusted
+canonical root. A platform app-root prefix alias is distinct from an in-run or
+file symlink. Regular-file, root, open-inode, named-file, size, timestamp and
+completion checks remain required. Original logical/canonical operands are
+retained privately as bounded hash-named `native-result-path-*.json` diagnostics,
+also selected by passive custody. A diagnostic is not an outcome or settlement.
+
+The native outcome still requires the original matching intent/result records
+and an exact artifact path/hash/size commitment. Conflicting commitments refuse.
+Its evidence limit remains16384 bytes including original record text and base64
+artifact content, even though the artifact reader supports1MiB. An oversized
+outcome leaves the full artifact intact and does not produce an ACK or truncate
+evidence. Dispatch remains fenced until the existing private adapter performs its
+postcheck and returns the exact two-field native-reported ACK. A lost or refused
+ACK never permits another preparation or retries the effect.
+
+Inactive custody retains native `selected-report/<contextSHA>.request.json` and
+the separate original `.ack.json` body against the original prepared context,
+selection and invocation. It does not substitute RPA recovery records. Missing
+ACKs and unavailable/refused associations remain explicit; a retained request
+does not prove delivery. Context JSON stays opaque across JavaScript, including
+native integer quantities, and journal evidence stays hash-bound opaque bytes.
+These selected originals and local path diagnostics do not replace the operator's
+full original app/run-tree capture before retirement or establish independent
+business settlement. Historical attempts remain unchanged and unreplayed.
+
+Positive clock component controls request early acquisition through a test-only
+maintenance signal while using real private TLS, clock syscalls and unchanged
+anchor validation. They establish acquisition/read and model-control concurrency,
+not a scheduler bound or successful renewal across a one-second mapping under
+coverage instrumentation. Separate short-age controls retain actual original
+deadline, late-refresh, source-loss, first-cause fencing and owned-stop checks.
+The signal is absent from production builds and cannot renew authority.
+
+## Explicit 600-second workload profile
+
+The separately selected `trollm.native-collection-members.v4-proposal` is compiled
+with `collection-members --matched-pending-600`. Its distinct native profile is
+`controlled-collection-native-selected.v4-proposal`. Existing v3 ready/guard wire
+formats are reused with this explicitly matched native-profile value; native
+admission selects the expected value from the exact inspected source members
+and refuses crossed v3/v4 associations. Root, item and between-item plans
+select `timeoutS: 600`; productive tasks select `generationTimeoutS: 45`.
+Existing act timeout 30, output/context settings, observation freshness and original
+authority cutoffs remain separate bounds. The earliest original bound still wins.
+This is an engineering workload selection, not a promise that all model calls,
+steps or the whole collection will finish. Generation limits are cooperative;
+a native decode operation cannot be assumed immediately preemptible.
+
+The native inspector recomputes the complete v4 member offer and requires exact
+member bytes. Compiler inspection returns explicit `profileSha256` over raw
+`collection-profile.json`, separate from raw `manifestSha256`. The v3 offer remains unchanged at 300 seconds with its original
+registry. A v4 offer cannot be substituted into a v3 source association or made
+current by editing a published manifest. The new source and APK identity must be
+selected together with the matching producer and RPA profile. A 600-second RPA
+case selection is not valid under the historical 120-second validator.
+
+The private launcher retains its three-argument callable. Productive command and
+inactivity polling have immutable original wall/elapsed deadlines and an owned
+abort signal. Commands serialize; an aborted productive poll and its ADB child
+settle before cleanup begins another command. Cancel and authentic inactive
+readback have a 60-second bounded local interval, separate from the subsequent
+300-second passive-custody interval. These are engineering bounds, not a promise
+that a nonpreemptible decode or all file transfers will finish.
+Neither cleanup nor custody renews browser, model, observation or effect authority.
+A failed/late stop remains unconfirmed; `run_ended` and resource deletion do not
+replace a same-worker inactive binding. A post-cutoff business observer remains
+fenced even when passive file retention continues.
+
+Prospective acceptance uses four independently owned publications and original
+identities/windows on a root-selected shared setup: original three-item roster,
+one-item subset, empty collection, and constrained changed-input. Baseline and
+expected-state references must be actual same-owner/same-database originals,
+not copied report identities. Each case retains its own input, raw members,
+selection/context, original result/meta/journal, native request/ACK, calibrations,
+whole app/run tree and initial/final observer disposition. Missing ACK, missing
+inactivity, failed-call tokens and unavailable readback remain explicit. Further
+admission stops when the prior worker's inactivity remains uncertain. Parent or
+executed-prefix continuation is not established by these four cases.
+
+The v4 compiler profile declares `workloadPolicy.clockAcquisitionBudget` with
+startupAttempts 2, maxPreparationContexts 11, attemptsPerContext 12,
+maintenanceAttempts 49 and totalAttempts 183. Runtime reservations use the same
+constants, serialize before probing and count repeated/recovery attempts. Startup
+requires two genuine acquisitions around the authenticated actor-control read;
+neither is skipped to fit the capacity. A new
+context beyond eleven or an exhausted dimension permanently refuses before another
+probe with `SELECTED_CLOCK_ACQUISITION_LIMIT`. The separate original
+`clock-acquisition-limit.json` is retained without claiming delivery. Maintenance
+may continue until the worker joins during drain; the original authority cutoff
+still wins. The forty-nine-attempt allowance is a finite resource policy, not a
+hypervisor cadence guarantee or permission to omit a due freshness check.
+
+The v4 host role is the complete RPA checkpoint
+`14e3e99923490ae8a5d41acc99be76ae23e28e26`, with sampler source
+`0dbc6a821c5de10136e4a9655ef3788ce9b89ea7` and module SHA256
+`bc64099bfa6b97de1de1a7ec4612c07a469a094a6e4744f23f406501be9a5f5a`.
+Its private installer SHA256 is
+`366512be79dc86a9bb13fbb7c6e2d8af11e9327a432afa8078891efd6b70499e`.
+The three-field private callable stays unchanged. Crossed v3/v4 role pins refuse.
+Host channel ceilings are constructor 1, ready 64 including final ready,
+acquisition 183, current 192 and verification 32, summing to 472 with a 512-sample
+aggregate backstop. These are supported admission ceilings, not a completion
+promise. Per-sample encoded bytes are bounded at 256; preceding originals and
+failed/attempted challenge accounting survive overflow. The full host evidence
+and Native file retention have separate byte bounds.
+
+The controlled file-volume cases deliberately overprovision the target limit:
+435 groups times nine possible suffix names gives 3,915 declared originals.
+The real writer emits at most seven ordinal files per acquisition. Retention
+permits at most 3,915 selected clock files and 6,144 selected members within the
+unchanged 128MiB aggregate raw-byte bound. This capacity does not authorize 435
+Native acquisitions. The 32-context declared closure contains 4,123 retained
+entries across 4,091 logical paths; the 128-context closure contains 4,699 entries
+across 4,571 paths. These counts describe the declared control bytes only; larger
+payloads independently refuse at the raw-byte cap.
+The combined control also covers 128 separate contexts with original result,
+completion metadata, path diagnostics, request and ACK bytes; a missing ACK stays
+partial, and a 129th context refuses. The existing prepared-context ceiling stays
+128, selected result/diagnostic discovery is bounded at 512, and raw hashes remain
+required. Calibration reads use at most 64 ordered members per TAR batch, each
+passed through the existing strict single-member decoder with confinement and
+remote-status checks; extra, missing, reordered and malformed members refuse.
+This controlled transport/file test is not an Android throughput guarantee;
+actual passive-retention duration and missing members remain qualification data.
+
+Private `launcher-retirement.private.json` retains at most 16 local phase events
+and 16KiB under mode0600 with exclusive creation and fsync. Original effect cutoff,
+wall/elapsed phase operands, productive-poll join, cancel reply, authentic drain
+and passive capture remain distinct. It is not an inactive or business receipt.
+The three-argument launcher completion and existing failure flags are unchanged;
+a missing authentic inactive binding stays explicitly unconfirmed. Diagnostic
+event overflow and file-retention failures accumulate cleanup failures without
+skipping cancel/join/drain or replacing the original primary failure. Lost-start
+ID recovery uses the same shutdown signal and wall/elapsed deadline for both
+ADB reads and checks again before adopting a recovered genuine ID.

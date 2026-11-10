@@ -52,6 +52,7 @@ references = [(name, ROOT / "flows/tasks" / registry) for name, registry in (
     ("minimal-summary", "minimal-summary.tasks.yaml"),
     ("prose-calculation", "prose-calculation.tasks.yaml"),
     ("adaptive-routing", "adaptive-routing.tasks.yaml"),
+    ("record-lookup", "record-lookup.tasks.yaml"),
 )]
 # A starter package can contain reusable child plans sharing its root registry.
 # Validate every plan above, then resolve each package from its named root.

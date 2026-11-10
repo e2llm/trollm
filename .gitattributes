@@ -1,0 +1,6 @@
+# Bundle inputs have pinned bytes. Do not let checkout conversion change them.
+flows/**/*.yaml text eol=lf
+flows/**/*.json text eol=lf
+flows/**/*.md text eol=lf
+*.tar -text
+*.gguf -text

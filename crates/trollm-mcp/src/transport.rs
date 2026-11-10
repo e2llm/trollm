@@ -9,6 +9,90 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Only this bounded private projection may retain untrusted HTTP diagnostics.
+// Display/Debug never include headers, response bytes, endpoint or credentials.
+#[derive(Clone)]
+pub(crate) struct HttpResponseCapture {
+    status: u16,
+    headers: Vec<(String, Vec<u8>)>,
+    prefix: Vec<u8>,
+    observed: usize,
+    hash: sha2::Sha256,
+}
+impl HttpResponseCapture {
+    pub(crate) fn new(status: u16, headers: &reqwest::header::HeaderMap) -> Self {
+        use sha2::Digest;
+        let mut selected = Vec::new();
+        for name in [
+            "server",
+            "content-type",
+            "date",
+            "retry-after",
+            "x-request-id",
+        ] {
+            for value in headers.get_all(name) {
+                // A header outside this exact private subset is never retained.
+                if value.as_bytes().len() <= 256 && selected.len() < 16 {
+                    selected.push((name.to_string(), value.as_bytes().to_vec()));
+                }
+            }
+        }
+        Self {
+            status,
+            headers: selected,
+            prefix: Vec::new(),
+            observed: 0,
+            hash: sha2::Sha256::new(),
+        }
+    }
+    pub(crate) fn observe(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.observed = self.observed.saturating_add(bytes.len());
+        self.hash.update(bytes);
+        let remaining = 65536usize.saturating_sub(self.prefix.len());
+        self.prefix
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+    pub(crate) fn failure(&self, cause: &'static str, complete: bool) -> HttpResponseFailure {
+        use sha2::Digest;
+        HttpResponseFailure {
+            status: self.status,
+            cause,
+            private: serde_json::json!({
+                "schema": "trollm.mcp-http-response-diagnostic.v1-proposal",
+                "httpMethod": "POST", "status": self.status, "cause": cause,
+                "selectedHeaders": self.headers, "headerCoverage": "selected-five-name-bounded-subset",
+                "bodyPrefixBytes": self.prefix,
+                "bodyBytesObserved": self.observed, "bodyComplete": complete,
+                "bodyPrefixSha256": format!("{:x}", sha2::Sha256::digest(&self.prefix)),
+                "bodySha256": complete.then(|| format!("{:x}", self.hash.clone().finalize())),
+                "bodyTruncated": !complete || self.prefix.len() != self.observed,
+                "meaning": "private-transport-evidence-not-effect-settlement"
+            }),
+        }
+    }
+}
+pub(crate) struct HttpResponseFailure {
+    pub status: u16,
+    pub cause: &'static str,
+    pub private: Value,
+}
+impl std::fmt::Display for HttpResponseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP_HTTP_RESPONSE_REFUSED: HTTP {} ({})",
+            self.status, self.cause
+        )
+    }
+}
+impl std::fmt::Debug for HttpResponseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::error::Error for HttpResponseFailure {}
+
 pub const MCP_SESSION_HEADER: &str = "mcp-session-id";
 
 pub type TokenGetter = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -331,9 +415,15 @@ impl McpClient {
         let resp = req
             .send()
             .map_err(|error| post_send_error(error, "MCP notification POST failed"))?;
-        let status = resp.status();
-        if !status.is_success() && status.as_u16() != 202 {
-            bail!("MCP notification {method} failed: HTTP {status}");
+        if !resp.status().is_success() {
+            let (status, headers, bytes) =
+                read_http_response(resp).map_err(|error| with_rpc_method(error, method))?;
+            let mut capture = HttpResponseCapture::new(status, &headers);
+            capture.observe(&bytes);
+            return Err(with_rpc_method(
+                capture.failure("http-status", true).into(),
+                method,
+            ));
         }
         Ok(())
     }
@@ -428,7 +518,8 @@ impl McpClient {
                         .context("selected transport deadline unavailable")?,
                     &acquisition,
                     before_send.context("selected final write check unavailable")?,
-                )?;
+                )
+                .map_err(|error| with_rpc_method(error, method))?;
                 (response.status, response.headers, response.bytes)
             }
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -439,18 +530,15 @@ impl McpClient {
             let resp = req
                 .send()
                 .map_err(|error| post_send_error(error, &format!("MCP {method} POST failed")))?;
-            let status = resp.status().as_u16();
-            let headers = resp.headers().clone();
-            const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
-            let mut bytes = Vec::new();
-            resp.take(MAX_RESPONSE_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .context("reading MCP response body")?;
-            ensure_response_size(&bytes)?;
-            (status, headers, bytes)
+            read_http_response(resp).map_err(|error| with_rpc_method(error, method))?
         };
         if !(200..300).contains(&status) {
-            bail!("MCP {method} failed: HTTP {status}");
+            let mut capture = HttpResponseCapture::new(status, &headers);
+            capture.observe(&bytes);
+            return Err(with_rpc_method(
+                capture.failure("http-status", true).into(),
+                method,
+            ));
         }
         if method == "initialize" {
             if let Some(session) = headers
@@ -623,18 +711,193 @@ pub fn find_items_field(payload: &Value) -> Option<(String, Vec<Value>)> {
     }
 }
 
-fn ensure_response_size(bytes: &[u8]) -> Result<()> {
-    anyhow::ensure!(
-        bytes.len() <= 32 * 1024 * 1024,
-        "MCP response exceeds byte limit"
-    );
-    Ok(())
+fn read_http_response(
+    resp: reqwest::blocking::Response,
+) -> Result<(u16, reqwest::header::HeaderMap, Vec<u8>)> {
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+    let mut capture = HttpResponseCapture::new(status, &headers);
+    let mut bytes = Vec::new();
+    let mut resp = resp;
+    loop {
+        let mut chunk = [0u8; 8192];
+        let count = resp
+            .read(&mut chunk)
+            .map_err(|_| capture.failure("body-read", false))?;
+        if count == 0 {
+            break;
+        }
+        capture.observe(&chunk[..count]);
+        if count > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(capture.failure("response-limit", false).into());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    Ok((status, headers, bytes))
+}
+
+fn with_rpc_method(error: anyhow::Error, method: &str) -> anyhow::Error {
+    match error.downcast::<HttpResponseFailure>() {
+        Ok(mut received) => {
+            received.private["rpcMethod"] = Value::String(
+                match method {
+                    "initialize" | "notifications/initialized" | "tools/list" | "tools/call" => {
+                        method
+                    }
+                    _ => "other",
+                }
+                .to_owned(),
+            );
+            received.into()
+        }
+        Err(error) => error,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn private_capture_bounds_headers_prefix_and_keeps_debug_closed() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("server", "envoy".parse().unwrap());
+        headers.insert("set-cookie", "private-cookie".parse().unwrap());
+        headers.insert("authorization", "private-auth".parse().unwrap());
+        headers.insert("mcp-session-id", "private-session".parse().unwrap());
+        headers.insert("x-request-id", "x".repeat(257).parse().unwrap());
+        let mut capture = HttpResponseCapture::new(421, &headers);
+        capture.observe(&vec![255; 65537]);
+        let error = capture.failure("http-status", true);
+        assert_eq!(
+            error.private["selectedHeaders"],
+            json!([["server", [101, 110, 118, 111, 121]]])
+        );
+        assert_eq!(
+            error.private["bodyPrefixBytes"].as_array().unwrap().len(),
+            65536
+        );
+        assert_eq!(error.private["bodyBytesObserved"], 65537);
+        assert_eq!(error.private["bodyComplete"], true);
+        assert_eq!(error.private["bodyTruncated"], true);
+        assert!(!format!("{error:?}").contains("255"));
+        for secret in ["private-cookie", "private-auth", "private-session"] {
+            assert!(!error.private.to_string().contains(secret));
+        }
+    }
+
+    #[test]
+    fn selected_tls_rpc_retains_non2xx_without_redirect_or_repeat_or_public_body() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[allow(dead_code)]
+        mod tls {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/tls_fixture.rs"
+            ));
+        }
+        for status in [421, 302] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = std::thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![rustls::pki_types::CertificateDer::from(
+                        tls::LEAF_1_DER.to_vec(),
+                    )],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(tls::LEAF_1_KEY_DER.to_vec()),
+                    ),
+                )
+                .unwrap();
+                let mut stream = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                    socket,
+                );
+                let mut input = BufReader::new(&mut stream);
+                let mut length = 0;
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    input.read_line(&mut line).unwrap();
+                    head.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                input.read_exact(&mut body).unwrap();
+                drop(input);
+                assert!(head.starts_with("POST /mcp?selected=1 HTTP/1.1\r\n"));
+                assert!(head
+                    .to_ascii_lowercase()
+                    .contains(&format!("host: localhost:{port}\r\n")));
+                assert_eq!(stream.conn.server_name(), Some("localhost"));
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["arguments"], json!({"value":"original"}));
+                write!(stream,"HTTP/1.1 {status} Refused\r\nContent-Length: 7\r\nContent-Type: text/plain\r\nLocation: https://foreign.invalid/private\r\nConnection: close\r\n\r\nprivate").unwrap();
+                stream.flush().unwrap();
+                stream.conn.send_close_notify();
+                let _ = stream.flush();
+                drop(stream);
+                listener.set_nonblocking(true).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            });
+            let mut client = McpClient::with_root_certificates(
+                format!("https://localhost:{port}/mcp?selected=1"),
+                Some(Arc::new(|| Some("private-token".into()))),
+                RootCertificates::from_pem(tls::ROOT_1_PEM).unwrap(),
+            )
+            .unwrap();
+            // This isolates the actual prepared RPC boundary after session setup;
+            // it does not substitute for genuine native authority or app/JNI tests.
+            client.initialized = true;
+            let checks = AtomicUsize::new(0);
+            let error = client
+                .call_prepared_tool_checked(
+                    "act",
+                    &json!({"value":"original"}),
+                    Some(Duration::from_secs(2)),
+                    &|| {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(checks.load(Ordering::SeqCst) > 0);
+            let received = error.downcast_ref::<HttpResponseFailure>().unwrap();
+            assert_eq!(received.status, status);
+            assert_eq!(received.private["rpcMethod"], "tools/call");
+            assert_eq!(
+                received.private["bodyPrefixBytes"],
+                json!(b"private".to_vec())
+            );
+            assert!(!format!("{error:?}").contains("private"));
+            peer.join().unwrap();
+        }
+    }
 
     #[test]
     fn grant_callback_time_exhausts_rpc_and_notification_budget_before_network() {

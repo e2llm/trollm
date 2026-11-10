@@ -175,3 +175,119 @@ fn real_gateway_validates_large_bound_sources_and_publishes_complete_artifacts()
     invalid.args["schema"] = json!({"$ref":"https://example.invalid/no-network"});
     assert!(gateway.validate_call(&invalid).is_err());
 }
+
+#[test]
+fn opt_in_repeated_keys_preserve_originals_and_default_behavior() {
+    let original =
+        json!({"id":"different-record","text":"$6.97$6.97 ($0.56/unit)","extra":{"keep":true}});
+    let mut input = ordered(
+        json!([original.clone(),{"id":"single","text":"$4.88"},{"id":"tie","text":"$6.97 $6.97"}]),
+    );
+    assert!(local::invoke("order_records", &input).is_err());
+    input["keyExtraction"] = json!({"stopBefore":["("],"repeated":"identical"});
+    let result = local::invoke("order_records", &input).unwrap();
+    assert_eq!(result["matchedCount"], 3);
+    assert_eq!(result["groups"][0]["items"][0]["selected"]["id"], "single");
+    assert_eq!(result["groups"][0]["items"][1]["selected"], original);
+    assert_eq!(result["groups"][0]["items"][1]["decimal"], "6.97");
+    assert_eq!(result["groups"][1]["items"][0]["selected"]["id"], "tie");
+    let filtered = invoke(
+        "filter_records",
+        input["items"].clone(),
+        input["schema"].clone(),
+    );
+    assert_eq!(result["sourceSha256"], filtered["sourceSha256"]);
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/local-order-records.v1.input.schema.json"
+    ))
+    .unwrap();
+    assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&input));
+}
+
+#[test]
+fn extraction_refuses_ambiguous_or_malformed_admitted_keys_without_partial_sorting() {
+    for label in [
+        "$6.97$7.97",
+        "$6.97 Typical: $7.97",
+        "$6.97 prose",
+        "$6.97$",
+        "$6.971",
+        "$1,200.00",
+        "USD6.97",
+        "($0.56/unit)",
+    ] {
+        let mut input = ordered(json!([{"text":"$1.00"},{"text":label}]));
+        input["keyExtraction"] = json!({"stopBefore":["("],"repeated":"identical"});
+        assert!(local::invoke("order_records", &input).is_err(), "{label}");
+    }
+    for extraction in [
+        json!({}),
+        json!({"stopBefore":[""],"repeated":"identical"}),
+        json!({"stopBefore":[],"repeated":"first"}),
+        json!({"stopBefore":[],"repeated":"identical","extra":true}),
+    ] {
+        let mut input = ordered(json!([]));
+        input["keyExtraction"] = extraction;
+        assert!(local::invoke("order_records", &input).is_err());
+    }
+}
+
+#[test]
+fn numeric_key_windows_support_non_currency_records_without_assigning_meaning() {
+    let first =
+        json!({"id":"measurement-a","label":"score: 7.0score: 7.0 (out of 10)","unit":"authored"});
+    let input = json!({"items":[first.clone(), {"id":"measurement-b","label":"score: 6.0"}],
+        "schema":{"type":"object"},"field":"/label","prefix":"score: ","fractionDigits":1,"groupSize":2,
+        "keyExtraction":{"stopBefore":["("],"repeated":"identical"}});
+    let result = local::invoke("order_records", &input).unwrap();
+    assert_eq!(
+        result["groups"][0]["items"][0]["selected"]["id"],
+        "measurement-b"
+    );
+    assert_eq!(result["groups"][0]["items"][1]["selected"], first);
+    let mut conflict = input.clone();
+    conflict["items"][0]["label"] = json!("score: 7.0score: 8.0 (out of 10)");
+    assert!(local::invoke("order_records", &conflict).is_err());
+    let mut malformed = input;
+    malformed["items"][0]["label"] = json!("score: 7.0 unexplained");
+    assert!(local::invoke("order_records", &malformed).is_err());
+}
+
+#[test]
+fn real_gateway_orders_repeated_keys_and_never_publishes_a_partial_sort() {
+    use trollm_mcp::{McpGateway, PolicySet, ToolCall, ToolGateway};
+    for (second, succeeds) in [("$2.00$2.00 (per batch)", true), ("$2.00$3.00", false)] {
+        let dir = common::TempDir::new("repeated-key-gateway");
+        let policy =
+            PolicySet::from_yaml_str("local.order_records:\n  resultArtifact: ordered-records\n")
+                .unwrap();
+        let mut gateway = McpGateway::new(
+            vec![],
+            policy,
+            dir.path().join("cache"),
+            dir.path().join("artifacts"),
+            None,
+        )
+        .unwrap();
+        let mut args = ordered(json!([{"text":"$1.00"},{"text":second}]));
+        args["keyExtraction"] = json!({"stopBefore":["("],"repeated":"identical"});
+        let call = ToolCall {
+            server: "local".into(),
+            tool: "order_records".into(),
+            args,
+        };
+        gateway.validate_call(&call).unwrap();
+        let result = gateway.call(&call);
+        let artifact = dir.path().join("artifacts/ordered-records.json");
+        if succeeds {
+            let result = result.unwrap();
+            let saved: Value = serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+            assert_eq!(saved, result.content_for_model);
+            assert_eq!(saved["matchedCount"], 2);
+            assert_eq!(saved["groups"][0]["items"][1]["selected"]["text"], second);
+        } else {
+            assert!(result.is_err());
+            assert!(!artifact.exists());
+        }
+    }
+}

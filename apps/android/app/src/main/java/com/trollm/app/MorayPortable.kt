@@ -102,7 +102,8 @@ class MorayPortable(
                 "moray.declared-native-collection.v1-proposal" -> {
                     closed(source, "schemaVersion", "origin", "owner", "fixtureId", "versionId", "selectionRef", "selectionRawSha256", "profileId", "profileSha256", "installationSha256", "qualification")
                     require(source.sourceString("profileId") in setOf("trollm.native-collection-members.v1-proposal",
-                        "trollm.native-collection-members.v3-proposal"))
+                        "trollm.native-collection-members.v3-proposal",
+                        "trollm.native-collection-members.v4-proposal"))
                     for (name in listOf("selectionRawSha256", "profileSha256", "installationSha256")) hash(source.sourceString(name))
                     val selection = source.getJSONObject("selectionRef")
                     closed(selection, "tenantId", "artifactId", "sha256")

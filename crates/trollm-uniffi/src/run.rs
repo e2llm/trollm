@@ -2944,7 +2944,7 @@ mod regression_tests {
     }
 
     #[test]
-    fn selected_model_wrapper_spans_single_long_and_three_item_waits_with_owned_refresh() {
+    fn selected_model_wrapper_keeps_owned_refresh_across_single_and_three_item_waits() {
         struct Environment(Arc<crate::collection_clock::CalibratedClock>);
         impl crate::collection_provider::InstalledSelectedEnvironment for Environment {
             fn start_clock_maintenance(&self) -> Result<()> {
@@ -2964,9 +2964,19 @@ mod regression_tests {
                 bail!("no effect authority in model control")
             }
         }
-        struct WaitingModel;
+        struct WaitingModel {
+            clock: Arc<crate::collection_clock::CalibratedClock>,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
         impl ModelSlot for WaitingModel {
             fn generate(&mut self, request: GenerateRequest) -> Result<GenerateResponse> {
+                let before = self.calls.load(Ordering::SeqCst);
+                self.clock.request_test_refresh();
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while self.calls.load(Ordering::SeqCst) == before {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 std::thread::sleep(if request.prompt == "single-long-call" {
                     Duration::from_millis(1300)
                 } else {
@@ -2983,14 +2993,14 @@ mod regression_tests {
             }
         }
         let (clock, server, calls, directory) =
-            crate::collection_clock::controls::clock_fixture_responses("refresh", 0);
+            crate::collection_clock::controls::clock_fixture_responses("refresh-positive", 0);
         let clock = Arc::new(clock);
         clock.acquire().unwrap();
         let (handle, _) = handle();
         let mut handle = Arc::try_unwrap(handle).ok().unwrap();
         Arc::get_mut(&mut handle.control).unwrap().selected_preparer =
             Some(crate::collection_provider::controls::actor_for_environment(
-                Arc::new(Environment(clock)),
+                Arc::new(Environment(clock.clone())),
             ));
         handle
             .control
@@ -3002,7 +3012,10 @@ mod regression_tests {
         let worker = WorkerGuard(handle.control.clone());
         let mut model = ControlledModel {
             slot: "coder".into(),
-            inner: Box::new(WaitingModel),
+            inner: Box::new(WaitingModel {
+                clock,
+                calls: calls.clone(),
+            }),
             ctl: handle.control.clone(),
         };
         let mut single = request();
@@ -3015,7 +3028,7 @@ mod regression_tests {
         assert!(handle.control.worker_active());
         drop(worker);
         assert!(!handle.control.worker_active());
-        assert!(calls.load(Ordering::SeqCst) >= 3);
+        assert!(calls.load(Ordering::SeqCst) >= 5);
         server.join().unwrap();
         fs::remove_dir_all(directory).unwrap();
     }

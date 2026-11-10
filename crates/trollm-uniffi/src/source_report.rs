@@ -8,6 +8,52 @@ use std::{
 };
 use trollm_core::{artifacts::write_atomic, plan::hex_sha256, RunState};
 
+/// Read original cursor bytes by their original path and last journal commitment.
+/// No filename substitution, regeneration or missing-artifact recovery occurs.
+fn read_committed_cursor_snapshot(
+    dir: &Path,
+    snapshot_ref: &str,
+    committed: &std::collections::BTreeMap<String, (String, u64)>,
+    conflicting: &std::collections::BTreeSet<String>,
+) -> Result<(Vec<u8>, Vec<Value>)> {
+    let relative = Path::new(snapshot_ref);
+    if snapshot_ref.is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        bail!("invalid native snapshot reference");
+    }
+    let logical_path = dir.join(relative);
+    if conflicting.contains(logical_path.to_string_lossy().as_ref()) {
+        bail!("native item snapshot has conflicting immutable commitments");
+    }
+    let path = logical_path.canonicalize()?;
+    if !path.starts_with(dir.canonicalize()?) || !fs::symlink_metadata(&logical_path)?.is_file() {
+        bail!("native snapshot escapes run custody");
+    }
+    if fs::metadata(&path)?.len() > 32 * 1024 * 1024 {
+        bail!("native snapshot report limit");
+    }
+    let raw = fs::read(&path)?;
+    if raw.len() > 32 * 1024 * 1024 {
+        bail!("native snapshot report limit");
+    }
+    let hash = hex_sha256(&raw);
+    if !committed
+        .get(logical_path.to_string_lossy().as_ref())
+        .is_some_and(|(sha, size)| sha == &hash && *size == raw.len() as u64)
+    {
+        bail!("native item snapshot differs from its committed artifact identity");
+    }
+    let values = std::str::from_utf8(&raw)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    Ok((raw, values))
+}
+
 pub(crate) fn retain(
     base: &Path,
     run: &str,
@@ -47,8 +93,8 @@ pub(crate) fn retain(
     let mut mappings = Vec::new();
     let mut retained = Vec::new();
     let snapshot_hash = hex_sha256(&snapshot);
-    let root = dir.canonicalize()?;
     let mut committed_artifacts = std::collections::BTreeMap::new();
+    let mut conflicting_artifacts = std::collections::BTreeSet::new();
     let journal_path = dir.join("events.jsonl");
     if fs::metadata(&journal_path)?.len() > 32 * 1024 * 1024 {
         bail!("native journal report limit");
@@ -66,7 +112,14 @@ pub(crate) fn retain(
             event["bytes"].as_u64(),
             committed,
         ) {
-            committed_artifacts.insert(path.to_string(), (sha.to_string(), bytes));
+            let next = (sha.to_string(), bytes);
+            if committed_artifacts
+                .get(path)
+                .is_some_and(|previous| previous != &next)
+            {
+                conflicting_artifacts.insert(path.to_string());
+            }
+            committed_artifacts.insert(path.to_string(), next);
         }
     })?;
     if last_seq == 0
@@ -98,30 +151,12 @@ pub(crate) fn retain(
             .item_key
             .as_ref()
             .context("native item key unavailable")?;
-        let relative = Path::new(&cursor.snapshot_ref);
-        if relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-        {
-            bail!("invalid native snapshot reference");
-        }
-        let logical_path = dir.join(relative);
-        let path = logical_path.canonicalize()?;
-        if !path.starts_with(&root) {
-            bail!("native snapshot escapes run custody");
-        }
-        if fs::metadata(&path)?.len() > 32 * 1024 * 1024 {
-            bail!("native snapshot report limit");
-        }
-        let raw = fs::read(&path)?;
-        if raw.len() > 32 * 1024 * 1024 {
-            bail!("native snapshot report limit");
-        }
-        let values: Vec<Value> = std::str::from_utf8(&raw)?
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_str)
-            .collect::<std::result::Result<_, _>>()?;
+        let (raw, values) = read_committed_cursor_snapshot(
+            &dir,
+            &cursor.snapshot_ref,
+            &committed_artifacts,
+            &conflicting_artifacts,
+        )?;
         if items.len() + values.len() > 128
             || cursor.results.len() > values.len()
             || cursor.index > values.len()
@@ -129,12 +164,6 @@ pub(crate) fn retain(
             bail!("native item report limit or inconsistent prefix");
         }
         let raw_hash = hex_sha256(&raw);
-        if !committed_artifacts
-            .get(logical_path.to_string_lossy().as_ref())
-            .is_some_and(|(hash, bytes)| hash == &raw_hash && *bytes == raw.len() as u64)
-        {
-            bail!("native item snapshot differs from its committed artifact identity");
-        }
         retained.push((format!("{raw_hash}.jsonl"), raw));
         for (index, value) in values.iter().enumerate() {
             let original = value.get(key).context("native item identity missing")?;
@@ -275,4 +304,140 @@ pub(crate) fn retain(
         encoded.as_bytes(),
     )?;
     Ok(encoded)
+}
+
+#[cfg(test)]
+mod snapshot_controls {
+    use super::*;
+    use std::collections::BTreeMap;
+    use trollm_core::{artifacts::write_foreach_snapshot, EventLog, EventType};
+
+    #[test]
+    fn actual_writer_commit_cursor_and_report_sidecar_keep_original_zero_one_many() {
+        let root = std::env::temp_dir().join(format!(
+            "report-snapshot-{}",
+            trollm_core::RunDir::under(Path::new("unused")).run_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for values in [
+            vec![],
+            vec![json!({"id":"one","value":"é"})],
+            vec![
+                json!({"id":"one"}),
+                json!({"id":"two"}),
+                json!({"id":"three"}),
+            ],
+        ] {
+            let written =
+                write_foreach_snapshot(&root.join("artifacts"), "items", &values).unwrap();
+            let reference = format!(
+                "artifacts/{}",
+                written.path.file_name().unwrap().to_str().unwrap()
+            );
+            let mut log =
+                EventLog::open(&root.join("events.jsonl"), "declared-report-run").unwrap();
+            log.append(
+                EventType::ArtifactWritten,
+                json!({"path":written.path,"sha256":written.sha256,"bytes":written.bytes}),
+            )
+            .unwrap();
+            let mut committed = BTreeMap::new();
+            EventLog::visit(
+                &root.join("events.jsonl"),
+                Some("declared-report-run"),
+                |event, _| {
+                    if event["type"] == "artifact_written" {
+                        committed.insert(
+                            event["path"].as_str().unwrap().to_owned(),
+                            (
+                                event["sha256"].as_str().unwrap().to_owned(),
+                                event["bytes"].as_u64().unwrap(),
+                            ),
+                        );
+                    }
+                },
+            )
+            .unwrap();
+            let (raw, read) =
+                read_committed_cursor_snapshot(&root, &reference, &committed, &Default::default())
+                    .unwrap();
+            assert_eq!(read, values);
+            let conflicts =
+                std::collections::BTreeSet::from([written.path.to_string_lossy().into_owned()]);
+            assert!(
+                read_committed_cursor_snapshot(&root, &reference, &committed, &conflicts).is_err()
+            );
+            let sidecar = write_atomic(
+                &root.join("source-reports"),
+                &format!("{}.jsonl", hex_sha256(&raw)),
+                &raw,
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(sidecar.path).unwrap(),
+                fs::read(&written.path).unwrap()
+            );
+            for bad in [
+                "artifacts/items.snapshot.jsonl",
+                "../outside.snapshot.jsonl",
+                "artifacts/missing.snapshot.jsonl",
+            ] {
+                assert!(read_committed_cursor_snapshot(
+                    &root,
+                    bad,
+                    &committed,
+                    &Default::default()
+                )
+                .is_err());
+            }
+            let mut wrong = committed.clone();
+            wrong.get_mut(written.path.to_str().unwrap()).unwrap().1 += 1;
+            assert!(
+                read_committed_cursor_snapshot(&root, &reference, &wrong, &Default::default())
+                    .is_err()
+            );
+            wrong = committed.clone();
+            wrong.get_mut(written.path.to_str().unwrap()).unwrap().0 = "f".repeat(64);
+            assert!(
+                read_committed_cursor_snapshot(&root, &reference, &wrong, &Default::default())
+                    .is_err()
+            );
+            assert!(read_committed_cursor_snapshot(
+                &root,
+                &reference,
+                &BTreeMap::new(),
+                &Default::default()
+            )
+            .is_err());
+            fs::write(&written.path, b"dirty bytes").unwrap();
+            assert!(read_committed_cursor_snapshot(
+                &root,
+                &reference,
+                &committed,
+                &Default::default()
+            )
+            .is_err());
+            fs::write(&written.path, &raw).unwrap();
+            #[cfg(unix)]
+            {
+                let alias = root.join("artifacts/alias.snapshot.jsonl");
+                std::os::unix::fs::symlink(&written.path, &alias).unwrap();
+                let mut aliases = committed.clone();
+                aliases.insert(
+                    alias.to_string_lossy().into_owned(),
+                    (hex_sha256(&raw), raw.len() as u64),
+                );
+                assert!(read_committed_cursor_snapshot(
+                    &root,
+                    "artifacts/alias.snapshot.jsonl",
+                    &aliases,
+                    &Default::default()
+                )
+                .is_err());
+                fs::remove_file(alias).unwrap();
+            }
+            drop(log);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

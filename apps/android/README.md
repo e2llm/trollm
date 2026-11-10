@@ -362,3 +362,42 @@ always partial and is neither a completion binding nor an API report. Missing
 files remain missing; it never creates a snapshot, journal, report or input sidecar
 to repair an earlier run. Preserve the full original run directory separately,
 including calibration files, before retiring a temporary device.
+
+Custody reads require the selected ADB transport's `shell_v2` capability and
+non-PTY `shell -T` remote status, followed by strict single-file archive framing.
+Remote error text is never recognized by a text pattern or relabeled as a file.
+Failed bounded stdout/stderr stay private diagnostics with explicit missing
+members. Arbitrary binary file contents are preserved unchanged. The original
+request also selects its invocation claim, whose bytes must equal the original
+request hash. An index describes selected app-root members, not a whole run or
+whole app tree. Both frame-owned and legacy flat cursors must join original,
+contiguous same-run journal commitments; conflicting duplicates refuse.
+
+Clock acquisition retains its request and actual sent endpoint before network
+I/O. Bounded original response bytes, HTTP metadata and actual received endpoint
+are kept before parsing or association validation can refuse them. Partial reads
+remain partial. Closed categories distinguish connection, request, HTTP, body,
+hash, format, association and custody failures without exposing credentials or
+guessing TLS versus DNS from exception text. These new records do not diagnose
+an earlier attempt retrospectively. Selected calibration files are copied with
+other original custody when a genuine run ID exists; this does not replace the
+separate full original tree capture or renew authority.
+
+## Portable starter sources
+
+Bundle text sources under `flows/` use LF through `.gitattributes`; archives remain
+binary. `scripts/android/bundle_paths.py` serializes relative filesystem paths as
+portable archive names, rejects escapes and duplicate names, and reads exact source
+bytes. It does not rewrite content, normalize a supplied unsafe archive name, or
+repair a setup checksum pin. Static and discovered input lists follow the same rule.
+
+Run `python3 scripts/android/make_starter_bundles.py --check` after changing sources.
+The helper tests build every existing starter with both Windows and POSIX path
+objects and compare the actual archive bytes. This covers path construction on a
+host; it does not claim an actual Windows build or Android installation test.
+
+New literal text lookup and optional repeated numeric ordering keys require native
+code containing those capabilities. Importing a flow alone cannot upgrade an older
+APK. Existing exact lookup and strict numeric ordering remain the defaults. Follow
+[product versioning](../../docs/VERSIONING.md) when distributing new APK bytes;
+source-only backports do not allocate a new app build identity.

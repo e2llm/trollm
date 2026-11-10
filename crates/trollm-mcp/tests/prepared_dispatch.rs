@@ -93,7 +93,7 @@ fn gateway(
     server: &MockMcpServer,
     tool: &str,
     dirs: &TempDir,
-    guard: Arc<Guard>,
+    guard: Arc<dyn CallPreparer>,
     cancel: Arc<AtomicBool>,
     cancel_on_token: Arc<AtomicBool>,
 ) -> McpGateway {
@@ -113,7 +113,7 @@ fn gateway(
     McpGateway::new(
         vec![server],
         PolicySet::from_yaml_str(&format!(
-            "tracker.{tool}: {{class: mutation, passthrough: true}}"
+            "tracker.{tool}: {{class: mutation, passthrough: true, resultArtifact: retained}}"
         ))
         .unwrap(),
         dirs.path().join("cache"),
@@ -127,6 +127,192 @@ fn gateway(
         ensure!(!cancel.load(Ordering::SeqCst), "native cancellation");
         Ok(())
     }))
+}
+
+struct ResultGuard {
+    inner: Arc<Guard>,
+    refuse_postcheck: bool,
+}
+impl CallPreparer for ResultGuard {
+    fn prepare(
+        &self,
+        call: &ToolCall,
+        context: &PreparationContext,
+        deadline: Option<Instant>,
+    ) -> Result<PreparedCall> {
+        let mut prepared = self.inner.prepare(call, context, deadline)?;
+        if call.args["failTransport"] == true {
+            prepared.call.args["httpStatus"] = json!(401);
+            prepared.evidence.response_json =
+                serde_json::to_string(&json!({"args":prepared.call.args,"fixtureOnly":true}))?;
+            prepared.evidence.response_sha256 =
+                raw_sha256(prepared.evidence.response_json.as_bytes());
+        }
+        Ok(prepared)
+    }
+    fn after_retained_intent(
+        &self,
+        call: &ToolCall,
+        context: &PreparationContext,
+        evidence: &PreparationEvidence,
+        seq: u64,
+    ) -> Result<()> {
+        self.inner
+            .after_retained_intent(call, context, evidence, seq)
+    }
+    fn check_before_send(
+        &self,
+        call: &ToolCall,
+        context: &PreparationContext,
+        evidence: &PreparationEvidence,
+    ) -> Result<()> {
+        self.inner.check_before_send(call, context, evidence)
+    }
+    fn after_retained_result(
+        &self,
+        _: &ToolCall,
+        context: &PreparationContext,
+        _: &PreparationEvidence,
+        result: &trollm_mcp::ToolResult,
+        _: Option<u64>,
+        _: u64,
+    ) -> Result<()> {
+        ensure!(
+            result.artifacts.len() == 1,
+            "one actual retained payload required"
+        );
+        let path = &result.artifacts[0];
+        ensure!(
+            path.file_name().unwrap()
+                == trollm_mcp::preparation::selected_result_artifact_name("retained", context)?
+                    .as_str(),
+            "shared producer destination mismatch"
+        );
+        let original = std::fs::read(path)?;
+        ensure!(
+            serde_json::from_slice::<serde_json::Value>(&original)? == result.content_for_model,
+            "actual persisted payload differs from returned payload"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(format!("{}.meta.json", path.display()))?)?;
+        ensure!(
+            meta["complete"] == true,
+            "actual producer completion required"
+        );
+        // Controlled port only, not an RPA/browser or independent settlement.
+        ensure!(
+            !self.refuse_postcheck,
+            "controlled outcome postcheck/ACK unavailable"
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn actual_prepared_wire_writer_preserves_zero_one_many_context_originals_and_fences_failed_ack() {
+    for (count, refuse_postcheck, fail_second) in [
+        (0, false, false),
+        (1, false, false),
+        (3, false, false),
+        (1, true, false),
+        (1, false, true),
+    ] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("selected-immutable-results");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let guard = Arc::new(ResultGuard {
+            inner: Arc::new(Guard {
+                calls: AtomicUsize::new(0),
+                delay: false,
+                cancel: cancel.clone(),
+            }),
+            refuse_postcheck,
+        });
+        let mut native = gateway(
+            &server,
+            "close_issue",
+            &dirs,
+            guard,
+            cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let requested = ToolCall {
+            server: "tracker".into(),
+            tool: "close_issue".into(),
+            args: json!({"id":9}),
+        };
+        let mut originals = Vec::new();
+        for number in 1..=count {
+            let context = context(number);
+            native.set_call_context(Some(context.call_context.clone()));
+            let prepared = native.prepare_call(&requested, &context).unwrap().unwrap();
+            native
+                .after_retained_intent(&prepared.call, &context, Some(u64::from(number) * 2))
+                .unwrap();
+            let result = native.call(&prepared.call).unwrap();
+            let path = result.artifacts[0].clone();
+            let meta = std::path::PathBuf::from(format!("{}.meta.json", path.display()));
+            assert!(!originals.iter().any(|(old, _, _, _)| old == &path));
+            originals.push((
+                path.clone(),
+                std::fs::read(&path).unwrap(),
+                meta.clone(),
+                std::fs::read(&meta).unwrap(),
+            ));
+            let ack = native.after_retained_result(
+                &prepared.call,
+                &context,
+                &result,
+                Some(u64::from(number) * 2),
+                u64::from(number) * 2 + 1,
+            );
+            if refuse_postcheck {
+                assert!(ack.is_err());
+                assert!(native
+                    .prepare_call(&requested, &self::context(number + 1))
+                    .is_err());
+                assert!(native.call(&prepared.call).is_err());
+            } else {
+                ack.unwrap();
+            }
+        }
+        if fail_second {
+            let context = context(2);
+            native.set_call_context(Some(context.call_context.clone()));
+            let failed = ToolCall {
+                args: json!({"failTransport":true}),
+                ..requested.clone()
+            };
+            let prepared = native.prepare_call(&failed, &context).unwrap().unwrap();
+            native
+                .after_retained_intent(&prepared.call, &context, Some(4))
+                .unwrap();
+            assert!(native.call(&prepared.call).is_err());
+            let missing = dirs.path().join("artifacts").join(
+                trollm_mcp::preparation::selected_result_artifact_name("retained", &context)
+                    .unwrap(),
+            );
+            assert!(!missing.exists());
+            assert!(!std::path::PathBuf::from(format!("{}.meta.json", missing.display())).exists());
+            assert!(native.prepare_call(&requested, &self::context(3)).is_err());
+            assert!(native.call(&prepared.call).is_err());
+        } else if !refuse_postcheck && count > 0 {
+            // A genuinely failed later acquisition must not invalidate any
+            // earlier result bytes or completion metadata.
+            cancel.store(true, Ordering::SeqCst);
+            let context = context(count + 1);
+            native.set_call_context(Some(context.call_context.clone()));
+            assert!(native.prepare_call(&requested, &context).is_err());
+        }
+        for (path, bytes, meta, metadata) in originals {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(std::fs::read(meta).unwrap(), metadata);
+        }
+        assert_eq!(
+            server.count("call:close_issue"),
+            count as usize + usize::from(fail_second)
+        );
+    }
 }
 
 #[test]
@@ -163,6 +349,50 @@ fn preparation_without_native_intent_never_dispatches_and_fences_its_permit() {
         .is_err());
     assert!(native.call(&prepared.call).is_err());
     assert_eq!(server.count("call:close_issue"), 0);
+}
+
+#[test]
+fn occupied_selected_result_or_metadata_refuses_before_preparation_or_effect() {
+    for metadata in [false, true] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("selected-result-occupied");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let guard = Arc::new(Guard {
+            calls: AtomicUsize::new(0),
+            delay: false,
+            cancel: cancel.clone(),
+        });
+        let mut native = gateway(
+            &server,
+            "close_issue",
+            &dirs,
+            guard.clone(),
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let context = context(1);
+        let path = dirs.path().join("artifacts").join(
+            trollm_mcp::preparation::selected_result_artifact_name("retained", &context).unwrap(),
+        );
+        let occupied = if metadata {
+            std::path::PathBuf::from(format!("{}.meta.json", path.display()))
+        } else {
+            path
+        };
+        std::fs::create_dir_all(dirs.path().join("artifacts")).unwrap();
+        std::fs::write(&occupied, b"original-occupied-bytes").unwrap();
+        native.set_call_context(Some(context.call_context.clone()));
+        let requested = ToolCall {
+            server: "tracker".into(),
+            tool: "close_issue".into(),
+            args: json!({"id":9}),
+        };
+        assert!(native.prepare_call(&requested, &context).is_err());
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(server.count("call:close_issue"), 0);
+        assert_eq!(std::fs::read(occupied).unwrap(), b"original-occupied-bytes");
+        assert!(native.prepare_call(&requested, &self::context(2)).is_err());
+    }
 }
 
 #[test]

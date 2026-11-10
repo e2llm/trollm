@@ -13,10 +13,14 @@ const SOURCE = '9c97f57a22e9b84256aecc9f6b3bf70b4bd97113';
 const MODULE_SHA = 'a93523bbf4db75230a44f01b923f3e6f23e8f48fe27c6bdce15c6b5ee4d853f3';
 const canonical = value => value && typeof value === 'object' && !Array.isArray(value) ?
   Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
-async function verifyClockPair(sourceRoot) {
+async function verifyClockPair(sourceRoot, workload600 = false) {
+  const source = workload600 ? "0dbc6a821c5de10136e4a9655ef3788ce9b89ea7" : SOURCE;
+  const moduleSha = workload600 ? "bc64099bfa6b97de1de1a7ec4612c07a469a094a6e4744f23f406501be9a5f5a" : MODULE_SHA;
   assert(path.isAbsolute(sourceRoot), 'Usage: node scripts/android/verify_clock_pair.cjs /absolute/exact-rpa-source');
-  const moduleFile = path.join(sourceRoot, 'tests/integration/collection-clock-assurance.cjs');
-  assert.equal(sha(await fs.readFile(moduleFile)), MODULE_SHA);
+  const moduleFile = path.join(sourceRoot, workload600 ? 'tests/integration/collection-clock-assurance-600.cjs' : 'tests/integration/collection-clock-assurance.cjs');
+  assert.equal(sha(await fs.readFile(moduleFile)), moduleSha);
+  const installerFile = path.join(sourceRoot, "tests/integration/selected-installed-clock-600.cjs");
+  if (workload600) assert.equal(sha(await fs.readFile(installerFile)), "366512be79dc86a9bb13fbb7c6e2d8af11e9327a432afa8078891efd6b70499e");
   const {fixtureClock} = require(path.join(sourceRoot, 'tests/helpers/kernel-clock-fixture.cjs'));
   const {installationBytes, createCollectionClockAssurance} = require(moduleFile);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'native-rpa-clock-pair-'));
@@ -29,11 +33,11 @@ async function verifyClockPair(sourceRoot) {
     const selectionRef = {tenantId: 'declared', artifactId: 'art_' + 'b'.repeat(32), sha256: 'b'.repeat(64)};
     const assuranceRef = {tenantId: 'declared', artifactId: 'art_' + 'a'.repeat(32), sha256: sha(rawBytes)};
     const expiresAt = new Date(Date.now() + 30000).toISOString();
-    lifetime = createCollectionClockAssurance({assuranceRef, rawBytes,
+    lifetime = (workload600 ? require(installerFile).createInstalledClock : createCollectionClockAssurance)({assuranceRef, rawBytes,
       policy: {basis: 'bounded-utc', maxClockErrorMs: 300, assuranceRef}, owner, selectionRef,
       invocationKey: 'declared-pair', expiresAt});
     const guestBootId = '11111111-2222-4333-8444-555555555555';
-    const acquireClock = lifetime.bindAcquireClock({guestBootId, signal: controller.signal});
+    const acquireClock = (workload600 ? lifetime.clockInstaller : lifetime).bindAcquireClock({guestBootId, signal: controller.signal});
     const fixture = await fs.readFile(path.join(__dirname, '../../crates/trollm-mcp/tests/common/tls_fixture.rs'), 'utf8');
     const der = name => Buffer.from(new RegExp(`pub const ${name}: &\\[u8\\] = &\\[([\\s\\S]*?)\\];`).exec(fixture)[1]
       .split(',').map(value => value.trim()).filter(Boolean).map(Number));
@@ -71,7 +75,7 @@ async function verifyClockPair(sourceRoot) {
     const refused = await send('3'.repeat(64)); assert.equal(refused.status, 409);
     probe.state();
     assert.equal((await send('4'.repeat(64))).status, 409); // Permanent loss, no fallback.
-    return {source: SOURCE, moduleSha256: MODULE_SHA,
+    return {source, moduleSha256: moduleSha,
       scope: 'controlled-kernel-original-source-private-TLS-only', freshRequests: 2,
       sourceLossRefused: true, restorationRemainsFenced: true};
   } finally {
@@ -80,5 +84,5 @@ async function verifyClockPair(sourceRoot) {
   }
 }
 module.exports = {verifyClockPair};
-if (require.main === module) verifyClockPair(process.argv[2]).then(result => process.stdout.write(JSON.stringify(result) + '\n'))
+if (require.main === module) verifyClockPair(process.argv[2], process.argv[3] === "--workload-600").then(result => process.stdout.write(JSON.stringify(result) + '\n'))
   .catch(error => { process.stderr.write(String(error.message) + '\nUsage: node scripts/android/verify_clock_pair.cjs /absolute/exact-rpa-source\n'); process.exitCode = 1; });

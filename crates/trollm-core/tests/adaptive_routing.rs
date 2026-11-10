@@ -134,7 +134,14 @@ fn explicit_route_context_and_generation_limits() {
     assert!(control["gatewayResultCompactJsonUtf8Bytes"].is_null());
     assert_eq!(control["toolResultContextCandidateUtf8Bytes"], 0);
     assert!(reqs[0].prompt.contains("Choose at choose"));
-    assert!(reqs[0].prompt.contains("\"finish\":\"done\""));
+    assert!(reqs[0]
+        .prompt
+        .contains("\"availableRoutes\":[\"again\",\"finish\",\"pause\"]"));
+    assert!(!reqs[0].prompt.contains("\"finish\":\"done\""));
+    assert!(!reqs[0].prompt.contains("\"taskRef\":"));
+    assert!(reqs[0]
+        .prompt
+        .ends_with("[Node instructions]\nChoose at choose"));
     assert_eq!(reqs[0].max_tokens, 80);
     assert_eq!(
         reqs[0].max_duration,
@@ -195,6 +202,38 @@ fn error_context_survives_success_and_is_bounded() {
     assert_eq!(state["stack"][0]["lastError"]["node"], "choose");
     assert_eq!(state["stack"][0]["lastError"]["mutationOutcome"], "none");
     assert!(reqs[1].prompt.contains("Recover choose"));
+    assert!(reqs[1]
+        .prompt
+        .contains(&format!("\"lastError\":{}", state["stack"][0]["lastError"])));
+    assert!(reqs[1].prompt.contains("\"node\":\"choose\""));
+}
+
+#[test]
+fn explicit_runtime_destinations_remain_available_to_authors() {
+    let plan = PLAN.replace(
+        "Choose at {{ runtime.node }}",
+        "Targets {{ runtime.routes }}",
+    );
+    let (status, _, _, reqs) = run(&plan, REGISTRY, &[CHOOSE]);
+    assert_eq!(status, RunStatus::Succeeded);
+    assert!(reqs[0].prompt.contains("Targets {"));
+    assert!(reqs[0].prompt.contains("\"finish\":\"done\""));
+}
+
+#[test]
+fn read_failure_remains_visible_across_recovery_and_successful_observation() {
+    let plan = PLAN
+        .replace("routes: { finish:", "onError: { then: observe }\n    routes: { finish:")
+        .replace("  done:", "  observe: { kind: task, taskRef: observe, promptSupplement: 'Inspect saved evidence.', onVerified: recover }\n  recover: { kind: task, taskRef: choose, routes: { finish: done } }\n  done:");
+    let registry = format!("{REGISTRY}\n  observe: {{ model: coder, prompt: prompt.md }}\n");
+    let (status, state, _, reqs) = run_inner(&plan, &registry, &[READ, "Observed", CHOOSE], true);
+    assert_eq!(status, RunStatus::Succeeded);
+    let failure = &state["stack"][0]["lastError"];
+    assert_eq!(failure["node"], "choose");
+    assert_eq!(failure["mutationOutcome"], "none");
+    for req in &reqs[1..] {
+        assert!(req.prompt.contains(&format!("\"lastError\":{failure}")));
+    }
 }
 #[test]
 fn legacy_prompt_is_byte_identical() {

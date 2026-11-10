@@ -13,8 +13,21 @@ pub const ROOT: &str = "selected-collection";
 pub const BODY: &str = "selected-item";
 pub const BETWEEN: &str = "selected-between";
 pub const N1_OFFER_PROFILE: &str = "trollm.native-collection-members.v2-proposal";
+pub const WORKLOAD_600_PROFILE: &str = "trollm.native-collection-members.v4-proposal";
+pub const WORKLOAD_CLOCK_STARTUP_ATTEMPTS: u64 = 2;
+pub const WORKLOAD_CLOCK_PREPARATION_CONTEXTS: usize = 11;
+pub const WORKLOAD_CLOCK_ATTEMPTS_PER_CONTEXT: u64 = 12;
+pub const WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS: u64 = 49;
+pub const WORKLOAD_CLOCK_TOTAL_ATTEMPTS: u64 = WORKLOAD_CLOCK_STARTUP_ATTEMPTS
+    + WORKLOAD_CLOCK_PREPARATION_CONTEXTS as u64 * WORKLOAD_CLOCK_ATTEMPTS_PER_CONTEXT
+    + WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS;
+
+pub fn is_matched_profile(profile: &str) -> bool {
+    [MATCHED_PROFILE, WORKLOAD_600_PROFILE].contains(&profile)
+}
 pub const MATCHED_PROFILE: &str = "trollm.native-collection-members.v3-proposal";
 pub const MATCHED_READY: &str = "controlled-collection-selected-ready.v3";
+pub const WORKLOAD_600_NATIVE_PROFILE: &str = "controlled-collection-native-selected.v4-proposal";
 pub const MATCHED_NATIVE_PROFILE: &str = "controlled-collection-native-selected.v3-proposal";
 pub const MATCHED_GUARD: &str = "controlled-collection-selected-guard.v3";
 
@@ -47,7 +60,8 @@ impl CollectionSource {
         ensure!(
             self.schema_version == SOURCE_SCHEMA
                 && self.origin == "DECLARED"
-                && [PROFILE, MATCHED_PROFILE].contains(&self.profile_id.as_str())
+                && [PROFILE, MATCHED_PROFILE, WORKLOAD_600_PROFILE]
+                    .contains(&self.profile_id.as_str())
                 && self.qualification == "unqualified",
             "unsupported collection source profile"
         );
@@ -85,7 +99,9 @@ impl CollectionSource {
             )?) == self.profile_sha256,
             "collection source profile drift"
         );
-        if self.profile_id == MATCHED_PROFILE {
+        if self.profile_id == WORKLOAD_600_PROFILE {
+            CollectionMembers::inspect_matched_600(directory, &selection, &context, endpoint)
+        } else if self.profile_id == MATCHED_PROFILE {
             CollectionMembers::inspect_matched(directory, &selection, &context, endpoint)
         } else {
             CollectionMembers::inspect(directory, &selection, &context, endpoint)
@@ -423,6 +439,69 @@ impl CollectionMembers {
         Ok(members)
     }
 
+    /// Explicit fresh workload profile, never a rewrite of historical v3 members.
+    pub fn compile_matched_600(
+        selection: &SelectionRecord,
+        context: &[u8],
+        endpoint: &str,
+    ) -> Result<Self> {
+        let mut members = Self::compile_matched(selection, context, endpoint)?;
+        for (name, bytes) in &mut members.files {
+            if name.ends_with(".flow.yaml") {
+                let mut plan: Value = serde_json::from_slice(bytes)?;
+                plan["limits"]["timeoutS"] = json!(600);
+                *bytes = encode(&plan)?;
+            } else if name.ends_with(".tasks.yaml") {
+                let mut registry: Value = serde_json::from_slice(bytes)?;
+                for task in registry["tasks"]
+                    .as_object_mut()
+                    .context("workload tasks missing")?
+                    .values_mut()
+                {
+                    task["generationTimeoutS"] = json!(45);
+                }
+                *bytes = encode(&registry)?;
+            }
+        }
+        let mut profile: Value = serde_json::from_slice(&members.files["collection-profile.json"])?;
+        profile["schema"] = json!(WORKLOAD_600_PROFILE);
+        profile["requiredInstalledBoundary"]["nativeProfileId"] =
+            json!(WORKLOAD_600_NATIVE_PROFILE);
+        profile["workloadPolicy"] = json!({"profileId":"trollm.native-workload-600s-45s.v1-proposal",
+            "rootAndChildTimeoutS":600,"generationTimeoutS":45,"actTimeoutS":30,
+            "meaning":"prospective-engineering-selection-not-a-completion-guarantee",
+            "clockAcquisitionBudget":{"startupAttempts":WORKLOAD_CLOCK_STARTUP_ATTEMPTS,
+                "maxPreparationContexts":WORKLOAD_CLOCK_PREPARATION_CONTEXTS,
+                "attemptsPerContext":WORKLOAD_CLOCK_ATTEMPTS_PER_CONTEXT,
+                "maintenanceAttempts":WORKLOAD_CLOCK_MAINTENANCE_ATTEMPTS,
+                "totalAttempts":WORKLOAD_CLOCK_TOTAL_ATTEMPTS,
+                "overflow":"permanent-refusal-before-probe"}});
+        members
+            .files
+            .insert("collection-profile.json".into(), encode(&profile)?);
+        members.files.remove(crate::bundle::MANIFEST_NAME);
+        let manifest = json!({"format":crate::bundle::BUNDLE_FORMAT,
+            "entryFlow":format!("{ROOT}.flow.yaml"),"taskRegistry":format!("{ROOT}.tasks.yaml"),
+            "files":members.files.iter().map(|(path,raw)| json!({"path":path,"sha256":raw_sha256(raw)})).collect::<Vec<_>>()});
+        members
+            .files
+            .insert(crate::bundle::MANIFEST_NAME.into(), encode(&manifest)?);
+        Ok(members)
+    }
+
+    pub fn inspect_matched_600(
+        directory: &Path,
+        selection: &SelectionRecord,
+        context: &[u8],
+        endpoint: &str,
+    ) -> Result<InspectedCollectionMembers> {
+        Self::inspect_expected(
+            directory,
+            selection,
+            Self::compile_matched_600(selection, context, endpoint)?,
+        )
+    }
+
     pub fn inspect_matched(
         directory: &Path,
         selection: &SelectionRecord,
@@ -559,6 +638,82 @@ impl CollectionMembers {
 #[cfg(test)]
 mod controls {
     use super::*;
+    #[test]
+    fn explicit_600_workload_inspects_original_subset_empty_changed_and_refuses_cap_drift() {
+        for variant in ["original", "subset", "empty", "changed"] {
+            let selection = selected(variant, 0);
+            let endpoint = "https://api.e2llm.dev/mcp";
+            let legacy = CollectionMembers::compile_matched(
+                &selection,
+                b"controlled source context",
+                endpoint,
+            )
+            .unwrap();
+            let members = CollectionMembers::compile_matched_600(
+                &selection,
+                b"controlled source context",
+                endpoint,
+            )
+            .unwrap();
+            let directory = std::env::temp_dir().join(format!(
+                "workload-600-{}",
+                trollm_core::RunDir::under(Path::new("unused")).run_id()
+            ));
+            members.write_new(&directory).unwrap();
+            let inspected = CollectionMembers::inspect_matched_600(
+                &directory,
+                &selection,
+                b"controlled source context",
+                endpoint,
+            )
+            .unwrap();
+            assert_eq!(inspected.member_profile, WORKLOAD_600_PROFILE);
+            assert!(CollectionMembers::inspect_matched(
+                &directory,
+                &selection,
+                b"controlled source context",
+                endpoint
+            )
+            .is_err());
+            for (name, bytes) in &members.files {
+                if name.ends_with(".flow.yaml") {
+                    let plan: Value = serde_json::from_slice(bytes).unwrap();
+                    let old: Value = serde_json::from_slice(&legacy.files[name]).unwrap();
+                    assert_eq!(plan["limits"]["timeoutS"], 600);
+                    assert_eq!(old["limits"]["timeoutS"], 300);
+                    assert_eq!(plan["mcp"], old["mcp"]);
+                } else if name.ends_with(".tasks.yaml") {
+                    let registry: Value = serde_json::from_slice(bytes).unwrap();
+                    for task in registry["tasks"].as_object().unwrap().values() {
+                        assert_eq!(task["generationTimeoutS"], 45);
+                    }
+                }
+            }
+            // A producer cannot silently lower, raise or omit the selected cap.
+            let name = format!("{ROOT}.flow.yaml");
+            let mut changed: Value = serde_json::from_slice(&members.files[&name]).unwrap();
+            changed["limits"]["timeoutS"] = json!(601);
+            std::fs::write(directory.join(name), encode(&changed).unwrap()).unwrap();
+            assert!(CollectionMembers::inspect_matched_600(
+                &directory,
+                &selection,
+                b"controlled source context",
+                endpoint
+            )
+            .is_err());
+            std::fs::remove_dir_all(directory).unwrap();
+            assert_eq!(
+                legacy.files,
+                CollectionMembers::compile_matched(
+                    &selection,
+                    b"controlled source context",
+                    endpoint
+                )
+                .unwrap()
+                .files
+            );
+        }
+    }
     #[test]
     #[cfg(feature = "stub")]
     fn source_entry_inspects_before_refusing_uninstalled_worker_for_all_suffix_shapes() {

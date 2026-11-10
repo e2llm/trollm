@@ -206,7 +206,8 @@ class MorayPortableTest {
             val client = MorayPortable(profile, dir, MorayWire { _, _, _, _, _ -> json(d) },
                 { "source-token" }, "grant1", { clock })
             for (memberProfile in listOf("trollm.native-collection-members.v1-proposal",
-                "trollm.native-collection-members.v3-proposal")) {
+                "trollm.native-collection-members.v3-proposal",
+                        "trollm.native-collection-members.v4-proposal")) {
                 source.put("profileId", memberProfile)
                 try { client.descriptor("publication1"); fail("unsupported collection admitted") }
                 catch (failure: MorayFailure) { assertEquals("NO_EXPORT", failure.code) }
