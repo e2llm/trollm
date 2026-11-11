@@ -1,5 +1,9 @@
 # Anatomy of a flow: the current v1 runtime
 
+For the product/role picture, [Learn trollm](LEARN-TROLLM.md) follows Check a total.
+This walkthrough deliberately removes tools and advice to isolate the source
+format and one execution path before introducing those concerns again.
+
 Start with [minimal summary](../flows/examples/minimal-summary.flow.yaml): user
 text goes to one tool-free coder task, its prose becomes a `report`, and the
 executor reaches a succeeded end node. No browser recording, MCP connection or

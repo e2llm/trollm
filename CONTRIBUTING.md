@@ -44,13 +44,19 @@ private delivery setup or work with the other repository's history.
 
 ## Start with the current scope
 
-Read [agent onboarding](AGENTS.md), the [product plan](docs/PRODUCT-PLAN.md) and
-[current architecture](docs/ARCHITECTURE-ANDROID.md). The Android app is an
-integration prototype. The schemas, parsers and architecture's implementation
-qualifications define current behavior. [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md)
-and the [authoring guide](docs/FLOW-AUTHORING.md) include proposed work, not an
-implemented replacement format. Follow [versioning](docs/VERSIONING.md) for the
-shared Rust/Android release identity and Android update codes.
+Use the [reading tracks](docs/README.md) to choose preparation for your task.
+[Learn trollm](docs/LEARN-TROLLM.md) supplies a complete product picture; the
+[agent context](AGENTS.md) maps source and working rules. The
+[product plan](docs/PRODUCT-PLAN.md) and current issues identify priorities, while
+the [architecture](docs/ARCHITECTURE-ANDROID.md), schemas and readers describe
+the affected runtime contract and implementation qualifications.
+
+The Android app is an integration prototype. [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md)
+and the proposed pack in the [authoring guide](docs/FLOW-AUTHORING.md) do not
+replace the current format; the guide's task-design and testing method can be
+used today. Follow [versioning](docs/VERSIONING.md) for the shared Rust/Android
+identity and update codes. Documentation-only work does not require unrelated
+runtime or Android builds.
 
 For a small end-to-end source example, follow [Anatomy of a
 flow](docs/ANATOMY-OF-A-FLOW.md). It uses the current format and an existing

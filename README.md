@@ -1,43 +1,54 @@
 # trollm: pronounced “tro-le-lem”
 
-trollm is an Android-first runtime for AI workflows that combine small local
-models, built-in and MCP tools, and persistent working data. Explicit execution
-plans control steps, budgets, artifacts and recovery. The name draws on TRM and
-RLM, with “o” for open.
+trollm is an Android-first runtime for authored AI workflows. Small local models
+perform focused interpretation and tool choices; ordinary code carries the
+procedure, exact operations, saved evidence, limits and recovery. A user chooses
+a flow, supplies its inputs and follows the result instead of asking a small
+model to discover an entire method in one conversation.
+
+The **coder** is the tool-capable model role and can also write prose. The
+**reasoner** supplies tool-free advice. The **runtime** runs the authored graph,
+validates calls and outputs, and preserves progress. A coder can choose a declared
+exit with `flow.choose`; model prose cannot invent graph edges or become a branch
+condition. A flow can use one or both model roles.
 
 This is an **integration prototype and source-only preview**, with a Rust
 workspace and Kotlin/Compose app. No ready consumer APK or supported end-to-end
 quickstart is provided. Android 13/API 33+ and S21-class phones or newer are the
-target; signed sideloaded APKs are the initial distribution route.
+target; signed sideloaded APKs are the initial distribution route. The name draws
+on TRM and RLM, with “o” for open.
 
-The intended experience is install → sign in → choose a supplied flow → provide
-input → watch progress and results. Bundled **Summarize text**, **Browse and
-summarize** and **Check a total** starters exercise the current runtime. A
-connected browser may run on a PC while inference runs on the phone. Remote
-tools require their services and network access; local inference does not make
-every flow offline.
+The intended experience is choose a supplied flow → configure its model files and
+connections → provide input → Start → inspect progress and results. A connected
+browser may run on a PC while inference runs on the phone. Remote tools require
+their services and network access; local inference does not make every flow offline.
 
-A **flow** is an authored procedure: a graph of small model tasks, their prompts,
-allowed tools, saved results and execution limits. The graph defines the possible
-next steps; the coder can choose among declared exits by calling `flow.choose`.
-The reasoner supplies advice in ordinary text. A flow package keeps these files
-together so people and coding agents can inspect and revise the procedure.
+## One flow in practice
 
-The app prepares checksum-pinned models and connections, supports per-flow
-settings, browser OAuth and manual Bearer credentials, and shows persistent run
-history. The coder calls granted built-in or MCP tools; the tool-free reasoner
-supplies prose. A deterministic executor controls progress and artifacts. Models
-prepare after an explicit Start/Resume, with checksum verification and at most
-two parallel preparations; plans using more than two slots remain lazy. Interrupted work requires
-explicit Resume. Opening the app never preloads models or replays a run. See
-[model preparation](docs/MODEL-PREPARATION.md) for controls and measurement limits.
+The supplied **Check a total** starter selects two amounts from text, calls the
+phone's calculator, compares the saved sum with the supplied budget, then passes
+the original input and both results through the reasoner and into a final report.
+It needs configured model files but no MCP connection. The calculator performs exact
+arithmetic; the model still has to select the intended amounts.
 
-**Check a total** uses the phone's [built-in calculator](docs/BUILTIN-TOOLS.md)
-to add two amounts selected from text and compare the result with your budget,
-then passes the evidence through the reasoner and back to the coder. It needs
-prepared models but no MCP connection. Exact arithmetic does not prove that the
-model selected the right amounts; real-model acceptance of this starter remains
-to be established on an APK containing it.
+[Learn trollm through this flow](docs/LEARN-TROLLM.md) to see the complete
+input → model/tool work → artifact binding → result journey. It explains why a
+successful runtime check is different from a correct semantic judgment and how
+Trollm relates to optional browser and authoring services.
+
+## Learn, author and contribute
+
+1. [Learn trollm](docs/LEARN-TROLLM.md) gives a complete product and system picture.
+2. [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md) follows a smaller, tool-free source
+   example through its plan, registry, prompt and existing scripted test.
+3. [Authoring a flow](docs/FLOW-AUTHORING.md) starts from intent and task contracts,
+   then connects source construction, model evaluation and human review. Its wider
+   proposed authoring pack is identified separately from today's method.
+
+The [documentation tracks](docs/README.md) give ordered prerequisites, cumulative
+reading costs and stopping outcomes. Use the reference map there for specific
+runtime, Android, reliability or security work. Before contributing, read
+[AGENTS.md](AGENTS.md) and [Contributing](CONTRIBUTING.md) for the affected layer.
 
 ## Current evidence and limits
 
@@ -69,34 +80,22 @@ that downloads fail on every device. Emulator checks do not establish phone
 performance or arbitrary-page accuracy. Experimental flows and other APKs require
 their own acceptance; the main source preview is not a ready consumer release.
 
-## Start here
 
-- [Documentation index](docs/README.md): a reading path by task
-- [Human flow review companion](apps/flow-review/README.md): self-hostable package
-  inspection, business phases and feedback for an authoring LLM; its
-  [implementation record](docs/flow-review/IMPLEMENTATION.md) tracks acceptance
-- [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md): a small current-format example
-  and its scripted executor test, with no Android SDK or model weights required
-- [Flow prompting](docs/FLOW-PROMPTING.md): use each execution model to help phrase
-  its task, then test the wording against original evidence and permitted choices
-- [Agent onboarding](AGENTS.md): reading order, runtime path and source map
-- [Contributing](CONTRIBUTING.md): portable checks, change workflow and
-  [help-wanted tasks](https://github.com/e2llm/trollm/labels/help%20wanted)
-- [Product direction and current limits](docs/PRODUCT-PLAN.md)
-- [Coder-directed flows](docs/ADAPTIVE-FLOWS.md): authored routes, control tools
-  and step context, with a scripted source example
-- [Android development](apps/android/README.md): build, setup and device guidance
-- [Owned Moray source connector](docs/MORAY-SOURCE-CONNECTOR.md): separate source
-  authentication, complete installation identity and durable report custody
-- [Premise](docs/PREMISE.md) and [current architecture](docs/ARCHITECTURE-ANDROID.md)
-- [Flow references](flows/README.md) and [execution-plan schema](schemas/execution-plan.v1.schema.json)
-- [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md) and
-  [authoring guide](docs/FLOW-AUTHORING.md): proposed authoring work
-- [Versioning](docs/VERSIONING.md) and [security policy](SECURITY.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md): runtime dependencies and model sources
+## Repository and contribution boundaries
 
 `crates/` contains the executor, model interface, MCP gateway and UniFFI bridge.
-`apps/android/` contains the app. `flows/` and `schemas/` contain current
+`apps/android/` contains the app. `flows/` and `schemas/` contain current source
 references; scripted examples are development fixtures, and procurement is an
-incomplete design sketch. The curated source tree has separate history from the
-development repository; use the Issues and contribution channel for your checkout.
+incomplete design sketch. The separate [flow review companion](apps/flow-review/README.md)
+inspects packages and collects feedback; it does not execute flows.
+
+Trollm remains usable with direct authors and other producers. The optional
+[Moray source connector](docs/MORAY-SOURCE-CONNECTOR.md) does not make a Moray
+account or central controller a prerequisite for unrelated flows. Each native
+contract and its current acceptance scope still applies.
+
+The curated source tree has separate history from the development repository.
+Use the Issues and contribution channel for your checkout, as described in
+[Contributing](CONTRIBUTING.md). See [Versioning](docs/VERSIONING.md),
+[Security](SECURITY.md) and [Third-party notices](THIRD_PARTY_NOTICES.md) for their
+respective release and reporting boundaries.

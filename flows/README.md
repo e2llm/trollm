@@ -28,11 +28,13 @@ only its single-attempt defaults (`attempts: 1, backoffS: 0`); other values reje
 at validation. `backgroundFetch: all` performs a bounded synchronous fetch before
 returning a page, not a detached background download.
 
-For the planned direct-authoring experience, see the
-[LLM authoring guide](../docs/FLOW-AUTHORING.md) and
-[flow contract direction](../docs/FLOW-CONTRACT-DIRECTION.md). They describe
-future metadata and tooling; the examples here continue to use the current v1
-contract until its schema and consumers are updated together.
+The [LLM authoring guide](../docs/FLOW-AUTHORING.md) describes the current
+task-design and testing method, including a
+[starter prompt exercise](../docs/FLOW-AUTHORING.md#make-one-small-change-to-an-existing-starter).
+Its integrated authoring pack and the additions in
+[flow contract direction](../docs/FLOW-CONTRACT-DIRECTION.md) remain proposals.
+The examples here use the current v1 contract until its schema and consumers are
+updated together.
 
 | Material | Status | Files |
 | --- | --- | --- |

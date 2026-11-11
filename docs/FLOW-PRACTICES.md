@@ -12,6 +12,13 @@ review their wording and test actual choices, including supported work and
 no-answer cases. This is authoring work; it does not add a self-explanation step
 to every run or make generated descriptions authoritative.
 
+Start from the [authoring task contract](FLOW-AUTHORING.md#design-closed-tasks-before-tuning-prompts):
+intent, relevant world knowledge, original inputs, method boundary, outputs and
+evaluation. A supplied tool or large remaining budget is not permission to
+broaden a closed assignment. Judge changes by useful outcomes and coverage as
+well as correctness and cost; predictable unknowns are not automatically an
+adequate solution.
+
 ## Split tasks where the evidence or recovery requires it
 
 Split discovery, inspecting a target, changing it and checking the result into
