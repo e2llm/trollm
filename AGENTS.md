@@ -100,14 +100,19 @@ service for browser perception and readiness; trollm coordinates its tool calls.
 
 ## Read for the task at hand
 
-For a first session, read in this order:
+When the product is unfamiliar, read [README.md](README.md), then
+[Learn trollm](docs/LEARN-TROLLM.md) for one complete input-to-result journey.
+[Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md) and its linked source example then
+explain the current format. The [documentation tracks](docs/README.md) give
+prerequisites, cumulative reading costs and explicit stopping outcomes; returning
+sessions can select their task rather than rereading the whole corpus.
+For one concrete edit and its checks, follow the
+[starter prompt exercise](docs/FLOW-AUTHORING.md#make-one-small-change-to-an-existing-starter).
 
-1. [README.md](README.md), then [Anatomy of a flow](docs/ANATOMY-OF-A-FLOW.md)
-   and its linked source example: purpose and one complete execution path.
-2. [CONTRIBUTING.md](CONTRIBUTING.md) and [PRODUCT-PLAN.md](docs/PRODUCT-PLAN.md):
-   workflow, checks, priorities and acceptance gaps.
-3. [PREMISE.md](docs/PREMISE.md), then the relevant contract below and its
-   schema, reader and tests. The [documentation index](docs/README.md) is a map.
+Before changing a layer, read [CONTRIBUTING.md](CONTRIBUTING.md) and its relevant
+contract, schema, reader and tests. Use [PRODUCT-PLAN.md](docs/PRODUCT-PLAN.md)
+and current issues for priorities and acceptance gaps, and [PREMISE.md](docs/PREMISE.md)
+for design rationale. A historical roadmap section is not a current work queue.
 
 | Working on | Read next |
 | --- | --- |
@@ -137,8 +142,9 @@ wording needs review and supported/no-answer cases; a correct explanation does n
 prove the next tool decision. Keep original evidence and existing tool contracts.
 
 `docs/ADAPTIVE-FLOWS.md` describes **implemented** routing.
-`docs/FLOW-CONTRACT-DIRECTION.md` and `docs/FLOW-AUTHORING.md` contain
-**proposals**; their proposed fields may not exist.
+`docs/FLOW-AUTHORING.md` describes a current authoring method alongside a
+**proposed** integrated pack. `docs/FLOW-CONTRACT-DIRECTION.md` contains
+**proposals**; its proposed fields may not exist.
 Check current schemas, readers and architecture qualifications; report conflicts
 before changing a consequential contract. Minimal-summary and ticket-triage have
 scripted tests; procurement is an incomplete design sketch.

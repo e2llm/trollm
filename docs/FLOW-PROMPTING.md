@@ -134,6 +134,15 @@ they do not establish that it is suitable, fresh or safe to act on.
 
 ## Test decisions, including the decision to decline
 
+Actively look for interpretations that would change the result for the selected
+model: a rubber duck versus a live duck, a phone cover versus a phone, a Beatles
+recording versus beetles, or an unspecified dollar currency or delivery address.
+Use domain knowledge and model explanation probes to propose cases, then test
+actual choices and calls. An explanation is a diagnostic hypothesis, not proof
+that the next decision uses that meaning. Include ambiguity resolved by supplied
+context and ambiguity that genuinely needs clarification; do not reward asking
+unnecessary questions on already clear inputs.
+
 Use a small, fixed set before tuning. Include supported selections, no suitable
 record, missing decisive facts, ambiguity under the task's contract, distracting
 records and different record orders. A correct answer may be more than one
@@ -169,6 +178,29 @@ When an extra step is justified, identify the difficulty it removes and the
 evidence its handoff must retain. See [small-model flow practices](FLOW-PRACTICES.md)
 for decomposition, repeated step groups and recovery. Model prose remains
 advisory; the coder's validated tool call remains the structured boundary.
+
+## Compare execution profiles, not just wording
+
+Keep the goal, input population, allowed information sources and evaluation
+criteria explicit when comparing model configurations. Report correctness among
+resolved cases separately from useful-outcome coverage and unnecessary decline.
+A model that returns unknown for most valid requests may look consistent while
+failing the intended use. A changed domain or tolerated abstention rate is a
+declared tradeoff, not an improvement hidden by a smaller test set.
+
+Use the controls actually supported by the installed model/backend. Record the
+weights/template, context and generation bounds, sampling settings and thinking
+behavior that were effective. A generic provider `effort` knob is not a new
+Trollm plan or setup field. More reasoning can help a hard decision but can also
+encourage overthinking and work beyond a closed assignment; reducing it, where
+supported, is a candidate to test rather than a guarantee of reliability.
+
+Measure both the gain and the loss: useful results, wrong selections, missing
+necessary checks, extra searches, out-of-scope choices and total calls/time/tokens.
+Do not reward fewer calls obtained by ignoring decisive evidence. Altering a
+setting does not authorize a new information source, invented tool or broader
+mission. Prefer the profile that meets the requester's outcome and resource
+priorities, not an always-low or always-max setting.
 
 ## Check the rendered task brief
 

@@ -2,7 +2,7 @@
 
 ## What this is
 
-trollm is a lean runtime for orchestrating **two small on-device models** on edge
+trollm is a lean runtime for orchestrating **small on-device models** on edge
 hardware (Android phone first; Raspberry Pi / Linux edge boxes later) with a
 **deterministic execution plan** ("the ledger") between them:
 
@@ -16,6 +16,13 @@ hardware (Android phone first; Raspberry Pi / Linux edge boxes later) with a
   policies (cache / paginate / shape / mutation journaling), enforces budgets, and records
   every transition in an append-only event log.
 
+Coder and reasoner are the two primary roles; a flow need not use both. This page
+explains the design rationale and later extension ideas. Start with
+[Learn trollm](LEARN-TROLLM.md) for a complete worked product picture and
+[Anatomy of a flow](ANATOMY-OF-A-FLOW.md) for the current format. Runtime contracts
+and their implementation qualifications take precedence over a future extension
+sketch below.
+
 The current browser starter pins a Qwen3.5-0.8B Q4_K_M coder and a Gemma 4 E2B IT
 Q4_K_M reasoner, both used for text. Its [setup descriptor](../flows/starters/browser-summary/setup.json)
 records the exact model files, revisions, checksums and settings. The
@@ -26,9 +33,12 @@ the [flow ICD direction](FLOW-CONTRACT-DIRECTION.md) for planned format changes.
 
 ## What users should be able to do
 
-The primary product path is a supplied workflow: install the APK, sign in to
-E2LLM, choose a flow, provide any starting input and follow its progress and
-result. The app prepares the models and connections declared by that flow.
+The primary product path is a supplied workflow: choose a flow, configure its
+model assets and applicable connections, provide input, then Start and follow
+progress and result.
+A browser flow may require E2LLM sign-in; a local calculator flow does not require
+that connection. Required downloads and setup precede execution; native model
+preparation follows an explicit Start/Resume under the selected flow's limits.
 Browser actions can take place on a connected PC while inference runs on the
 phone. This is the intended experience; the integrated Android app is still a
 prototype.
@@ -63,21 +73,24 @@ These are load-bearing. Any change that violates one is a redesign, not a patch.
    coder tool choices. The approved [adaptive-flow contract](ADAPTIVE-FLOWS.md)
    adds bounded selection among authored exits. Model prose never becomes a
    branch condition, and models cannot invent graph edges. No magic strings.
-2. **The ledger handles all structured data; models handle only prose.** Structured data
-   (worklists, item records, write intents) moves ledger-to-ledger (artifact files → variable
-   bindings). Prose moves model-to-model. Models never transcribe data; the ledger never
-   parses prose. The single exception, by necessity: the coder's tool-call fence, which is
-   decode-constrained (GBNF) and validated post-hoc.
+2. **The runtime retains and binds structured data; advice stays prose.** Worklists,
+   item records and write intents move through artifacts and bindings. Known
+   values should not require model transcription. A coder can select model-owned
+   tool arguments through the decode-constrained, validated tool-call boundary;
+   the calculator example needs such a choice. That exception does not make
+   prose advice an executable structure or let a model replace the original records.
 3. **Schema-free inter-model communication.** The reasoner replies in free text. Its output
    is injected verbatim into the coder's context. The ledger observes *behavior* (tool calls)
    not *intent* (prose).
 4. **Everything is content-addressed and pinned.** Flows, task registries, model weights, and
    source baselines are SHA-256 addressed. A pinned flow referencing a mutable task is not
    pinned.
-5. **The event log is the ledger.** Append-only JSONL per run. It is simultaneously the audit
-   trail, the replay mechanism, the pause/resume state, and (where pull semantics are needed)
-   the queue. State transitions happen only at node boundaries, so resume never splits a
-   model call or a tool call.
+5. **Persisted execution state governs continuation.** The run has an append-only
+   journal, snapshots and artifacts. Checkpoints preserve progress at node
+   boundaries; recovery also validates journal watermarks and uncertain/completed
+   writes beyond the saved snapshot. A journal file alone is not a complete
+   external-world snapshot or permission to repeat an action. Use the current
+   architecture's recovery rules rather than replaying calls from a transcript.
 6. **Lean footprint.** No broker daemons on-device. Target < 150 MB RSS for
    orchestration outside the model runtime. Measure the configured model pair's
    memory separately on the target phone; the earlier two-1B-model RAM example
@@ -153,8 +166,10 @@ snapshot iteration → cached enrichment → advisory prose → inferred mutatio
 - **Multi-device**: Zenoh arrives via dora — NAT traversal, discovery, location-transparent
   key expressions; Zenoh storage/queryables can turn the per-device MCP cache into a shared
   cache. dora's service/action patterns map onto ledger consults.
-- **More/larger models**: llama.cpp router mode or llama-swap for >RAM model sets; model slot
-  abstraction already assumes exactly two resident slots but nothing else.
+- **More/larger models**: broader residency/routing strategies remain extension
+  work. Current [model preparation](MODEL-PREPARATION.md) overlaps up to two
+  referenced slots after Start/Resume and uses lazy loading when a plan references
+  more than two; it is not a promise that every model set fits phone memory.
 - **NPU offload**: LiteRT-LM (Snapdragon/Dimensity NPU) or ExecuTorch (ANE/NNAPI) adapters
   behind the same `ModelSlot` trait — blocked on their constrained-decoding support for the
   coder slot.
