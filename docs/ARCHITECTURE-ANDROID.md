@@ -157,6 +157,11 @@ verified reinstall can repair their canonical pins without changing their bytes.
 Provenance remains optional descriptive metadata, not a trust anchor. Closed
 plan, node, registry and policy objects reject unknown keys; intentionally named
 maps (nodes, slots, outputs, tool arguments and result schemas) remain extensible.
+Node IDs contain 1–128 ASCII letters, digits, underscores or hyphens. Validation
+enforces this in root and child plans before execution because IDs also appear in
+snapshot filenames. Artifact writers independently reject path-like filenames.
+Previously accepted IDs outside this grammar must be renamed, along with their
+references, before importing or running the flow on 1.0.1 or later.
 
 ### 4.1 Node kinds — closed set
 

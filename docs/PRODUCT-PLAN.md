@@ -1,7 +1,7 @@
 # Product direction and current scope
 
-Status reviewed on **2026-11-15**. trollm 1.0.0 is an experimental Android app
-with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.0.0)
+Status reviewed on **2026-11-16**. trollm 1.0.1 is an experimental Android app
+with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
 and an [installation guide](INSTALL-ANDROID.md). Contributors can also inspect
 and test the runtime and self-host the flow review companion. The
 [two recorded v342 phone runs](../examples/run-342/README.md) are examples worth
@@ -53,7 +53,7 @@ browser/container acceptance.
 
 ## Evidence and remaining acceptance
 
-Current release metadata is **1.0.0 / Android code 70**. Source-only
+Current release metadata is **1.0.1 / Android code 71**. Source-only
 refreshes carry a source commit identity; they do not allocate a new APK version
 or establish acceptance of different APK bytes. See [versioning](VERSIONING.md).
 

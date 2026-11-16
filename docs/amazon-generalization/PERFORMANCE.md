@@ -3,7 +3,8 @@
 Status: **M1/M2 IMPLEMENTED IN SOURCE; DEVICE MEASUREMENT OPEN**. The bounded
 observation and numeric timing/correlation changes below have synthetic host
 tests. This does not establish phone latency, CPU, battery or workflow accuracy.
-Historical source observations describe baseline `239e7e6`; the baseline polling
+Historical source observations describe baseline `239e7e6`, which lives in
+private development history rather than the curated GitHub history. The baseline polling
 paths below remain available as strict disk APIs but Android now uses the
 separate bounded observation API.
 

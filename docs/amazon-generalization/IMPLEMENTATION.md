@@ -1,10 +1,11 @@
 # Implementation sequence and checks
 
-Status: **source implemented; host validation passed** for flow105 /
-`0.1.0-rc.8` / Android code43. CI/security gates and the native APK are pending.
+Historical implementation record for flow105 / `0.1.0-rc.8` / Android code 43
+(2026-10-25). Current release identity, CI evidence and APK downloads are linked
+from [versioning](../VERSIONING.md) and [Android installation](../INSTALL-ANDROID.md).
 The work packages below retain the approved implementation sequence and
-acceptance criteria; the [current checkpoint](#current-implementation-checkpoint)
-records delivery status. Scope and implemented contracts: [README](README.md), [design](DESIGN.md),
+acceptance criteria; the [historical checkpoint](#historical-implementation-checkpoint)
+records that stage's status. Scope and implemented contracts: [README](README.md), [design](DESIGN.md),
 [performance](PERFORMANCE.md). User input is already prepared for the first
 step; consumer input UX and natural-language normalization are excluded.
 
@@ -201,7 +202,11 @@ run meeting the prepared mission. Consumer-grade shopping support, arbitrary
 free-text intake, automatic crash reconciliation, allocation/optimization,
 additional shopping sites and background cloud services are not implied.
 
-## Current implementation checkpoint
+## Historical implementation checkpoint
+
+This checkpoint records the 2026-10-25 source work. Its pending delivery checks
+are historical, not the status of the current release. Later phone evidence is
+published with its exact identities in [examples/run-342](../../examples/run-342/README.md).
 
 - G0/G1: one unchanged host fixture runs 1, 2, 3 and 8 items with the production
   worklist, calculator and complete-collection total tools. Prepared values are
@@ -227,7 +232,7 @@ additional shopping sites and background cloud services are not implied.
   Astra/max adversarial review was completed; timing documentation and the
   technical-event rendering findings were corrected and regression checked.
   CI/security gate results, a native APK identity/checksum and physical-phone
-  acceptance remain pending. No current pipeline or APK success is claimed.
+  acceptance were still pending at this checkpoint.
 - M3: a cache-page index is deferred. Full-collection validation still occurs
   for each selected page; changing that trust/invalidation contract is not
   needed for the bounded live observer fix. New measurements expose the cost.

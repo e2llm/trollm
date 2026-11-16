@@ -1,9 +1,10 @@
 # Count-independent procedure and capability contracts
 
-Status: **source implemented; host validation passed** for flow105 /
-`0.1.0-rc.8` / Android code43. CI/security and native APK gates remain pending.
-The approved
-design below started from flow104 (`239e7e6`). Exact tool arguments are in
+Historical design implemented for flow105 / `0.1.0-rc.8` / Android code 43.
+See [versioning](../VERSIONING.md) and [Android installation](../INSTALL-ANDROID.md)
+for current release status. The approved design below started from flow104
+(`239e7e6`, in private development history rather than curated GitHub history).
+Exact tool arguments are in
 [BUILTIN-TOOLS.md](../BUILTIN-TOOLS.md); child returns and limits are in
 [G2-CONTRACT.md](G2-CONTRACT.md). See the [scope](README.md).
 
@@ -268,8 +269,9 @@ updated schema, reader, validator, runtime, bundle admission and flow-review
 consumer support. Old bundles retain existing behavior; older APKs must reject
 unsupported fields clearly. Do not silently reinterpret existing foreach output
 shape or resume snapshots. The compatible optional fields retain the v1 identifier; older readers reject
-them as unknown fields. The current source pins product version `0.1.0-rc.8` and Android update code43;
-a native APK containing that source is still pending.
+them as unknown fields. This work first pinned product version `0.1.0-rc.8` and
+Android update code 43; native APK delivery was pending at that historical
+checkpoint. Current release identity is maintained in [versioning](../VERSIONING.md).
 
 Generic capabilities, tests and contracts belong on main and then in the Amazon
 branch. The shopping procedure, prepared fixture and phone handoff belong on the

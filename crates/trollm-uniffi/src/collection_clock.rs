@@ -702,10 +702,14 @@ pub(crate) mod controls {
                     match listener.accept() {
                         Ok((socket, _)) => break socket,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if responses == 0 && Instant::now() >= deadline {
+                            // One observation decides both branches. Sampling
+                            // twice could cross the deadline between the normal
+                            // no-response exit and the expected-response assert.
+                            let now = Instant::now();
+                            if responses == 0 && now >= deadline {
                                 return;
                             }
-                            assert!(Instant::now() < deadline);
+                            assert!(now < deadline);
                             std::thread::sleep(Duration::from_millis(2));
                         }
                         Err(error) => panic!("{error}"),

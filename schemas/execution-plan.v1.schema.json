@@ -113,14 +113,20 @@
         }
       }
     },
-    "entryStep": { "type": "string", "minLength": 1 },
+    "entryStep": { "$ref": "#/$defs/nodeIdentifier" },
     "nodes": {
       "type": "object",
       "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/nodeIdentifier" },
       "additionalProperties": { "$ref": "#/$defs/node" }
     }
   },
   "$defs": {
+    "nodeIdentifier": {
+      "description": "Portable node ID, also used in snapshot filenames.",
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "not": { "pattern": "[^A-Za-z0-9_-]" }
+    },
     "paginatePolicy": {
       "type": "object", "required": ["param", "deliver", "backgroundFetch"], "additionalProperties": false,
       "properties": {
@@ -134,7 +140,7 @@
     "transition": {
       "description": "§4.2: a node id, or an inline {status, reason}. No expressions, no conditions on model output.",
       "oneOf": [
-        { "type": "string", "minLength": 1 },
+        { "$ref": "#/$defs/nodeIdentifier" },
         {
           "type": "object",
           "required": ["status"],
@@ -144,7 +150,7 @@
           "properties": {
             "status": { "enum": ["paused", "failed"] },
             "reason": { "type": "string" },
-            "resumeAt": { "type": "string", "minLength": 1 }
+            "resumeAt": { "$ref": "#/$defs/nodeIdentifier" }
           }
         }
       ]

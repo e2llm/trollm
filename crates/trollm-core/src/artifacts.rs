@@ -44,14 +44,35 @@ pub fn write_foreach_snapshot(
     node: &str,
     items: &[serde_json::Value],
 ) -> std::io::Result<WrittenArtifact> {
+    if !crate::plan::valid_node_id(node) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid snapshot node ID",
+        ));
+    }
     let bytes = foreach_snapshot_bytes(items);
     write_atomic(directory, &foreach_snapshot_name(node, &bytes), &bytes)
+}
+
+fn validate_artifact_name(name: &str) -> std::io::Result<()> {
+    if name.is_empty()
+        || matches!(name, "." | "..")
+        || name.contains(['/', '\\', ':'])
+        || name.chars().any(char::is_control)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact name must be a single filename",
+        ));
+    }
+    Ok(())
 }
 
 /// Atomic write (tmp + rename) of `bytes` to `dir/<name>`; returns path, size
 /// and sha256 for the event log.
 pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<WrittenArtifact> {
     use std::io::Write;
+    validate_artifact_name(name)?;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp"));
@@ -77,6 +98,7 @@ pub(crate) fn write_private_atomic(
     bytes: &[u8],
 ) -> std::io::Result<WrittenArtifact> {
     use std::io::Write;
+    validate_artifact_name(name)?;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp"));
@@ -157,6 +179,62 @@ pub fn logical_name(path: &Path) -> Option<String> {
 mod snapshot_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn artifact_writers_reject_paths_before_creating_directories() {
+        let base =
+            std::env::temp_dir().join(format!("artifact-confinement-{}", uuid::Uuid::new_v4()));
+        for name in [
+            "",
+            ".",
+            "..",
+            "./../escaped",
+            "../escaped",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "C:drive",
+            "nul\0",
+            "line\n",
+        ] {
+            for writer in [write_atomic, write_private_atomic] {
+                let result = writer(&base, name, b"evidence");
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    std::io::ErrorKind::InvalidInput,
+                    "{name:?}"
+                );
+                assert!(!base.exists(), "invalid names must fail before I/O");
+            }
+        }
+        for writer in [write_atomic, write_private_atomic] {
+            let written = writer(&base, "original.read-1.json", b"evidence").unwrap();
+            assert_eq!(written.path.parent(), Some(base.as_path()));
+            assert_eq!(std::fs::read(written.path).unwrap(), b"evidence");
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_writer_rejects_node_path_before_writing_outside_artifacts() {
+        let base =
+            std::env::temp_dir().join(format!("snapshot-confinement-{}", uuid::Uuid::new_v4()));
+        let artifacts = base.join("run/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let items = [json!({"id":"original"})];
+        let result = write_foreach_snapshot(&artifacts, "./../escaped", &items);
+        let escaped = base.join("run").join(format!(
+            "escaped.{}.snapshot.jsonl",
+            hex_sha256(&foreach_snapshot_bytes(&items))
+        ));
+        let escaped_exists = escaped.exists();
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(
+            result.is_err(),
+            "path-like node IDs must refuse before writing"
+        );
+        assert!(!escaped_exists, "a snapshot escaped the artifact directory");
+    }
 
     #[test]
     fn actual_foreach_writer_preserves_zero_one_many_and_distinct_revisions() {

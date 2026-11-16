@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-flow-review"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-mcp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-models"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "llama-cpp-2",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "trollm-uniffi"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

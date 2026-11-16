@@ -1,7 +1,7 @@
 # Install trollm on Android
 
-Download [the 1.0.0 APK](https://github.com/e2llm/trollm/releases/download/v1.0.0/app-release.apk)
-from [GitHub Releases](https://github.com/e2llm/trollm/releases/tag/v1.0.0)
+Download [the 1.0.1 APK](https://github.com/e2llm/trollm/releases/download/v1.0.1/app-release.apk)
+from [GitHub Releases](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
 and open `app-release.apk` on an Android 13/API 33 or newer device. Allow your
 browser or file manager to install that APK when Android asks. The release
 includes a SHA-256 checksum, build identity and third-party notices alongside
@@ -11,6 +11,34 @@ trollm is an experimental app for authored workflows with small local language
 models. The [two v342 phone runs](../examples/run-342/README.md) show examples
 worth inspecting; they are not a reliability or performance promise for this
 release or other inputs.
+
+## Verify the download
+
+Download `app-release.apk.sha256` from the same release and put it beside
+`app-release.apk`. On a computer with `sha256sum`, run in that directory:
+
+```sh
+sha256sum -c app-release.apk.sha256
+```
+
+It must report `app-release.apk: OK`. `SHA256SUMS` covers the other release
+assets too. The release's `build-info.json` records the APK hash, source commit,
+version and signing certificate under `certificateSha256`.
+
+With Android SDK Build Tools installed, inspect the APK signature with:
+
+```sh
+apksigner verify --verbose --print-certs app-release.apk
+```
+
+The signer certificate SHA-256 must match the maintained release certificate:
+
+```text
+e34115258267beec63ff83eaf2b8cb51767a3f3b71f42cfcd3570c99ce2dc7a8
+```
+
+The checksum checks the downloaded bytes; comparing the signing certificate
+checks continuity with this release identity.
 
 ## First run
 
