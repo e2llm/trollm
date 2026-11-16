@@ -85,6 +85,20 @@ def validate(apk, backend='stub', abis=None):
     return selected
 
 
+def validate_notices(apk, notices):
+    data = notices.read_bytes()
+    if not data or len(data) > 48 * 1024 * 1024:
+        raise ValueError('APK notices are missing or oversized')
+    digest = hashlib.sha256(data).hexdigest()
+    with ZipFile(apk) as archive:
+        if archive.read('assets/THIRD_PARTY_NOTICES.txt') != data:
+            raise ValueError('Packaged notices differ from release notice artifact')
+        manifest = json.loads(archive.read('assets/third-party-manifest.json'))
+        if manifest.get('noticesSha256') != digest or not manifest.get('files'):
+            raise ValueError('Packaged notice manifest does not match')
+    return digest
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('apk', type=Path)
@@ -96,6 +110,7 @@ if __name__ == '__main__':
     parser.add_argument('--aapt', type=Path)
     parser.add_argument('--apksigner', type=Path)
     parser.add_argument('--expected-signer-sha256')
+    parser.add_argument('--notices', type=Path)
     args = parser.parse_args()
     # Never leave a stale provenance artifact if packaging validation fails.
     if args.build_info:
@@ -104,7 +119,10 @@ if __name__ == '__main__':
     checksum.unlink(missing_ok=True)
     if args.build_type == 'release' and args.backend != 'llama':
         raise ValueError('Release APK must use the llama backend')
+    if args.build_type == 'release' and not args.notices:
+        raise ValueError('Release APK requires packaged third-party notices')
     validated_abis = validate(args.apk, args.backend, args.abi)
+    notices_sha256 = validate_notices(args.apk, args.notices) if args.notices else None
     release = (validate_release(args.apk, args.aapt, args.apksigner, args.expected_signer_sha256)
                if args.build_type == 'release' else {})
     if args.build_info:
@@ -117,6 +135,7 @@ if __name__ == '__main__':
                 'buildType': args.build_type,
                 'apkSha256': digest.hexdigest(), 'minSdk': 33,
                 'supportedAbis': list(validated_abis),
+                'noticesSha256': notices_sha256,
                 'pipelineId': os.environ.get('CI_PIPELINE_ID'),
                 'jobId': os.environ.get('CI_JOB_ID'), **release}
         args.build_info.write_text(json.dumps(info, indent=2) + '\n')

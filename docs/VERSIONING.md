@@ -7,12 +7,11 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
-The current source candidate is **0.1.0-rc.8 / Android code 43**. It adds
-bounded prepared worklists, strict collection totals, explicit child returns
-with retained evidence, live progress projection and correlated measurements.
-This version prepares new APK bytes; prior device acceptance does not transfer
-to them. Source-only backports, including task-specific result artifacts, do not
-allocate a new APK identity. Development branches may carry later candidates;
+The current release is **1.0.0 / Android code 70**. It includes the reviewed
+runtime and launcher fixes, curated v342 run evidence and a native Android APK.
+The historical v342 runs used APK68 / 0.1.0-rc.24; their observations remain tied
+to those recorded bytes. Source-only updates do not allocate a new APK identity.
+Development branches may carry later candidates;
 the next distributed APK must exceed the latest distributed Android code across
 branches. Keep each existing APK tied to its actual source, not the moving branch.
 
@@ -23,8 +22,8 @@ Keep the signing identity for ordinary Android updates. Record the source commit
 APK checksum, package/version and signing certificate with the distributed build;
 a version label alone does not identify its bytes or acceptance evidence.
 
-After acceptance, the first release is `v0.1.0`; compatible fixes advance to
-`v0.1.1` and the next feature release to `v0.2.0`. Never move a published release
+The product version selected for this release is `v1.0.0`; compatible fixes advance
+to `v1.0.1` and the next feature release to `v1.1.0`. Never move a published release
 tag or replace its APK with different bytes. Prepare another version instead.
 
 To prepare a candidate, edit the two root manifest values and refresh the local

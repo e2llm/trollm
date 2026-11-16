@@ -1,0 +1,16 @@
+{
+  "run": "c7306292-3000-4179-928a-2438e8800675",
+  "elapsedSeconds": 6095.2,
+  "seq": 4113,
+  "node": "done",
+  "modelCalls": {
+    "coder": 534,
+    "reasoner": 28
+  },
+  "toolResults": 517,
+  "status": "succeeded",
+  "lastError": {
+    "node": "identity_select",
+    "class": "mcp-error"
+  }
+}

@@ -2,8 +2,9 @@
 
 This prototype uses the projects credited below. Third-party software and model
 weights retain their own licenses; trollm's [Apache-2.0 license](LICENSE) does
-not replace them. This is a source-level attribution and a guide to the remaining
-packaging work, not an exhaustive notice bundle for a distributed APK.
+not replace them. This is the source-level attribution guide. The APK build
+also creates a notice text and manifest from its resolved build inputs, packages
+them in the APK, and distributes identical files alongside the release.
 
 Versions below come from `Cargo.lock`, the Android Gradle files and the starter
 setup descriptors. They describe this checkout; feature selection, target ABI,
@@ -12,17 +13,20 @@ A lock file or an SBOM does not establish a byte-reproducible build.
 
 ## Rust application libraries
 
-These are the external direct dependencies of the original runtime crates.
+These are the external direct dependencies of the runtime crates.
 Links identify the upstream projects and the versioned published source where
 available. The license column records the upstream license family; retain the
 actual license, copyright and any NOTICE files from the exact package when
 preparing a distribution. License identifiers were checked against the cached,
 locked Cargo package manifests.
-Complete transitive-package notice collection is still outstanding.
+The generated APK notice file includes the resolved transitive Rust graph,
+Android POM declarations and embedded notices, native source notices and the
+NDK notice files. This table is a shorter direct-dependency guide.
 
 The separate flow review server additionally uses the locked dependencies below.
-License identifiers were read from their Cargo manifests. They do not enable
-native inference or add dependencies to Android.
+License identifiers were read from their Cargo manifests. The companion does not
+enable native inference. Tokio is also a direct dependency of `trollm-mcp` and
+is therefore part of the Android runtime dependency graph.
 
 | Project | Locked version | Use | License |
 | --- | --- | --- | --- |
@@ -51,6 +55,17 @@ distributing browser assets or the container image.
 | RustCrypto sha2 | 0.10.9 | Integrity hashes | MIT OR Apache-2.0; [source](https://docs.rs/crate/sha2/0.10.9/source/) |
 | jsonschema | 0.58.6 | Tool argument validation | MIT; [source](https://docs.rs/crate/jsonschema/0.58.6/source/) |
 | reqwest | 0.12.28 | MCP HTTP transport | MIT OR Apache-2.0; [source](https://docs.rs/crate/reqwest/0.12.28/source/) |
+| hyper | 1.12.0 | Native HTTP transport | MIT; [source](https://docs.rs/crate/hyper/1.12.0/source/) |
+| hyper-util | 0.1.21 | HTTP connection adapters | MIT; [source](https://docs.rs/crate/hyper-util/0.1.21/source/) |
+| http-body-util | 0.1.5 | HTTP body handling | MIT; [source](https://docs.rs/crate/http-body-util/0.1.5/source/) |
+| bytes | 1.12.1 | Transport buffers | MIT; [source](https://docs.rs/crate/bytes/1.12.1/source/) |
+| Tokio | 1.53.2 | Native asynchronous transport | MIT; [source](https://docs.rs/crate/tokio/1.53.2/source/) |
+| tokio-rustls | 0.26.6 | TLS transport adapter | MIT OR Apache-2.0; [source](https://docs.rs/crate/tokio-rustls/0.26.6/source/) |
+| rustls | 0.23.45 | TLS implementation | Apache-2.0 OR ISC OR MIT; [source](https://docs.rs/crate/rustls/0.23.45/source/) |
+| webpki-roots | 1.0.9 | Mozilla trust anchors | CDLA-Permissive-2.0; [source](https://docs.rs/crate/webpki-roots/1.0.9/source/) |
+| libc | 0.2.190 | Native OS interfaces | MIT OR Apache-2.0; [source](https://docs.rs/crate/libc/0.2.190/source/) |
+| base64 | 0.22.1 | Bridge encoding | MIT OR Apache-2.0; [source](https://docs.rs/crate/base64/0.22.1/source/) |
+| cc | 1.7.0 | Build-time C compiler invocation | MIT OR Apache-2.0; [source](https://docs.rs/crate/cc/1.7.0/source/) |
 | url | 2.5.8 | URL handling | MIT OR Apache-2.0; [source](https://docs.rs/crate/url/2.5.8/source/) |
 | Mozilla UniFFI | 0.28.3 | Rust runtime interface and Kotlin binding generation | MPL-2.0; [pinned upstream source](https://github.com/mozilla/uniffi-rs/tree/0d38fc51ec057c271233b70db51b13ef403e360d), [published source](https://docs.rs/crate/uniffi/0.28.3/source/) |
 | MiniJinja and minijinja-contrib | 2.12.0 each | Model chat templates; optional `chat-template` / `llama` features | Apache-2.0; [MiniJinja source](https://docs.rs/crate/minijinja/2.12.0/source/), [contrib source](https://docs.rs/crate/minijinja-contrib/2.12.0/source/) |
@@ -136,6 +151,12 @@ Runtime libraries copied from those tools do need to be inventoried.
 
 ## Native code in the llama build
 
+The two files in [the Moray kernel clock reader](crates/trollm-mcp/vendor/rpa-kernel-clock/NOTICE)
+were originally authored in Insitu's Moray RPA project. Insitu authorized their
+distribution under Apache-2.0 on 2026-11-15. The directory retains their original
+source hashes, a scoped notice and the license text. This grant covers these two
+files; it does not relicense the rest of Moray RPA.
+
 `llama-cpp-sys-2` compiles a vendored copy of **llama.cpp / GGML**. The wrapper
 version, 0.1.159, is not a llama.cpp release number. Both locked Rust packages
 record upstream wrapper commit `3cfdd729d65e35da407e5f820edf73201bfa54f6` in their
@@ -216,22 +237,25 @@ revision or the quantization toolchain. Preserve the model's own license and any
 notices if redistributing weights, and review those terms again when replacing a
 setup pin or selecting a different model.
 
-## Completing notices for an APK
+## Notices accompanying an APK
 
 The checkout provides [an Android SBOM exporter](scripts/android-sbom.gradle).
 It resolves the selected `debugRuntimeClasspath` or `releaseRuntimeClasspath`
 and emits a CycloneDX 1.5 graph of Maven component coordinates. It does not collect
 licenses, copyright/NOTICE text, AAR-embedded native dependencies, Rust dependencies,
 model weights or the NDK runtime. It also describes resolution, not an inspection
-of the finished APK. No complete packaged-component notice inventory is included
-with this source-level document.
+of the finished APK. It is used alongside the separate notice collection below.
 
-Before distributing an APK, reconcile its actual contents with the Rust target
-and feature graph and the selected Gradle runtime graph. Collect the exact
-packages' license and notice texts, including cryptography, JNA/libffi,
-llama.cpp/GGML and libc++; retain the pinned source identities and satisfy
-covered-source availability requirements such as UniFFI's MPL-2.0. Bundle those
-notices with the distributed artifact in an accessible form. Inspect separately
-any redistributed GGUF files and retain their pinned provenance and notices.
-This remaining work requires the actual build inputs and packaged artifact;
-passing source tests does not complete it.
+The build's `exportAndroidNotices` task reads the resolved Maven POM licenses
+and embedded AAR/JAR notices. [The notice collector](scripts/android/make_apk_notices.py)
+combines those with exact Rust package texts, pinned supplemental upstream
+licenses, vendored native notices and the installed NDK notices. The generated
+`THIRD_PARTY_NOTICES.txt` and `third-party-manifest.json` are packaged as APK assets
+and supplied beside the release. APK validation checks that the packaged notice
+bytes match the distributed text and its manifest digest.
+
+Some crate archives omit their workspace license text. The corresponding exact
+upstream revisions and retained texts are in [the supplemental inventory](licenses/upstream/sources.json).
+This includes UniFFI's MPL-2.0 text and source reference, the llama Rust wrappers,
+SIMD helpers, jsonschema helpers, and JNA/libffi. No GGUF weights are included in
+the APK or the notice archive; model downloads retain their own terms and pins.

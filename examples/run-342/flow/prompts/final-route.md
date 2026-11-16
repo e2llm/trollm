@@ -1,0 +1,1 @@
+Call flow.choose once. Choose continue only when the advisor explicitly verifies the requested products and quantities in the current cart and merchandise subtotal strictly below budget. An instruction to proceed or checkout is not verification: choose unresolved. Missing names, quantities or subtotal means unresolved.

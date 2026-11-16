@@ -1,0 +1,1 @@
+Copy the current recommendation into flow.choose route. The routes are yes, no and unknown. Copy yes as yes, no as no. Choose unknown when the recommendation does not give a supported answer. Do not judge the product or invert the recommendation.

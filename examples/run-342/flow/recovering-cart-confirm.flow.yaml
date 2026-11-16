@@ -1,0 +1,235 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 600
+  maxReasonerCalls: 128
+  maxTokensTotal: 1000000
+  timeoutS: 7200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: recovering-cart-confirm
+version: 322
+entryStep: after_capture
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  after_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then: pending
+    onVerified: counter_after_query
+  counter_after_query:
+    kind: task
+    taskRef: recovering-cart-confirm-counter_after_query
+    onError:
+      retry: 0
+      then: pending
+    onVerified: counter_after
+  counter_after:
+    kind: task
+    taskRef: recovering-cart-confirm-counter_after
+    onError:
+      retry: 0
+      then: pending
+    onVerified: count_compare
+  count_compare:
+    kind: task
+    taskRef: recovering-cart-confirm-count_compare
+    onError:
+      retry: 0
+      then: pending
+    onVerified: count_changed
+  count_changed:
+    kind: task
+    taskRef: recovering-cart-confirm-count_changed
+    onError:
+      retry: 0
+      then: pending
+    onVerified: confirmed
+  confirmed:
+    kind: end
+    outcome: succeeded
+  pending:
+    kind: end
+    outcome: pending

@@ -5,12 +5,9 @@
 Please do not post vulnerability details, credentials, private flow inputs or
 unsanitized logs in public Issues or pull requests.
 
-For public launch, the intended private reporting channel is GitHub's
+Use GitHub's private
 [Report a vulnerability](https://github.com/e2llm/trollm/security/advisories/new)
-button under **Security → Advisories**. The repository is currently private;
-GitHub private vulnerability reporting for the public repository is pending
-activation and verification in the launch checklist. This document does not
-claim that the channel is enabled today.
+button under **Security → Advisories** when available.
 
 If the button is unavailable, ask the repository owner to enable private
 reporting, without including vulnerability details in that request. Once the

@@ -4,3 +4,8 @@ flows/**/*.json text eol=lf
 flows/**/*.md text eol=lf
 *.tar -text
 *.gguf -text
+# Historical evidence and upstream license hashes identify exact bytes.
+examples/run-342/** -text
+examples/run-342/flow/** -whitespace
+licenses/upstream/** -text
+crates/trollm-mcp/vendor/rpa-kernel-clock/** -text

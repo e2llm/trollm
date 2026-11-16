@@ -175,7 +175,7 @@ contract. This is membership checking, not interpretation of adviser text.
 
 ### Explicit literal text lookup
 
-The opt-in matchMode: string-contains searches a nonempty literal substring in declared string fields. ield may be one JSON pointer or up to32 pointers; a record matching several fields counts once. Missing or non-string fields do not match. Zero matches and multiple original records fail without a selected result. Returned records, indices and complete-source hashes are unchanged. Default equality and array membership retain their original contracts.
+The opt-in matchMode: string-contains searches a nonempty literal substring in declared string fields. `field` may be one JSON pointer or up to 32 pointers; a record matching several fields counts once. Missing or non-string fields do not match. Zero matches and multiple original records fail without a selected result. Returned records, indices and complete-source hashes are unchanged. Default equality and array membership retain their original contracts.
 
 Optional stopBefore uses the portion of equals before the first literal marker, after existing prefix removal; without a marker occurrence it uses all of the supplied string. Empty markers or empty resulting search strings are rejected. This option is allowed only for string-contains. There is no trimming, case folding, HTML decoding, regex evaluation, ID inference or modification of source records. Fields remain explicit authored data. Lists of fields are allowed only in string-contains mode.
 

@@ -11,9 +11,9 @@ The flow carries the procedure; the models handle the judgments and tool choices
 that remain. Local inference can avoid a cloud model call, but a remote tool or
 browser still needs its service and network connection.
 
-The current app is an integration prototype and source-only preview. This is a
-walk through existing source, not a supported consumer installation quickstart
-or a claim of fresh device acceptance. The [project overview](../README.md#current-evidence-and-limits)
+The current app is experimental. The [installation guide](INSTALL-ANDROID.md)
+describes the downloadable 1.0.0 APK. This page walks through the source and does
+not claim fresh device observations. The [project overview](../README.md#current-evidence-and-limits)
 records the actual release and evidence limits.
 
 ## The request, procedure and run are different things

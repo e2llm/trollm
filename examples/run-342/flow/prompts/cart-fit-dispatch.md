@@ -1,0 +1,1 @@
+Carry out the adviser's instruction using flow.choose. The route yes continues with this option; no skips this option; unknown obtains more evidence. For example, continue requests yes, while seek more evidence requests unknown. Your only task is choosing the requested next step.

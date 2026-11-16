@@ -51,11 +51,17 @@ pub fn write_foreach_snapshot(
 /// Atomic write (tmp + rename) of `bytes` to `dir/<name>`; returns path, size
 /// and sha256 for the event log.
 pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<WrittenArtifact> {
+    use std::io::Write;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp"));
-    std::fs::write(&tmp, bytes)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, &path)?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(WrittenArtifact {
         path,
         bytes: bytes.len() as u64,
@@ -82,10 +88,16 @@ pub(crate) fn write_private_atomic(
         options.mode(0o600);
     }
     let mut file = options.open(&tmp)?;
-    let result = file.write_all(bytes).and_then(|()| {
-        drop(file);
-        std::fs::rename(&tmp, &path)
-    });
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, &path)?;
+            #[cfg(unix)]
+            std::fs::File::open(dir)?.sync_all()?;
+            Ok(())
+        });
     if let Err(error) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
@@ -99,11 +111,19 @@ pub(crate) fn write_private_atomic(
 
 /// Write the `<file>.meta.json` sidecar next to an artifact.
 pub fn write_meta(path: &Path, meta: &ArtifactMeta) -> std::io::Result<()> {
+    use std::io::Write;
     let sidecar = meta_path(path);
     let bytes = serde_json::to_vec_pretty(meta).unwrap_or_else(|_| b"{}".to_vec());
     let tmp = sidecar.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, &sidecar)?;
+    #[cfg(unix)]
+    if let Some(parent) = sidecar.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

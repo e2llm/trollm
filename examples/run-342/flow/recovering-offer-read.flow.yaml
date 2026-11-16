@@ -1,0 +1,354 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 600
+  maxReasonerCalls: 128
+  maxTokensTotal: 1000000
+  timeoutS: 7200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: recovering-offer-read
+version: 322
+entryStep: price_ceiling
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  fresh_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: fresh_query
+  fresh_query:
+    kind: task
+    taskRef: recovering-offer-read-fresh_query
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: fresh_member
+  fresh_member:
+    kind: task
+    taskRef: recovering-offer-read-fresh_member
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: price_inspect
+  price_inspect:
+    kind: task
+    taskRef: recovering-offer-read-price_inspect
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: price_identity
+  price_identity:
+    kind: task
+    taskRef: recovering-offer-read-price_identity
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: price_ancestors
+  price_ancestors:
+    kind: task
+    taskRef: recovering-offer-read-price_ancestors
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: ancestor_query
+  parents:
+    kind: task
+    taskRef: recovering-offer-read-parents
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: offer_container
+  offer_container:
+    kind: task
+    taskRef: recovering-offer-read-offer_container
+    onError:
+      retry: 0
+      then: container_advice
+    onVerified: container_record
+  offer_inspect:
+    kind: task
+    taskRef: recovering-offer-read-offer_inspect
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: offer_identity
+  offer_identity:
+    kind: task
+    taskRef: recovering-offer-read-offer_identity
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: offer_scope
+  offer_scope:
+    kind: task
+    taskRef: recovering-offer-read-offer_scope
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: offer_headings
+  read_done:
+    kind: end
+    outcome: succeeded
+  rejected:
+    kind: end
+    outcome: skipped
+  source_record:
+    kind: task
+    taskRef: recovering-offer-read-source_record
+    onVerified: fresh_capture
+    onError:
+      retry: 0
+      then: rejected
+  price_ceiling:
+    kind: task
+    taskRef: recovering-offer-read-price_ceiling
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: price_affordable
+  price_affordable:
+    kind: task
+    taskRef: recovering-offer-read-price_affordable
+    onError:
+      retry: 0
+      then: not_admitted
+    onVerified: source_record
+  not_admitted:
+    kind: end
+    outcome: skipped
+  container_fallback:
+    kind: task
+    taskRef: recovering-offer-read-container_fallback
+    promptSupplement: '
+
+      Original choices: {{ parents.outputs.selection_view.matches }}
+
+      Recommendation: {{ container_advice.outputs.advice }}'
+    routes:
+      unresolved: rejected
+    onVerified: container_record
+    onError:
+      retry: 1
+      then: rejected
+  container_record:
+    kind: task
+    taskRef: recovering-offer-read-container_record
+    onVerified: offer_inspect
+    onError:
+      retry: 0
+      then: rejected
+  offer_headings:
+    kind: task
+    taskRef: recovering-offer-read-offer_headings
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: offer_links
+  offer_links:
+    kind: task
+    taskRef: recovering-offer-read-offer_links
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: read_done
+  ancestor_query:
+    kind: task
+    taskRef: recovering-offer-read-ancestor_query
+    onError:
+      retry: 0
+      then: rejected
+    onVerified: parents
+  container_advice:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then: rejected
+    promptSupplement: Choose the observed ancestor that represents exactly one product offer. Original
+      ancestors {{ parents.outputs.compact.matches }}. Give brief advice identifying the supported original
+      record, or explain why none is supported. Whole-page or search-region ancestors are not a single
+      offer. If no single-offer ancestor is established, briefly say so.
+    onVerified: container_fallback

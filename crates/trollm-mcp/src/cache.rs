@@ -416,16 +416,98 @@ impl CacheStore {
     }
 }
 
-/// Writes `value` to `path` atomically (tmp + rename). Returns bytes written.
+/// Writes `value` to `path` atomically and syncs the file and parent on Unix.
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<u64> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    let mut file = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&tmp, path)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(bytes.len() as u64)
+}
+
+/// Publish complete private bytes without replacing an existing destination.
+/// A same-directory hard link provides atomic, no-replace publication; ordinary
+/// rename would silently replace another retained result.
+pub(crate) fn write_file_new_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let parent = path.parent().context("result artifact has no parent")?;
+    fs::create_dir_all(parent)?;
+    let tmp = path.with_extension("tmp");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    let result = (|| -> Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::hard_link(&tmp, path)?;
+        Ok(())
+    })();
+    drop(file);
+    let cleanup = fs::remove_file(&tmp);
+    result?;
+    cleanup?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn selected_result_publication_is_complete_and_never_replaces_a_result() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("selected-result-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("result.json");
+        write_file_new_atomic(&path, b"original complete result").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"original complete result");
+        assert!(!path.with_extension("tmp").exists());
+        assert!(write_file_new_atomic(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original complete result");
+        assert!(!path.with_extension("tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn incomplete_staging_never_appears_as_a_selected_result() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("selected-staging-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("result.json");
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, b"interrupted staging").unwrap();
+        assert!(write_file_new_atomic(&path, b"new result").is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read(tmp).unwrap(), b"interrupted staging");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 pub fn now_secs() -> u64 {

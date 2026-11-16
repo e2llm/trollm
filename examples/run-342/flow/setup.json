@@ -1,0 +1,90 @@
+{
+  "connections": {
+    "e2llm": {
+      "auth": "oauth",
+      "issuerUrl": "https://mcp.e2llm.com",
+      "url": "https://mcp.e2llm.com/mcp"
+    }
+  },
+  "description": "Experimental shopping flow: find requested products within a strict merchandise budget and reconcile cart quantities. No checkout.",
+  "format": "trollm.flow-setup.v1",
+  "input": {
+    "fields": [
+      {
+        "key": "browser",
+        "kind": "text",
+        "label": "E2LLM browser name or ID",
+        "maxLength": 128,
+        "placeholder": "Browser with exactly one tab: the intended Amazon tab",
+        "required": true
+      },
+      {
+        "key": "mission",
+        "kind": "text",
+        "label": "Prepared request JSON",
+        "maxLength": 16384,
+        "placeholder": "{\"context\":\"USD; strictly below budget; no checkout\", \"items\":[{\"request\":\"Original product request\", \"quantity\":\"2\"}]}",
+        "required": true
+      },
+      {
+        "key": "budget",
+        "kind": "text",
+        "label": "Strict merchandise budget in mission currency (decimal string)",
+        "maxLength": 20,
+        "placeholder": "Enter your limit without currency signs or separators",
+        "required": true
+      }
+    ],
+    "label": "Amazon shopping run",
+    "toolArguments": {
+      "e2llm.act": {
+        "fromInput": {
+          "browser": "browser"
+        },
+        "require": [
+          "sessionId",
+          "action",
+          "target"
+        ]
+      },
+      "e2llm.list_tabs": {
+        "fromInput": {
+          "browser": "browser"
+        }
+      },
+      "e2llm.read_page": {},
+      "e2llm.sifr_capture": {
+        "fixed": {
+          "preset": "minimal"
+        },
+        "fromInput": {
+          "browser": "browser"
+        },
+        "require": [
+          "tabId"
+        ]
+      }
+    }
+  },
+  "models": {
+    "coder": {
+      "ctx": 8192,
+      "label": "Qwen3.5-0.8B Q4_K_M",
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+      "sizeBytes": 532517120,
+      "temperature": 0.1,
+      "topP": 0.9,
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf"
+    },
+    "reasoner": {
+      "ctx": 8192,
+      "label": "Qwen3.5-2B Q3_K_M",
+      "sha256": "8b049f98461020b7e15797e13413fc63b9b500ffa883c74618b618ecbc2bfccf",
+      "sizeBytes": 1107149056,
+      "temperature": 0.1,
+      "topP": 0.9,
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q3_K_M.gguf"
+    }
+  },
+  "title": "Amazon cart quantities"
+}

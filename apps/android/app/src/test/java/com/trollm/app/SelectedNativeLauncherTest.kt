@@ -4,8 +4,31 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertTrue
 
 class SelectedNativeLauncherTest {
+    @Test fun requestQueueRefusesOverflowWithoutRunningIt() {
+        val executor = SelectedNativeLauncher.requestExecutor()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        try {
+            executor.execute { started.countDown(); release.await() }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            repeat(8) { executor.execute { } }
+            assertThrows(RejectedExecutionException::class.java) {
+                executor.execute { throw AssertionError("overflow request ran") }
+            }
+            assertEquals(8, executor.queue.size)
+        } finally {
+            release.countDown()
+            executor.shutdown()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
     private val revision = "d".repeat(40)
     private fun request(operation: String): JSONObject = JSONObject()
         .put("schema", "trollm.private-selected-launcher-request.v1")

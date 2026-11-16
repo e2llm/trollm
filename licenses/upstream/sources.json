@@ -1,0 +1,37 @@
+[
+  {
+    "file": "uniffi-LICENSE.txt",
+    "source": "https://github.com/mozilla/uniffi-rs/blob/0d38fc51ec057c271233b70db51b13ef403e360d/LICENSE",
+    "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+  },
+  {
+    "file": "llama-cpp-rs-LICENSE-APACHE.txt",
+    "source": "https://github.com/utilityai/llama-cpp-rs/blob/3cfdd729d65e35da407e5f820edf73201bfa54f6/LICENSE-APACHE",
+    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+  },
+  {
+    "file": "llama-cpp-rs-LICENSE-MIT.txt",
+    "source": "https://github.com/utilityai/llama-cpp-rs/blob/3cfdd729d65e35da407e5f820edf73201bfa54f6/LICENSE-MIT",
+    "sha256": "763912bd05f42956dbfa900bd1a2f8037c704f5c64d778c623ec5952454e24aa"
+  },
+  {
+    "file": "simd-LICENSE.txt",
+    "source": "https://github.com/Nugine/simd/blob/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+    "sha256": "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d"
+  },
+  {
+    "file": "jna-LICENSE.txt",
+    "source": "https://github.com/java-native-access/jna/blob/5.14.0/LICENSE",
+    "sha256": "521bb271ac56e0e29a1b1b688b94af17d00d378fc8e63478d8c8b2a7c4a229d0"
+  },
+  {
+    "file": "libffi-LICENSE.txt",
+    "source": "https://github.com/java-native-access/jna/blob/5.14.0/native/libffi/LICENSE",
+    "sha256": "2c9c2acb9743e6b007b91350475308aee44691d96aa20eacef8e199988c8c388"
+  },
+  {
+    "file": "jsonschema-LICENSE.txt",
+    "source": "https://docs.rs/crate/jsonschema/0.58.6/source/LICENSE",
+    "sha256": "117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038"
+  }
+]

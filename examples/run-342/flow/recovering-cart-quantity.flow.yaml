@@ -1,0 +1,1311 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 600
+  maxReasonerCalls: 128
+  maxTokensTotal: 1000000
+  timeoutS: 7200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: recovering-cart-quantity
+version: 322
+entryStep: observe
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  observe:
+    kind: task
+    taskRef: recovering-cart-quantity-observe
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: cart_read
+  cart_read:
+    kind: task
+    taskRef: recovering-cart-quantity-cart_read
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: execution_record
+  title_member:
+    kind: task
+    taskRef: recovering-cart-quantity-title_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: title_inspect
+    promptSupplement: Select the bound original heading after its distinct product assessment.
+  title_inspect:
+    kind: task
+    taskRef: recovering-cart-quantity-title_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: title_inspect_identity
+  title_inspect_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-title_inspect_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: title_inspect_text
+  row_capture:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: row_read
+  row_read:
+    kind: task
+    taskRef: recovering-cart-quantity-row_read
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: controls
+  controls:
+    kind: task
+    taskRef: recovering-cart-quantity-controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_controls
+  quantity_target:
+    kind: task
+    taskRef: amazon-cart-quantity_direction_phrase
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    promptSupplement: 'Requested quantity change: {{ quantity_different.outputs.data.selected.instruction }}.
+      Observed controls: {{ adjust_controls.outputs.semantic }}.'
+    onVerified: quantity_query
+  quantity_member:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_inspect
+    promptSupplement: 'Prepared control search text: {{ quantity_query.outputs.query }}. The original records
+      and literal search are runtime bound. Invoke the granted selection tool, or choose unresolved for unsupported
+      work.'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+  quantity_inspect:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_inspect_identity
+  quantity_inspect_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_inspect_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: owner_capture
+  owner_capture:
+    kind: task
+    taskRef: recovering-cart-quantity-owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: owner_query
+  owner_query:
+    kind: task
+    taskRef: recovering-cart-quantity-owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: owner
+  owner:
+    kind: task
+    taskRef: recovering-cart-quantity-owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: delta
+  delta:
+    kind: task
+    taskRef: recovering-cart-quantity-delta
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: unit_price_capture
+  total_capture:
+    kind: task
+    taskRef: recovering-cart-form-region-anchor_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: cart_total
+  cart_total:
+    kind: task
+    taskRef: recovering-cart-quantity-cart_total
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: subtotal_records
+  subtotal_advice:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    promptSupplement: 'Original cart subtotal labels: {{ subtotal_records.outputs.compact.matches }}. Which
+      original record states the current merchandise subtotal, excluding shipping and tax? Give brief advice
+      identifying the record or explain why none is supported.'
+    onVerified: subtotal_record
+  subtotal:
+    kind: task
+    taskRef: recovering-cart-quantity-subtotal
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: extra_cost
+  extra_cost:
+    kind: task
+    taskRef: recovering-cart-quantity-extra_cost
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: projected_total
+  projected_total:
+    kind: task
+    taskRef: recovering-cart-quantity-projected_total
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: budget_compare
+  budget_compare:
+    kind: task
+    taskRef: recovering-cart-quantity-budget_compare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: budget_guard
+  budget_guard:
+    kind: task
+    taskRef: recovering-cart-quantity-budget_guard
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: write_route
+  write_route:
+    kind: task
+    taskRef: recovering-cart-quantity-write_select_guard
+    onVerified: option_member
+    onError:
+      retry: 0
+      then: write_click_guard
+  option_member:
+    kind: task
+    taskRef: recovering-cart-quantity-option_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: option_enabled
+  option_enabled:
+    kind: task
+    taskRef: recovering-cart-quantity-option_enabled
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: select
+  select:
+    kind: task
+    taskRef: recovering-cart-quantity-select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: observe
+  click:
+    kind: task
+    taskRef: recovering-cart-quantity-click
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: observe
+  done:
+    kind: end
+    outcome: succeeded
+  subtotal_records:
+    kind: task
+    taskRef: recovering-cart-quantity-subtotal_records
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: subtotal_advice
+  row_regions_prepare:
+    kind: task
+    taskRef: recovering-cart-quantity-row_regions_prepare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: row_regions
+  row_regions:
+    kind: foreach
+    items:
+      from: row_regions_prepare.outputs.data.matches
+    itemKey: index
+    bindAs: region_tier
+    enumeration: snapshot
+    ordering: source
+    maxItems: 4
+    onLimit:
+      status: paused
+      reason: No supported product row was found in the current cart.
+      resumeAt: observe
+    body:
+      flowRef: recovering-row-region
+      inputs:
+        region_tier:
+          from: region_tier
+        anchor_selector:
+          from: title_inspect.outputs.data.selector
+        anchor_brief:
+          from: title_inspect.outputs.brief
+        mission:
+          from: item.value
+        purpose:
+          from: region_tier.selected.purpose
+        tab_id:
+          from: tab_id
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: row_scope_select
+    onEmpty:
+      status: paused
+      reason: No supported product row was found in the current cart.
+      resumeAt: observe
+    onComplete:
+      status: paused
+      reason: No supported product row was found in the current cart.
+      resumeAt: observe
+  row_scope_select:
+    kind: task
+    taskRef: recovering-cart-quantity-row_scope_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: row_capture
+  quantity_compare:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_compare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_equal
+  quantity_equal:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_equal
+    onError:
+      retry: 0
+      then: quantity_different
+    onVerified: done
+  quantity_different:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_different
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: adjust_capture
+  quantity_text_query:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_text_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_contains_control
+  quantity_records:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_records
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value
+  quantity_value:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_inspect
+  quantity_value_inspect:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_identity
+  quantity_value_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_text
+  quantity_value_text:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_text
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_ancestors
+  quantity_value_ancestors:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_ancestors
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_owner_query
+  quantity_value_owner_query:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_owner
+  quantity_value_owner:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_compare
+  adjust_capture:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: adjust_controls
+  adjust_controls:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: adjust_quantity_query
+  adjust_quantity_query:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_quantity_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: adjust_quantity_member
+  adjust_quantity_member:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_quantity_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: adjust_quantity_same
+  adjust_quantity_same:
+    kind: task
+    taskRef: recovering-cart-quantity-adjust_quantity_same
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_target
+  unit_price_capture:
+    kind: task
+    taskRef: recovering-cart-quantity-unit_price_capture
+    onError:
+      retry: 0
+      then: &id001
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: observe
+    onVerified: unit_price_query
+  unit_price_query:
+    kind: task
+    taskRef: recovering-cart-quantity-unit_price_query
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: unit_price_candidates
+  unit_price_candidates:
+    kind: task
+    taskRef: recovering-cart-quantity-unit_price_candidates
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: retail_reference_normalize
+  subtotal_record:
+    kind: task
+    taskRef: recovering-cart-quantity-subtotal_record
+    onError:
+      retry: 1
+      then: *id001
+    onVerified: subtotal_inspect
+    routes:
+      unresolved:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: observe
+    promptSupplement: '
+
+      Original choices: {{ subtotal_records.outputs.selection_view.matches }}
+
+      Recommendation: {{ subtotal_advice.outputs.advice }}'
+  subtotal_inspect:
+    kind: task
+    taskRef: recovering-cart-quantity-subtotal_inspect
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: subtotal_identity
+  subtotal_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-subtotal_identity
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: subtotal
+  quantity_group_controls:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_advice
+  quantity_group_advice:
+    kind: task
+    taskRef: amazon-cart-quantity_control_phrase
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_query
+    promptSupplement: 'Observed controls: {{ quantity_group_controls.outputs.semantic.matches }}'
+  quantity_group_control:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_control
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_control_inspect
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    promptSupplement: 'Prepared control search text: {{ quantity_group_query.outputs.query }}. The original
+      records and literal search are runtime bound. Invoke the granted selection tool, or choose unresolved
+      for unsupported work.'
+  quantity_group_control_inspect:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_control_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_control_identity
+  quantity_group_control_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_control_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_parent
+  quantity_group_parent:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_parent
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_parent_identity
+  quantity_group_parent_identity:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_parent_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_text_query
+  quantity_group_owner_query:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_group_owner
+  quantity_group_owner:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_row_ancestors
+  quantity_group_contains_control:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_group_contains_control
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_records
+  quantity_group_query:
+    kind: task
+    taskRef: amazon-cart-quantity_search_text
+    promptSupplement: 'Current advice: {{ quantity_group_advice.outputs.advice }}'
+    onVerified: quantity_group_control
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+  quantity_query:
+    kind: task
+    taskRef: amazon-cart-quantity_search_text
+    promptSupplement: 'Current advice: {{ quantity_target.outputs.advice }}'
+    onVerified: quantity_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+  quantity_value_row_ancestors:
+    kind: task
+    taskRef: recovering-cart-quantity-quantity_value_row_ancestors
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: observe
+    onVerified: quantity_value_owner_query
+  title_inspect_text:
+    kind: task
+    taskRef: recovering-cart-quantity-title_inspect_text
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+    onVerified: current_product_fit
+  heading_review_select:
+    kind: task
+    taskRef: recovering-cart-quantity-heading_source_select
+    onVerified: title_member
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+  heading_sources:
+    kind: foreach
+    items:
+      from: execution_record.outputs.data.selected.outputs.product_headings
+    itemKey: id
+    bindAs: source_heading
+    enumeration: snapshot
+    ordering: source
+    maxItems: 10000
+    onLimit: &id002
+      status: paused
+      reason: No supported product row was found in the current cart.
+      resumeAt: observe
+    body:
+      flowRef: recovering-cart-heading-source
+      inputs:
+        source_heading:
+          from: source_heading
+        observe:
+          from: observe
+        tiers:
+          from: identity_tiers_prepare.outputs.data.matches
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: heading_review_select
+    onEmpty: *id002
+    onComplete: *id002
+  execution_record:
+    kind: task
+    taskRef: recovering-cart-quantity-execution_record
+    onVerified: identity_tiers_prepare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+  identity_tiers_prepare:
+    kind: task
+    taskRef: recovering-cart-quantity-identity_tiers_prepare
+    onVerified: heading_sources
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: No supported product row was found in the current cart.
+        resumeAt: observe
+  current_product_fit:
+    kind: task
+    taskRef: amazon-cart-product_fit_advice
+    promptSupplement: 'Observed original product record: {{ title_inspect.outputs.brief }}. Requested product:
+      {{ item.value.request }}.'
+    onVerified: current_product_fit_gate
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The current product identity could not be established.
+        resumeAt: observe
+  current_product_fit_gate:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    promptSupplement: 'Adviser instruction: {{ current_product_fit.outputs.advice }}'
+    routes:
+      'yes': row_regions_prepare
+      'no':
+        status: paused
+        reason: The observed product does not establish the requested identity.
+        resumeAt: observe
+      unknown:
+        status: paused
+        reason: The observed product does not establish the requested identity.
+        resumeAt: observe
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The observed product does not establish the requested identity.
+        resumeAt: observe
+  write_click_guard:
+    kind: task
+    taskRef: recovering-cart-quantity-write_click_guard
+    onVerified: click
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: Fresh observed control or retail price could not be verified; no quantity write was dispatched.
+        resumeAt: observe
+  retry_unit_price_capture:
+    kind: task
+    taskRef: recovering-cart-quantity-retry_unit_price_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: observe
+    onVerified: retry_unit_price_query
+  retry_unit_price_query:
+    kind: task
+    taskRef: recovering-cart-quantity-retry_unit_price_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: observe
+    onVerified: retry_unit_price_candidates
+  retry_unit_price_candidates:
+    kind: task
+    taskRef: recovering-cart-quantity-retry_unit_price_candidates
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: observe
+    onVerified: retry_unit_price_contexts
+  unit_price_reference_guard:
+    kind: task
+    taskRef: recovering-cart-quantity-unit_price_reference_guard
+    onVerified: unit_price_known
+    onError:
+      retry: 0
+      then: retry_unit_price_capture
+  retry_unit_price_reference_guard:
+    kind: task
+    taskRef: recovering-cart-quantity-retry_unit_price_reference_guard
+    onVerified: unit_price_known
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: Fresh observed control or retail price could not be verified; no quantity write was dispatched.
+        resumeAt: observe
+  unit_price_known:
+    kind: task
+    taskRef: recovering-cart-quantity-unit_price_known
+    onVerified: total_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: Fresh observed control or retail price could not be verified; no quantity write was dispatched.
+        resumeAt: observe
+  retail_reference_normalize:
+    kind: task
+    taskRef: price-context-reference
+    onVerified: unit_price_contexts
+    onError:
+      retry: 0
+      then: &id003
+        status: paused
+        reason: Fresh complete price contexts do not uniquely corroborate the previously approved retail-unit
+          price. No quantity write was dispatched.
+        resumeAt: observe
+  unit_price_contexts:
+    kind: foreach
+    items:
+      from: unit_price_candidates.outputs.data.matches
+    itemKey: index
+    bindAs: currency_candidate
+    enumeration: snapshot
+    ordering: source
+    maxItems: 10000
+    onLimit: retry_unit_price_capture
+    body:
+      flowRef: recovering-cart-price-context
+      inputs:
+        candidate:
+          from: currency_candidate
+        tab_id:
+          from: tab_id
+        row_selector:
+          from: row_scope_select.outputs.data.selected.outputs.scope_inspect.data.selector
+        session_id:
+          from: unit_price_capture.outputs.data.sessionId
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onEmpty: retry_unit_price_capture
+    onComplete: unit_price_contexts_complete
+  unit_price_contexts_complete:
+    kind: task
+    taskRef: price-context-contexts_complete
+    onVerified: unit_price_context_advice
+    onError:
+      retry: 0
+      then: retry_unit_price_capture
+  unit_price_context_select:
+    kind: task
+    taskRef: price-context-context_select
+    onVerified: unit_price_reference_guard
+    onError:
+      retry: 0
+      then: retry_unit_price_capture
+    promptSupplement: 'Original parent contexts: {{ unit_price_contexts_complete.outputs.brief.matches }}.
+      Adviser instruction: {{ unit_price_context_advice.outputs.advice }}. Choose the actual parent_inspect.data.id
+      from this evidence.'
+    routes:
+      unresolved: retry_unit_price_capture
+  retry_unit_price_contexts:
+    kind: foreach
+    items:
+      from: retry_unit_price_candidates.outputs.data.matches
+    itemKey: index
+    bindAs: currency_candidate
+    enumeration: snapshot
+    ordering: source
+    maxItems: 10000
+    onLimit: *id003
+    body:
+      flowRef: recovering-cart-price-context
+      inputs:
+        candidate:
+          from: currency_candidate
+        tab_id:
+          from: tab_id
+        row_selector:
+          from: row_scope_select.outputs.data.selected.outputs.scope_inspect.data.selector
+        session_id:
+          from: retry_unit_price_capture.outputs.data.sessionId
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onEmpty: *id003
+    onComplete: retry_unit_price_contexts_complete
+  retry_unit_price_contexts_complete:
+    kind: task
+    taskRef: price-context-retry_contexts_complete
+    onVerified: retry_unit_price_context_advice
+    onError:
+      retry: 0
+      then: *id003
+  retry_unit_price_context_select:
+    kind: task
+    taskRef: price-context-retry_context_select
+    onVerified: retry_unit_price_reference_guard
+    onError:
+      retry: 0
+      then: *id003
+    promptSupplement: 'Original parent contexts: {{ retry_unit_price_contexts_complete.outputs.brief.matches
+      }}. Adviser instruction: {{ retry_unit_price_context_advice.outputs.advice }}. Choose the actual parent_inspect.data.id
+      from this evidence.'
+    routes:
+      unresolved: &id004
+        status: paused
+        reason: Fresh price context cannot establish a unique corroborated retail-unit price. No quantity write
+          was dispatched.
+        resumeAt: observe
+  unit_price_context_advice:
+    kind: task
+    taskRef: price-context-advice
+    promptSupplement: 'Which observed parent record gives the price paid for one whole package of {{ title_inspect.outputs.brief.text }}? The whole-package price is the required price, even when a separate comparison rate is displayed. Previously approved package price: {{ retail_reference_normalize.outputs.data.result }}. Actual contexts: {{ unit_price_contexts_complete.outputs.brief.matches }}. Product-row text: {{ row_read.outputs.data.content }}. Advise continue with its actual parent_inspect.data.id, or seek more evidence. No arithmetic.'
+    onVerified: unit_price_context_gate
+    onError:
+      retry: 0
+      then: retry_unit_price_capture
+  retry_unit_price_context_advice:
+    kind: task
+    taskRef: price-context-retry_advice
+    promptSupplement: 'Which observed parent record gives the price paid for one whole package of {{ title_inspect.outputs.brief.text }}? The whole-package price is the required price, even when a separate comparison rate is displayed. Previously approved package price: {{ retail_reference_normalize.outputs.data.result }}. Actual contexts: {{ retry_unit_price_contexts_complete.outputs.brief.matches }}. Product-row text: {{ row_read.outputs.data.content }}. Advise continue with its actual parent_inspect.data.id, or seek more evidence. No arithmetic.'
+    onVerified: retry_unit_price_context_gate
+    onError:
+      retry: 0
+      then: *id004
+  unit_price_context_gate:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    promptSupplement: 'Adviser instruction: {{ unit_price_context_advice.outputs.advice }}.'
+    routes:
+      'yes': unit_price_context_select
+      'no': retry_unit_price_capture
+      unknown: retry_unit_price_capture
+    onError:
+      retry: 0
+      then: retry_unit_price_capture
+  retry_unit_price_context_gate:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    promptSupplement: 'Adviser instruction: {{ retry_unit_price_context_advice.outputs.advice }}.'
+    routes:
+      'yes': retry_unit_price_context_select
+      'no': *id004
+      unknown: *id004
+    onError:
+      retry: 0
+      then: *id004
+exports:
+  request:
+    from: item
+  observed_product:
+    from: title_inspect.outputs.brief
+  observed_quantity:
+    from: quantity_value.outputs.data.selected.selected
+  quantity_check:
+    from: quantity_compare.outputs.data

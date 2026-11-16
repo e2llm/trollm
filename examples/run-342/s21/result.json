@@ -1,0 +1,72 @@
+{
+  "runId": "c7306292-3000-4179-928a-2438e8800675",
+  "status": "succeeded",
+  "success": true,
+  "fullEmptyCartAttempt": true,
+  "oneStart": true,
+  "resumeCount": 0,
+  "seededEvidence": false,
+  "skippedStages": false,
+  "manualBrowserAssistanceDuringRun": false,
+  "elapsedSeconds": 6090.901,
+  "initialCartRetailUnits": 0,
+  "finalCartRetailUnits": 3,
+  "finalProductLines": 2,
+  "merchandiseSubtotal": "18.53",
+  "budget": "20",
+  "budgetCheck": {
+    "format": "trollm.local.calculate.v1",
+    "left": "18.53",
+    "operation": "compare",
+    "result": "less",
+    "right": "20"
+  },
+  "checkout": false,
+  "quantityResults": [
+    {
+      "title": "Head and Shoulders Classic Clean 2-in-1 Anti-Dandruff Shampoo + Conditioner 8.45 Fl Oz",
+      "quantity": "2",
+      "quantityCheck": {
+        "format": "trollm.local.calculate.v1",
+        "left": "2",
+        "operation": "compare",
+        "result": "equal",
+        "right": "2"
+      },
+      "outcome": "succeeded"
+    },
+    {
+      "title": "Waddlers Yellow Rubber Duck, Peace Contentment Rubber Duck, Squeaking Bathtub Toy, All Ages, Animal ThemeWaddlers Yellow Rubber Duck, Peace Contentment Rubber Duck, Squeaking Bathtub Toy, All Ages, Animal Theme",
+      "quantity": "1",
+      "quantityCheck": {
+        "format": "trollm.local.calculate.v1",
+        "left": "1",
+        "operation": "compare",
+        "result": "equal",
+        "right": "1"
+      },
+      "outcome": "succeeded"
+    }
+  ],
+  "modelSlots": {
+    "coder": {
+      "calls": 534,
+      "tokensIn": 32697,
+      "tokensOut": 15344
+    },
+    "reasoner": {
+      "calls": 28,
+      "tokensIn": 13560,
+      "tokensOut": 1165
+    }
+  },
+  "modelCalls": 562,
+  "modelFailures": 0,
+  "toolCalls": 522,
+  "toolFailures": 5,
+  "tokensIn": 46257,
+  "tokensOut": 16509,
+  "maxInputTokens": 1253,
+  "maxPromptUtf8Bytes": 4185,
+  "independentAudit": "Terminal phone Completed saved before fresh browser audit. Canonical active Cart inspected; complete scoped read truncated=false. Two same-SKU shampoo units at6.29 each, one yellow duck retail unit at5.95, merchandise18.53. Shipping/taxes excluded from mission budget."
+}

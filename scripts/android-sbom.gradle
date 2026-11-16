@@ -3,6 +3,11 @@
 import groovy.json.JsonOutput
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+import org.gradle.maven.MavenModule
+import org.gradle.maven.MavenPomArtifact
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+import javax.xml.parsers.DocumentBuilderFactory
 
 gradle.projectsEvaluated {
     def app = gradle.rootProject.findProject(':app')
@@ -55,6 +60,143 @@ gradle.projectsEvaluated {
             output.parentFile.mkdirs()
             output.setText(JsonOutput.prettyPrint(JsonOutput.toJson(bom)) + '\n', 'UTF-8')
             logger.lifecycle("Android SBOM: ${components.size()} resolved Maven components -> ${output}")
+        }
+    }
+
+    app.tasks.register('exportAndroidNotices') {
+        def destination = app.layout.buildDirectory.file('reports/android-notices.json')
+        outputs.file(destination)
+        outputs.upToDateWhen { false }
+        doLast {
+            def output = destination.get().asFile
+            output.delete()
+            def configuration = app.configurations.getByName(runtimeConfiguration)
+            def components = configuration.incoming.resolutionResult.allComponents.findAll {
+                it.id instanceof ModuleComponentIdentifier
+            }
+            def query = app.dependencies.createArtifactResolutionQuery()
+                .forComponents(components.collect { it.id })
+                .withArtifacts(MavenModule, MavenPomArtifact).execute()
+            if (query.components.size() != query.resolvedComponents.size()) {
+                throw new GradleException('Cannot resolve dependency POMs for notices')
+            }
+            def factory = DocumentBuilderFactory.newInstance()
+            factory.setNamespaceAware(true)
+            factory.setFeature('http://apache.org/xml/features/disallow-doctype-decl', true)
+            factory.setFeature('http://xml.org/sax/features/external-general-entities', false)
+            factory.setFeature('http://xml.org/sax/features/external-parameter-entities', false)
+            def inventory = [:]
+            def child = { element, name ->
+                if (element == null) return null
+                def children = element.childNodes
+                for (int i = 0; i < children.length; i++) {
+                    def candidate = children.item(i)
+                    if (candidate.nodeType == 1 && candidate.localName == name) return candidate
+                }
+                null
+            }
+            def childText = { element, name -> child(element, name)?.textContent?.trim() ?: '' }
+            def licenseCache = [:]
+            def readLicenses
+            readLicenses = { pom, coordinate, depth, visited ->
+                if (depth > 8 || visited.contains(coordinate)) {
+                    throw new GradleException('License parent chain is cyclic or too deep: ' + coordinate)
+                }
+                if (licenseCache.containsKey(coordinate)) return licenseCache[coordinate]
+                def project = factory.newDocumentBuilder().parse(pom).documentElement
+                def licenseList = child(project, 'licenses')
+                def declared = []
+                if (licenseList != null) {
+                    def children = licenseList.childNodes
+                    for (int i = 0; i < children.length; i++) {
+                        def license = children.item(i)
+                        if (license.nodeType == 1 && license.localName == 'license') {
+                            declared.add([name: childText(license, 'name'), url: childText(license, 'url')])
+                        }
+                    }
+                }
+                def resolved = [licenses: declared, source: coordinate]
+                def parent = child(project, 'parent')
+                if (declared.empty && parent != null) {
+                    def parts = ['groupId', 'artifactId', 'version'].collect { childText(parent, it) }
+                    if (parts.any { !(it ==~ /[A-Za-z0-9_.+\-]+/) }) {
+                        throw new GradleException('License parent must have literal coordinates: ' + coordinate)
+                    }
+                    def parentCoordinate = parts.join(':')
+                    def parentQuery = app.dependencies.createArtifactResolutionQuery()
+                        .forModule(parts[0], parts[1], parts[2])
+                        .withArtifacts(MavenModule, MavenPomArtifact).execute()
+                    if (parentQuery.components.size() != 1 || parentQuery.resolvedComponents.size() != 1) {
+                        throw new GradleException('Cannot resolve license parent: ' + parentCoordinate)
+                    }
+                    def parentArtifacts = parentQuery.resolvedComponents.first().getArtifacts(MavenPomArtifact)
+                    if (parentArtifacts.size() != 1 || !parentArtifacts.first().hasProperty('file')) {
+                        throw new GradleException('Missing license parent POM: ' + parentCoordinate)
+                    }
+                    resolved = readLicenses(parentArtifacts.first().file, parentCoordinate,
+                        depth + 1, visited + coordinate)
+                }
+                licenseCache[coordinate] = resolved
+                resolved
+            }
+            query.resolvedComponents.each { component ->
+                def id = component.id
+                def coordinate = "${id.group}:${id.module}:${id.version}".toString()
+                def artifacts = component.getArtifacts(MavenPomArtifact)
+                if (artifacts.size() != 1 || !artifacts.first().hasProperty('file')) {
+                    throw new GradleException('Missing POM for ' + coordinate)
+                }
+                def declaration = readLicenses(artifacts.first().file, coordinate, 0, [] as Set)
+                inventory[coordinate] = [coordinate: coordinate, licenses: declaration.licenses,
+                    licenseSource: declaration.source, notices: []]
+            }
+            def noticeName = { name ->
+                def leaf = name.tokenize('/').last().toUpperCase(Locale.ROOT)
+                ['LICENSE', 'LICENCE', 'NOTICE', 'COPYING', 'COPYRIGHT'].any { leaf.startsWith(it) } ||
+                    leaf in ['AL2.0', 'LGPL2.1']
+            }
+            def bounded = { stream, limit ->
+                def bytes = stream.readNBytes(limit + 1)
+                if (bytes.length > limit) throw new GradleException('Dependency notice exceeds size limit')
+                bytes
+            }
+            configuration.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+                def id = artifact.moduleVersion.id
+                def coordinate = "${id.group}:${id.name}:${id.version}".toString()
+                def record = inventory[coordinate]
+                if (record == null) throw new GradleException('Artifact absent from notice inventory')
+                if (!(artifact.file.name.endsWith('.jar') || artifact.file.name.endsWith('.aar'))) return
+                new ZipFile(artifact.file).withCloseable { archive ->
+                    archive.entries().each { entry ->
+                        if (entry.directory) return
+                        if (noticeName(entry.name)) {
+                            archive.getInputStream(entry).withCloseable { stream ->
+                                record.notices.add([name: entry.name,
+                                    text: new String(bounded(stream, 2 * 1024 * 1024), 'UTF-8')])
+                            }
+                        } else if (entry.name == 'classes.jar') {
+                            def bytes = archive.getInputStream(entry).withCloseable {
+                                bounded(it, 64 * 1024 * 1024)
+                            }
+                            new ZipInputStream(new ByteArrayInputStream(bytes)).withCloseable { nested ->
+                                def member
+                                while ((member = nested.nextEntry) != null) {
+                                    if (!member.directory && noticeName(member.name)) {
+                                        record.notices.add([name: 'classes.jar/' + member.name,
+                                            text: new String(bounded(nested, 2 * 1024 * 1024), 'UTF-8')])
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (inventory.empty) throw new GradleException('No Android dependency notices')
+            output.parentFile.mkdirs()
+            output.setText(JsonOutput.prettyPrint(JsonOutput.toJson(
+                [configuration: runtimeConfiguration, components: inventory.values().sort { it.coordinate }]
+            )) + '\n', 'UTF-8')
+            logger.lifecycle("Android notice inventory: ${inventory.size()} components")
         }
     }
 }

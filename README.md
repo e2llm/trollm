@@ -12,10 +12,11 @@ validates calls and outputs, and preserves progress. A coder can choose a declar
 exit with `flow.choose`; model prose cannot invent graph edges or become a branch
 condition. A flow can use one or both model roles.
 
-This is an **integration prototype and source-only preview**, with a Rust
-workspace and Kotlin/Compose app. No ready consumer APK or supported end-to-end
-quickstart is provided. Android 13/API 33+ and S21-class phones or newer are the
-target; signed sideloaded APKs are the initial distribution route. The name draws
+This is an **experimental Android app**, with a Rust workspace and
+Kotlin/Compose UI. [Download the 1.0.0 APK](https://github.com/e2llm/trollm/releases/download/v1.0.0/app-release.apk)
+and follow the [Android installation guide](docs/INSTALL-ANDROID.md).
+Android 13/API 33+ is required. Signed sideloaded APKs are the distribution route.
+The name draws
 on TRM and RLM, with “o” for open.
 
 The intended experience is choose a supplied flow → configure its model files and
@@ -52,9 +53,17 @@ runtime, Android, reliability or security work. Before contributing, read
 
 ## Current evidence and limits
 
-Current source metadata remains **0.1.0-rc.8 / Android code 43**. Source-only
-refreshes are identified by their source commit, not a new APK version; see
-[versioning](docs/VERSIONING.md).
+Current release metadata is **1.0.0 / Android code 70**; see
+[versioning](docs/VERSIONING.md) for source, bundle and APK identities.
+
+[Two recorded v342 runs](examples/run-342/README.md) show an Amazon cart workflow
+on Samsung A04e and S21 phones, using local Qwen 0.8B and 2B models. Both completed
+the supplied mission; their largest recorded model inputs were 1,237 and 1,253
+tokens despite execution lasting about 4h20m and 1h41m. The directory contains
+the exact flow, model pins, results, measurements and already-sanitized historical
+logs. These are selected examples worth examining further, not a reliability
+measurement. They used an earlier APK, whose identity is recorded separately
+from the 1.0.0 release.
 
 The runtime now supports prepared worklists, reusable child returns,
 invocation-owned iteration and authored exits on child outcomes. Built-in tools
@@ -78,7 +87,8 @@ main build. The earlier emulator download attempt had a validated-network
 connectivity failure; that is a historical test limitation, not a current claim
 that downloads fail on every device. Emulator checks do not establish phone
 performance or arbitrary-page accuracy. Experimental flows and other APKs require
-their own acceptance; the main source preview is not a ready consumer release.
+their own checks. The downloadable 1.0.0 APK remains experimental; the historical
+records describe their exact tested builds and inputs.
 
 
 ## Repository and contribution boundaries

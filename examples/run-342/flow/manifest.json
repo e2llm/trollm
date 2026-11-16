@@ -1,0 +1,199 @@
+{
+  "entryFlow": "amazon-cart.flow.yaml",
+  "files": [
+    {
+      "path": "amazon-cart.flow.yaml",
+      "sha256": "7972f833dbed4618d5a1093893ebfe760bcb409ca01c595cee8bcf973708ff4b"
+    },
+    {
+      "path": "amazon-cart.tasks.yaml",
+      "sha256": "06910694fb68d9fea1415429a7e3dbea736c747691711846ddb624adaf939f20"
+    },
+    {
+      "path": "prompts/cart-fit-dispatch.md",
+      "sha256": "26d9626b4054b6596c34046ca397562a7294e0ddf24bc75230a021f7ab3ec91c"
+    },
+    {
+      "path": "prompts/cart-heading-fit-advice.md",
+      "sha256": "5184335d01a3f7b4f90dda63326325439713d8c33ae4a1d6a9a6fcf3ac9774f0"
+    },
+    {
+      "path": "prompts/cart-heading-fit-gate.md",
+      "sha256": "0954daf5547dcb659067bd5d97af4fa24627eba107cc05ee47e147307365f8a3"
+    },
+    {
+      "path": "prompts/cart-navigation-advice.md",
+      "sha256": "e7b166eeca45326b7ddaa7797f57acc1abdbb927f1cbb4f791e9313e1e51d9f5"
+    },
+    {
+      "path": "prompts/cart-navigation-select.md",
+      "sha256": "4194a2b52b7c6dac9642d75e1f914b17c893dc1a924042c9a306c798edc2633f"
+    },
+    {
+      "path": "prompts/cart-navigation-single.md",
+      "sha256": "a2e6430667e5d6c99c696184f9061f150a5e2bf44b705dc69eb9fbfefa905528"
+    },
+    {
+      "path": "prompts/cart-price-record.md",
+      "sha256": "0372395996e7deec718979f1e0052b9b57a50bd1f82960e6653f53fe4075115a"
+    },
+    {
+      "path": "prompts/cart-region-review.md",
+      "sha256": "762e15151d7d159826e9a704e713478ee52b840940985537736a577bee81dd98"
+    },
+    {
+      "path": "prompts/cart-row-review.md",
+      "sha256": "31615a1fa42036e1c158f40f0c166e740d3101994110e496b0da87a90ab33955"
+    },
+    {
+      "path": "prompts/evidence-phrase.md",
+      "sha256": "f388198bd86f05b4adcfa8a84847bd29a0a3eda2ad4dcc02390e05a930ec6fd8"
+    },
+    {
+      "path": "prompts/evidence-search-text.md",
+      "sha256": "f2b02256d17bdefb3ddefabfb8db03817b06898d5e14b62f4ed9e321edac9e83"
+    },
+    {
+      "path": "prompts/execute-fit-advice.md",
+      "sha256": "197c2c840dd9a3599a0061b6842f8d548297a86ca66c9b9f21c5f97e9ef41376"
+    },
+    {
+      "path": "prompts/execute-record-advice.md",
+      "sha256": "f99a1016376a7ad8570b6a0eee5844f1fd88928e396d5e51f71932a76f3dede1"
+    },
+    {
+      "path": "prompts/final-route.md",
+      "sha256": "1c3aa9737b30cf564acc791eba145b0dacf759fe04e62675a1b0340602255f75"
+    },
+    {
+      "path": "prompts/final-verification.md",
+      "sha256": "9c33c133b462162b518285dec47620bb90ad498d036b452a258e7ed1fb65daa9"
+    },
+    {
+      "path": "prompts/fixed.md",
+      "sha256": "5d11759c8126a7304bae092367fa6d407d404823897b5ac75638b5e99f219224"
+    },
+    {
+      "path": "prompts/preserve.md",
+      "sha256": "60e204966990d5ddd5dd6a50ab492430c018fe46d3f7117c4be2bccd8fa7388e"
+    },
+    {
+      "path": "prompts/price-context-advice.md",
+      "sha256": "fcde6e16b1675561b70f7542a6f3aa9db4230abe03f292fbfc4cb67408c00a05"
+    },
+    {
+      "path": "prompts/primary-price-advice.md",
+      "sha256": "b6691432bc6eff007c260199ae2a12f362988434bb03bdea91a2992a6d398930"
+    },
+    {
+      "path": "prompts/product-fit-advice.md",
+      "sha256": "57589b1aac1047259184e13f93744e09a3758ec722c9179147fab5331149d3cd"
+    },
+    {
+      "path": "prompts/product-lookup-word.md",
+      "sha256": "499c72fe58b4ca447d23cfa10d92facfdf0a7d882794985aa86afc331da1cbf4"
+    },
+    {
+      "path": "prompts/quantity-control-phrase.md",
+      "sha256": "18ce1a4cdc3881ff1f4f11af5b88a4e476e4d1004e9b4182cdc06718deaa8e84"
+    },
+    {
+      "path": "prompts/quantity-direction-phrase.md",
+      "sha256": "041671232df4854c1e1ed8b0652852c9b9b2f457da3dfdca31de89ca4ad3fbab"
+    },
+    {
+      "path": "prompts/quantity-search-text.md",
+      "sha256": "9887f6974d596814c24de7202deced7f19d8590702b225984ce0cebdbb2e772f"
+    },
+    {
+      "path": "prompts/reasoner.md",
+      "sha256": "3f2f8b24a6eccb009b355ff68b769ed4fe93684390108400cb8e00a9768c1752"
+    },
+    {
+      "path": "prompts/record-action-advice.md",
+      "sha256": "648371a06bfaa29a22321bdfd4dfb6ee15bb6e14fa437e8f20c4f3360e3e3cb0"
+    },
+    {
+      "path": "prompts/search-submit-advice.md",
+      "sha256": "d729bd2f44bee6e0160780b79753b082f3b5bbc8dae6b77746708f80c64eddb5"
+    },
+    {
+      "path": "prompts/search-submit-choice.md",
+      "sha256": "822e0e2bc79528e4aa504d9c8285716c458bf943591b2c319afd8f11e2bb2d2d"
+    },
+    {
+      "path": "prompts/select-add-label.md",
+      "sha256": "2cf28762060a121c4c6dfd0ddc9ab935e051fee3bb33f556f92557667416db44"
+    },
+    {
+      "path": "prompts/select-advice.md",
+      "sha256": "27e9fd2a2be604327ab1ddccaf75387a597b0aefe40d255a7f724e1bd8b6fa59"
+    },
+    {
+      "path": "prompts/select-product-link.md",
+      "sha256": "17faf6e9c1cd5df2392ad9b0fe5b9d155f691345ff78de1b29093d463b780630"
+    },
+    {
+      "path": "prompts/select-record.md",
+      "sha256": "6ed095e9b1958a07040480cf5c4ff7853367354c847d7991e7433a24c9cc8767"
+    },
+    {
+      "path": "prompts/select-row-value.md",
+      "sha256": "e5bdc3d4932e68c5381a468b6a315b339e636fcf2fb4cae79bf54c7b72c09622"
+    },
+    {
+      "path": "prompts/subtotal-label.md",
+      "sha256": "764467766102171e56ccb155731ae65eb8f79fe8211125e43c339724db56715a"
+    },
+    {
+      "path": "prompts/task.md",
+      "sha256": "049a45a6f7d7a292c08e99aff35d4130e82e509ccb2d72ef546d0d8453abc6b6"
+    },
+    {
+      "path": "recovering-cart-confirm.flow.yaml",
+      "sha256": "965fec64b80e74219a48547904f889f8e0c473c5ee653b1ef22c217ce19c1a62"
+    },
+    {
+      "path": "recovering-cart-form-region.flow.yaml",
+      "sha256": "9d3391d64155354abd733d2aadc957f0bad7c6ba1945932a5f7c10612d9da552"
+    },
+    {
+      "path": "recovering-cart-heading-source.flow.yaml",
+      "sha256": "4026a0cd52d25e64c0c9cffc819c3a560d63e53fbf4e89083275a49d492d9f73"
+    },
+    {
+      "path": "recovering-cart-heading.flow.yaml",
+      "sha256": "cb1f216af2a51f0d49f8497555be3151bfae10f338b73110a31fe51aae1dfd02"
+    },
+    {
+      "path": "recovering-cart-price-context.flow.yaml",
+      "sha256": "7ee7fc25969a8127ea68b5437768057bf7e5b64de75eac5afd4d6f72abcf1556"
+    },
+    {
+      "path": "recovering-cart-quantity.flow.yaml",
+      "sha256": "d5f9243a642da51788ecc7643fbd0f922f318b5139815a569de12658f7af7cc6"
+    },
+    {
+      "path": "recovering-item.flow.yaml",
+      "sha256": "f0e4a57ab9891b9dd0edf248217af746f286a9023b648ea8a0cd574cc6acd8e2"
+    },
+    {
+      "path": "recovering-offer-read.flow.yaml",
+      "sha256": "f5f1a4d0c1deff4a56565c47972812486b53618a75d29ad7b37dd66912dc46f0"
+    },
+    {
+      "path": "recovering-price-group.flow.yaml",
+      "sha256": "e66221dee47ed608b3ce0aa179d5a6045e76d8e0234f8cb40cdcf5acc2a7ee1d"
+    },
+    {
+      "path": "recovering-row-region.flow.yaml",
+      "sha256": "d650d4fae2d3ec6d28b68e070ea4e1a0edde0448e81b9be166a962ea256e3011"
+    },
+    {
+      "path": "setup.json",
+      "sha256": "7d40fceafbe05c63495a99bf87777cd5d5037f77385117168ceb7fbbd554e021"
+    }
+  ],
+  "format": "trollm.flow-bundle.v1",
+  "taskRegistry": "amazon-cart.tasks.yaml"
+}

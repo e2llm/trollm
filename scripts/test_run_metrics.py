@@ -23,6 +23,19 @@ def context(epoch="private-epoch", attempt=1, call=None):
 
 
 class RunMetricsTest(unittest.TestCase):
+    def test_historical_public_phase_redactions_preserve_numeric_metrics(self):
+        events = [
+            {"type": "node_exited", "phase": "attempt", "attemptContext": context(),
+             "measurement": {"activeNs": 123, "attemptInclusiveNs": 123}},
+            {"type": "error", "phase": "tool_call", "callContext": context(call=1), "ms": 9},
+        ]
+        expected = summarize([Once(events)])
+        events[0]["phase"] = "[redacted utf8Bytes=7 sha256=c7ce66d0fb14e3c2d4d920918cc6cc7e488668b08dddeb7b85e44de3b9f3eb01]"
+        events[1]["phase"] = "[redacted utf8Bytes=9 sha256=99bd30a8e4c3e58fc1defdf5626b019fc311b42fae21005a5b4b551c2442ee54]"
+        self.assertEqual(summarize([Once(events)]), expected)
+        events[1]["phase"] = "[redacted utf8Bytes=8 sha256=99bd30a8e4c3e58fc1defdf5626b019fc311b42fae21005a5b4b551c2442ee54]"
+        self.assertEqual(summarize([Once(events)])["counts"]["toolFailures"], 0)
+
     def test_parallel_preparation_is_not_added_to_foreground_time(self):
         cold = {"type": "model_call", "attemptContext": context(), "modelCallOrdinal": 1,
                 "ms": 20, "diagnostics": {"preparationAsync": True,

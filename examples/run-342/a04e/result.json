@@ -1,0 +1,56 @@
+{
+  "runId": "abec4388-db0b-4276-8f55-6e91373cda09",
+  "status": "succeeded",
+  "fullEmptyCartAttempt": true,
+  "success": true,
+  "elapsedSeconds": 15621.288,
+  "initialRetailUnitCount": 0,
+  "finalRetailUnitCount": 3,
+  "finalProductLines": 2,
+  "finalMerchandiseSubtotal": "13.69",
+  "budget": "20",
+  "subtotalStrictlyBelowBudget": true,
+  "checkout": false,
+  "oneCreatedRunOneStart": true,
+  "resumeCount": 0,
+  "manualBrowserAssistanceDuringRun": false,
+  "seededEvidence": false,
+  "skippedStages": false,
+  "quantityResults": [
+    {
+      "title": "Head & Shoulders Classic Clean Dandruff Shampoo - 1.7 oz",
+      "quantity": "2",
+      "quantityCheck": {
+        "format": "trollm.local.calculate.v1",
+        "left": "2",
+        "operation": "compare",
+        "result": "equal",
+        "right": "2"
+      },
+      "outcome": "succeeded"
+    },
+    {
+      "title": "DZTIAN Mini Rubber Duck Set Yellow 12-Pieces Float & Squeak Mini Rubber Duck Baby Bath Ducky Sound ShowerToys for Kids Celebrate The Joy of The Children",
+      "quantity": "1",
+      "quantityCheck": {
+        "format": "trollm.local.calculate.v1",
+        "left": "1",
+        "operation": "compare",
+        "result": "equal",
+        "right": "1"
+      },
+      "outcome": "succeeded"
+    }
+  ],
+  "coderCalls": 550,
+  "reasonerCalls": 28,
+  "modelFailures": 0,
+  "toolCalls": 537,
+  "toolFailures": 4,
+  "tokensIn": 46713,
+  "tokensOut": 16957,
+  "maxInputTokens": 1237,
+  "maxPromptUtf8Bytes": 4155,
+  "initialStartRefusal": "An earlier tap created no run: app refused while old341 was paused. Old341 cancelled explicitly, then this new342 run started once. Refusal record retained privately.",
+  "independentAudit": "Native Completed UI saved before read-only browser audit. Fresh canonical Cart container inspection and scoped read: truncated=false, two rows with quantities2 and1. Actual subtotal agrees13.69."
+}

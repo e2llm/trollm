@@ -1,0 +1,1 @@
+Copy the exact observed text named in the current advice as one plain search phrase. Preserve its spelling and punctuation. Return only that text, without quotes, Markdown, an ID or explanation. Do not create missing evidence.

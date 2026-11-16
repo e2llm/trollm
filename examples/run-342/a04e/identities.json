@@ -1,0 +1,25 @@
+{
+  "sourceCommit": "0dd04792d5b8c84cbde0de454ba78e88cfdcb6e4",
+  "apkSourceCommit": "3f9b7691abc0ba19cc061c2a7064be0dcd0d422d",
+  "nativeSourceCommit": "3f9b7691abc0ba19cc061c2a7064be0dcd0d422d",
+  "flowSourceCommit": "0dd04792d5b8c84cbde0de454ba78e88cfdcb6e4",
+  "backend": "llama",
+  "buildType": "debug",
+  "applicationId": "com.trollm.app",
+  "versionName": "0.1.0-rc.24",
+  "versionCode": 68,
+  "supportedAbis": [
+    "arm64-v8a"
+  ],
+  "certificateSha256": "fb30d7560ca47afda7e75508119ad074edd862987eed4993f0917aec9fe0094c",
+  "apkSha256": "44bfb9a26ba6118866a5ab25f3ed6dcb930071b4018c7f4f77f9c4a1ad771c32",
+  "nativeSha256": "e2cc079a6651fbe532756a902cce674fba9100f45e267ac969459235de258082",
+  "flowId": "amazon-cart",
+  "flowVersion": 342,
+  "bundleSha256": "5ab7385fa61e88470ad408458faf15096d116c202d57ea783f7652945b2e7e83",
+  "flowSha256": "7972f833dbed4618d5a1093893ebfe760bcb409ca01c595cee8bcf973708ff4b",
+  "configuredFlowDeadlineSeconds": 43200,
+  "deviceModel": "Samsung Galaxy A04e SM-A042F",
+  "originalIdentityFileSha256": "d1d644dd5fa2b9e077db156ad29293e71d8f923f184b6363dd1c182782baf8e2",
+  "scope": "Historical APK68 and imported flow342; distinct from the 1.0.0 release build."
+}
