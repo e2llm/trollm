@@ -1,0 +1,1 @@
+Copy the exact observed currency text named by the current advice into local.select_unique equals. This is text transcription only: do not assess prices or choose a different amount. If the advice names no supported record, choose unresolved.

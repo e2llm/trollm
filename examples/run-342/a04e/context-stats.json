@@ -1,0 +1,28 @@
+{
+  "configuredContextTokens": 8192,
+  "definition": "Recorded native tokenized chat-templated input length, including model control tokens; not the allocated context capacity.",
+  "all": {
+    "calls": 578,
+    "minimumInputTokens": 37,
+    "medianInputTokens": 45.0,
+    "p95InputTokensNearestRank": 229,
+    "maximumInputTokens": 1237,
+    "meanInputTokens": 80.81833910034602
+  },
+  "coder": {
+    "calls": 550,
+    "minimumInputTokens": 37,
+    "medianInputTokens": 45.0,
+    "p95InputTokensNearestRank": 112,
+    "maximumInputTokens": 1038,
+    "meanInputTokens": 61.02363636363636
+  },
+  "reasoner": {
+    "calls": 28,
+    "minimumInputTokens": 138,
+    "medianInputTokens": 378.0,
+    "p95InputTokensNearestRank": 1232,
+    "maximumInputTokens": 1237,
+    "meanInputTokens": 469.64285714285717
+  }
+}

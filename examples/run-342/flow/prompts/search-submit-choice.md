@@ -1,0 +1,1 @@
+Choose the observed control that sends the search query from the current search form. Use its label, value and action hint to distinguish form submission from unrelated dialog actions. Call local.select_unique with equals set to its original canonical id. If no supported control is identifiable, call flow.choose with route unresolved.

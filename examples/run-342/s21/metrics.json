@@ -1,0 +1,394 @@
+{
+  "attempt": {
+    "activeNs": {
+      "known": 650,
+      "max": 129323857061,
+      "min": 5213231,
+      "sum": 6090750573018,
+      "unknown": 1,
+      "zero": 0
+    },
+    "activeObservedNs": {
+      "known": 651,
+      "max": 129323857061,
+      "min": 81308,
+      "sum": 6090750654326,
+      "unknown": 0,
+      "zero": 0
+    },
+    "attemptInclusiveNs": {
+      "known": 650,
+      "max": 129323857061,
+      "min": 5213231,
+      "sum": 6090750573018,
+      "unknown": 1,
+      "zero": 0
+    },
+    "attemptObservedNs": {
+      "known": 651,
+      "max": 129323857061,
+      "min": 81308,
+      "sum": 6090750654326,
+      "unknown": 0,
+      "zero": 0
+    },
+    "eventObserverNs": {
+      "known": 651,
+      "max": 2149615,
+      "min": 0,
+      "sum": 137830198,
+      "unknown": 0,
+      "zero": 13
+    },
+    "eventRecordBytes": {
+      "known": 651,
+      "max": 6523,
+      "min": 0,
+      "sum": 2565407,
+      "unknown": 0,
+      "zero": 13
+    },
+    "eventRecords": {
+      "known": 651,
+      "max": 7,
+      "min": 0,
+      "sum": 3449,
+      "unknown": 0,
+      "zero": 13
+    },
+    "eventSerializeNs": {
+      "known": 651,
+      "max": 154731,
+      "min": 0,
+      "sum": 39236264,
+      "unknown": 0,
+      "zero": 13
+    },
+    "eventWriteFlushNs": {
+      "known": 651,
+      "max": 410692,
+      "min": 0,
+      "sum": 95854835,
+      "unknown": 0,
+      "zero": 13
+    },
+    "retryWaitNs": {
+      "known": 651,
+      "max": 0,
+      "min": 0,
+      "sum": 0,
+      "unknown": 0,
+      "zero": 651
+    },
+    "snapshotAttempts": {
+      "known": 651,
+      "max": 2,
+      "min": 0,
+      "sum": 671,
+      "unknown": 0,
+      "zero": 1
+    },
+    "snapshotBytes": {
+      "known": 651,
+      "max": 17901022,
+      "min": 0,
+      "sum": 3675882342,
+      "unknown": 0,
+      "zero": 1
+    },
+    "snapshotSerializeNs": {
+      "known": 651,
+      "max": 130230346,
+      "min": 0,
+      "sum": 30343723333,
+      "unknown": 0,
+      "zero": 1
+    },
+    "snapshotWriteRenameNs": {
+      "known": 651,
+      "max": 19697692,
+      "min": 0,
+      "sum": 4395437091,
+      "unknown": 0,
+      "zero": 1
+    },
+    "snapshotWrites": {
+      "known": 651,
+      "max": 2,
+      "min": 0,
+      "sum": 671,
+      "unknown": 0,
+      "zero": 1
+    },
+    "userHoldNs": {
+      "known": 651,
+      "max": 0,
+      "min": 0,
+      "sum": 0,
+      "unknown": 0,
+      "zero": 651
+    }
+  },
+  "counts": {
+    "asyncPreparationModelCalls": 2,
+    "attemptMeasurements": 651,
+    "attempts": 651,
+    "duplicateAttemptMeasurements": 0,
+    "duplicateModelCalls": 0,
+    "duplicateProxyObservations": 0,
+    "duplicateToolCalls": 0,
+    "incompleteAttempts": 0,
+    "incompleteToolCalls": 0,
+    "mainCallsWithoutProxy": 13,
+    "malformedRecords": 0,
+    "matchedMainProxyCalls": 509,
+    "modelCalls": 562,
+    "modelFailures": 0,
+    "partialAttemptMeasurements": 1,
+    "proxyCallsWithoutMain": 0,
+    "proxyObservations": 1195,
+    "records": 6179,
+    "toolCalls": 522,
+    "toolFailures": 5,
+    "toolIntents": 8,
+    "unknownAttemptIdentity": 0,
+    "unknownModelIdentity": 0,
+    "unknownProxyIdentity": 0,
+    "unknownSizeStages": 0,
+    "unknownToolIdentity": 0,
+    "unknownToolIntentIdentity": 0
+  },
+  "gateway": {
+    "cacheReadMs": {
+      "known": 86,
+      "max": 3,
+      "min": 0,
+      "sum": 11,
+      "unknown": 423,
+      "zero": 79
+    },
+    "elapsedMs": {
+      "known": 509,
+      "max": 13646,
+      "min": 0,
+      "sum": 315534,
+      "unknown": 0,
+      "zero": 57
+    },
+    "resultAdmissionMs": {
+      "known": 418,
+      "max": 52,
+      "min": 0,
+      "sum": 4685,
+      "unknown": 91,
+      "zero": 242
+    },
+    "resultFinishMs": {
+      "known": 418,
+      "max": 97,
+      "min": 0,
+      "sum": 9102,
+      "unknown": 91,
+      "zero": 187
+    },
+    "transportMs": {
+      "known": 225,
+      "max": 13574,
+      "min": 147,
+      "sum": 300637,
+      "unknown": 284,
+      "zero": 0
+    }
+  },
+  "model": {
+    "generationMs": {
+      "known": 562,
+      "max": 21199,
+      "min": 111,
+      "sum": 3385544,
+      "unknown": 0,
+      "zero": 0
+    },
+    "loadMs": {
+      "known": 2,
+      "max": 906,
+      "min": 832,
+      "sum": 1738,
+      "unknown": 560,
+      "zero": 0
+    },
+    "ms": {
+      "known": 562,
+      "max": 129254,
+      "min": 1264,
+      "sum": 5692107,
+      "unknown": 0,
+      "zero": 0
+    },
+    "prefillMs": {
+      "known": 562,
+      "max": 112573,
+      "min": 740,
+      "sum": 2259148,
+      "unknown": 0,
+      "zero": 0
+    },
+    "preparationWaitMs": {
+      "known": 2,
+      "max": 2832,
+      "min": 0,
+      "sum": 2832,
+      "unknown": 560,
+      "zero": 1
+    },
+    "prepareMs": {
+      "known": 562,
+      "max": 114,
+      "min": 33,
+      "sum": 35655,
+      "unknown": 0,
+      "zero": 0
+    },
+    "promptAssemblyNs": {
+      "known": 562,
+      "max": 93969654,
+      "min": 72000,
+      "sum": 10532905840,
+      "unknown": 0,
+      "zero": 0
+    },
+    "promptRenderNs": {
+      "known": 562,
+      "max": 91709692,
+      "min": 3577,
+      "sum": 10143483474,
+      "unknown": 0,
+      "zero": 0
+    },
+    "requestPromptUtf8Bytes": {
+      "known": 562,
+      "max": 4185,
+      "min": 137,
+      "sum": 170883,
+      "unknown": 0,
+      "zero": 0
+    },
+    "tokensIn": {
+      "known": 562,
+      "max": 1253,
+      "min": 37,
+      "sum": 46257,
+      "unknown": 0,
+      "zero": 0
+    },
+    "tokensOut": {
+      "known": 562,
+      "max": 140,
+      "min": 1,
+      "sum": 16509,
+      "unknown": 0,
+      "zero": 0
+    },
+    "totalMs": {
+      "known": 562,
+      "max": 129254,
+      "min": 1264,
+      "sum": 5692107,
+      "unknown": 0,
+      "zero": 0
+    },
+    "weightVerifyMs": {
+      "known": 2,
+      "max": 3660,
+      "min": 2000,
+      "sum": 5660,
+      "unknown": 560,
+      "zero": 0
+    }
+  },
+  "proxySize": {
+    "complete_collection": {
+      "known": 86,
+      "max": 138101,
+      "min": 2,
+      "sum": 1113392,
+      "unknown": 0,
+      "zero": 0
+    },
+    "failed_result": {
+      "known": 0,
+      "max": null,
+      "min": null,
+      "sum": 0,
+      "unknown": 5,
+      "zero": 0
+    },
+    "gateway_result": {
+      "known": 504,
+      "max": 246387,
+      "min": 14,
+      "sum": 4050561,
+      "unknown": 0,
+      "zero": 0
+    },
+    "raw_error_payload": {
+      "known": 0,
+      "max": null,
+      "min": null,
+      "sum": 0,
+      "unknown": 0,
+      "zero": 0
+    },
+    "raw_page": {
+      "known": 96,
+      "max": 40568,
+      "min": 293,
+      "sum": 1115907,
+      "unknown": 0,
+      "zero": 0
+    },
+    "raw_payload": {
+      "known": 418,
+      "max": 246387,
+      "min": 14,
+      "sum": 3173108,
+      "unknown": 0,
+      "zero": 0
+    },
+    "selected_page": {
+      "known": 86,
+      "max": 40471,
+      "min": 25,
+      "sum": 877453,
+      "unknown": 0,
+      "zero": 0
+    }
+  },
+  "schemaVersion": 1,
+  "tool": {
+    "gatewayResultCompactJsonUtf8Bytes": {
+      "known": 504,
+      "max": 246387,
+      "min": 14,
+      "sum": 4050561,
+      "unknown": 18,
+      "zero": 0
+    },
+    "ms": {
+      "known": 509,
+      "max": 13672,
+      "min": 0,
+      "sum": 321751,
+      "unknown": 13,
+      "zero": 29
+    },
+    "toolResultContextCandidateUtf8Bytes": {
+      "known": 517,
+      "max": 0,
+      "min": 0,
+      "sum": 0,
+      "unknown": 5,
+      "zero": 517
+    }
+  }
+}

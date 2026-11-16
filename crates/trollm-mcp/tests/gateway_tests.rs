@@ -397,6 +397,41 @@ fn cache_ttl_expiry_refetches() {
 }
 
 #[test]
+fn pagination_checks_send_gate_before_every_page() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for allowed_pages in [0, 1] {
+        let server = MockMcpServer::start();
+        let dirs = TempDir::new("pagination-send-gate");
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = checks.clone();
+        let mut gw =
+            gateway(&server, fixture_policies(), &dirs, None).with_send_gate(Arc::new(move || {
+                anyhow::ensure!(
+                    observed.fetch_add(1, Ordering::SeqCst) < allowed_pages,
+                    "controlled send gate closed"
+                );
+                Ok(())
+            }));
+        let error = gw
+            .call(&call("tracker", "list_issues", json!({"query":"open"})))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("controlled send gate closed"));
+        assert_eq!(server.count("call:list_issues"), allowed_pages);
+        assert_eq!(checks.load(Ordering::SeqCst), allowed_pages + 1);
+        let hash = trollm_mcp::CacheStore::hash_args(
+            &json!({"query":"open"}),
+            Some(&["query".to_owned()]),
+            Some("cursor"),
+        );
+        assert!(gw
+            .cache()
+            .complete_entry("tracker", "list_issues", &hash)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
 fn paginate_first_page_live_then_pages_from_file() {
     let server = MockMcpServer::start();
     let dirs = TempDir::new("paginate");

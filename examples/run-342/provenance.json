@@ -1,0 +1,10 @@
+{
+  "archiveSourceCommit": "d9ed5d36ea61fb58eecf8f0b92f96749bdae878a",
+  "flowSourceCommit": "0dd04792d5b8c84cbde0de454ba78e88cfdcb6e4",
+  "apkSourceCommit": "3f9b7691abc0ba19cc061c2a7064be0dcd0d422d",
+  "bundleSha256": "5ab7385fa61e88470ad408458faf15096d116c202d57ea783f7652945b2e7e83",
+  "archivePolicy": "Exact already-sanitized historical ZIPs. Public product names and recorded result text retained in result.json. No redacted text reconstructed.",
+  "historicalSignerSha256": "fb30d7560ca47afda7e75508119ad074edd862987eed4993f0917aec9fe0094c",
+  "releaseSignerSha256": "e34115258267beec63ff83eaf2b8cb51767a3f3b71f42cfcd3570c99ce2dc7a8",
+  "signerExplanation": "The historical phone APK uses a different signing identity from the 1.0.0 CI release. An earlier APK49 record documents re-signing to retain that phone identity, but that does not establish APK68 re-signing provenance. Actual recorded APK68 hashes are preserved; it is not represented as the CI release artifact."
+}

@@ -1,0 +1,1 @@
+Choose the observed control that submits the entered query from the current search form. Compare its label, value and action hint with unrelated dialog actions. Recommend its original canonical id and the decisive evidence in one short sentence. If unsupported, say that more evidence is needed. You have no tools.

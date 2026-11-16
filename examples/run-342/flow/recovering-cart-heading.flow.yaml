@@ -1,0 +1,65 @@
+schemaVersion: ledger.execution-plan.v1
+id: recovering-cart-heading
+version: 322
+input:
+  promptTemplate: '{{ user_input }}'
+models:
+  coder:
+    ctx: 8192
+limits:
+  maxSteps: 4
+  maxReasonerCalls: 0
+  maxTokensTotal: 16384
+  timeoutS: 3600
+  artifactMaxMb: 8
+onLimit: abort
+entryStep: identity_candidates
+nodes:
+  identity_candidates:
+    kind: task
+    taskRef: recovering-cart-quantity-identity_candidates
+    onVerified: identity_select
+    onError:
+      retry: 0
+      then: next
+  identity_select:
+    kind: task
+    taskRef: recovering-cart-quantity-identity_select
+    onVerified: matched
+    onError:
+      retry: 0
+      then: next
+  matched:
+    kind: end
+    outcome: succeeded
+  next:
+    kind: end
+    outcome: skipped
+mcp:
+  policies:
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$

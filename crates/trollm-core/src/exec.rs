@@ -2142,6 +2142,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                         TaskFailure::new(ErrorClass::McpError, format!("preparation: {e:#}"))
                     })?
                 {
+                    // Preparation may already have issued a remote guard. Track
+                    // it before any local validation, cancellation or journal
+                    // failure can enter an authored retry or suffix.
+                    self.selected_call_pending = true;
                     prepared.validate(call, &preparation_context).map_err(|e| {
                         TaskFailure::new(ErrorClass::ToolCallParse, format!("preparation: {e:#}"))
                     })?;
@@ -2159,10 +2163,6 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                     })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
                     *call = prepared.call;
                     selected_prepared = true;
-                    // The remote guard has issued this preparation. Even a
-                    // later local validation refusal must not acquire another
-                    // guard or execute an authored retry/suffix.
-                    self.selected_call_pending = true;
                 }
                 self.gateway.validate_call(call).map_err(|e| {
                     self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
@@ -3760,6 +3760,7 @@ mod recovery_regressions {
         struct PreparedGateway {
             mode: u8,
             calls: usize,
+            preparations: usize,
             log: PathBuf,
             cancel: Arc<AtomicBool>,
         }
@@ -3790,8 +3791,9 @@ mod recovery_regressions {
                 call: &ToolCall,
                 context: &PreparationContext,
             ) -> anyhow::Result<Option<PreparedCall>> {
+                self.preparations += 1;
                 assert!(!context.run_id.is_empty());
-                assert_eq!(context.node, "work");
+                assert!(matches!(context.node.as_str(), "work" | "retry"));
                 assert_eq!(context.model_slot, "coder");
                 assert_eq!(context.model_call_ordinal, 1);
                 assert_eq!(context.frames.len(), 1);
@@ -3803,6 +3805,9 @@ mod recovery_regressions {
                 }
                 if self.mode == 2 {
                     self.cancel.store(true, Ordering::SeqCst);
+                }
+                if self.mode == 7 {
+                    std::thread::sleep(Duration::from_millis(1100));
                 }
                 let response = "{\"args\":{\"nativeValue\":1}}";
                 let mut resolved = call.clone();
@@ -3872,11 +3877,24 @@ mod recovery_regressions {
                 })
             }
         }
-        for mode in 0..7 {
+        for mode in 0..8 {
             let base = std::env::temp_dir().join(format!("prepared-dispatch-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&base).unwrap();
             std::fs::write(base.join("work.md"), "one controlled call").unwrap();
-            let root=plan("prepared-dispatch","work","  work: {kind: task, taskRef: work, onVerified: done}\n  done: {kind: end, outcome: succeeded}");
+            let mut root=plan("prepared-dispatch","work","  work: {kind: task, taskRef: work, onVerified: done}\n  done: {kind: end, outcome: succeeded}");
+            if mode == 3 || mode == 6 {
+                root.nodes
+                    .insert("retry".into(), root.nodes["work"].clone());
+                root.nodes.get_mut("work").unwrap().on_error = Some(OnError {
+                    retry: 0,
+                    backoff_s: 0,
+                    then: Transition::Node("retry".into()),
+                });
+            }
+            if mode == 7 {
+                root.limits.timeout_s = 1;
+                root.on_limit = RunLimitPolicy::RespondPartial;
+            }
             let registry=TaskRegistry::from_yaml_str("schemaVersion: ledger.task-registry.v1\ntasks:\n  work:\n    model: coder\n    prompt: work.md\n    completion: tool-result\n    tools: [tracker.write]\n    toolArguments: {tracker.write: {modelFields: []}}\n    mutations: {idempotency: intent-log, onUncertain: fail-run}",&base).unwrap();
             let run = RunDir::under(&base);
             let cancel = Arc::new(AtomicBool::new(false));
@@ -3894,6 +3912,7 @@ mod recovery_regressions {
                 PreparedGateway {
                     mode,
                     calls: 0,
+                    preparations: 0,
                     log: run.events_path(),
                     cancel: cancel.clone(),
                 },
@@ -3905,6 +3924,11 @@ mod recovery_regressions {
             assert_eq!(matches!(status, RunStatus::Succeeded), mode == 0);
             let sent = mode == 0 || mode == 4 || mode == 5;
             assert_eq!(exec.gateway.calls, usize::from(sent));
+            assert_eq!(
+                exec.gateway.preparations, 1,
+                "a prepared guard is never reacquired"
+            );
+            assert_eq!(exec.selected_call_pending, mode >= 2);
             let events = EventLog::read_all(&run.events_path()).unwrap();
             assert_eq!(
                 events
@@ -3942,7 +3966,7 @@ mod recovery_regressions {
                 );
             }
             drop(exec);
-            if mode == 5 {
+            if mode == 3 || mode == 5 || mode == 6 || mode == 7 {
                 let mut reopened = Executor::new(
                     root,
                     registry,
@@ -3957,13 +3981,16 @@ mod recovery_regressions {
                     PreparedGateway {
                         mode: 0,
                         calls: 0,
+                        preparations: 0,
                         log: run.events_path(),
                         cancel: Arc::new(AtomicBool::new(false)),
                     },
                     run.clone(),
                 )
                 .unwrap();
-                assert!(reopened.selected_call_pending);
+                if mode == 5 || mode == 6 {
+                    assert!(reopened.selected_call_pending);
+                }
                 assert!(matches!(
                     reopened.run_until_blocked().unwrap(),
                     RunStatus::Failed { .. }
@@ -3972,6 +3999,7 @@ mod recovery_regressions {
                     reopened.gateway.calls, 0,
                     "reopened pending journal never redispatches"
                 );
+                assert_eq!(reopened.gateway.preparations, 0);
             }
             std::fs::remove_dir_all(base).unwrap();
         }

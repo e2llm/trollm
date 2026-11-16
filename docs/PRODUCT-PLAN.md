@@ -1,10 +1,11 @@
 # Product direction and current scope
 
-Status reviewed on **2026-11-08**. This is an integration prototype and source
-preview: contributors can inspect and test the runtime and self-host the flow
-review companion. No ready consumer APK or supported end-to-end app quickstart
-is supplied. Source publication, repository visibility and APK delivery are
-separate steps.
+Status reviewed on **2026-11-15**. trollm 1.0.0 is an experimental Android app
+with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.0.0)
+and an [installation guide](INSTALL-ANDROID.md). Contributors can also inspect
+and test the runtime and self-host the flow review companion. The
+[two recorded v342 phone runs](../examples/run-342/README.md) are examples worth
+investigating further, not a reliability measurement.
 
 ## Intended experience
 
@@ -52,7 +53,7 @@ browser/container acceptance.
 
 ## Evidence and remaining acceptance
 
-Current main metadata remains **0.1.0-rc.8 / Android code 43**. Source-only
+Current release metadata is **1.0.0 / Android code 70**. Source-only
 refreshes carry a source commit identity; they do not allocate a new APK version
 or establish acceptance of different APK bytes. See [versioning](VERSIONING.md).
 
@@ -94,9 +95,9 @@ but a general packer for arbitrary existing v1 packages does not. The broader
 3. **Make current-format contributions easier.** Improve diagnostics, add a
    small replay walkthrough and provide a general v1 bundle packer. This work can
    proceed now; it does not depend on redesigning authoring or distributing an APK.
-4. **Prepare an APK release.** Pair an accepted build with matching source,
-   signing/build notes and a complete packaged-component notice inventory. Record
-   what passed on which hardware and what remains untested.
+4. **Maintain release provenance.** Keep each APK with its matching source,
+   signing/build records and generated dependency notices. Record observations
+   against the exact build and hardware used.
 5. **Revisit proposed authoring interfaces separately.** A shared flow contract,
    catalogue and wider authoring pack need their own design and compatibility
    review; they are not prerequisites for improving today's flows.

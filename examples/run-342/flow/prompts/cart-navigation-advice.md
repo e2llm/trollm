@@ -1,0 +1,1 @@
+Assess this one observed navigation control. Does its own label show that it opens the basket of chosen items? An offer, credit application, promotion, or help page does not. Give one short next-step instruction: continue when supported, skip this option when it leads elsewhere, or seek more evidence when unclear. Do not copy IDs or write tool arguments. You have no tools.

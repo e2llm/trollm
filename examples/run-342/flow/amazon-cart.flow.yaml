@@ -1,0 +1,973 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 1500
+  maxReasonerCalls: 256
+  maxTokensTotal: 4000000
+  timeoutS: 43200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: amazon-cart
+version: 342
+entryStep: prepare
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.explore:
+      class: read
+      timeoutS: 60
+      resultArtifact: exploration
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  prepare:
+    kind: task
+    taskRef: amazon-cart-prepare
+    onVerified: budget_context
+    onError:
+      retry: 0
+      then:
+        status: failed
+        reason: Check the prepared request and decimal budget before starting a new run.
+  budget_context:
+    kind: task
+    taskRef: amazon-cart-budget_context
+    onError:
+      retry: 0
+      then:
+        status: failed
+        reason: Check the prepared request and decimal budget before starting a new run.
+    onVerified: tabs
+  tabs:
+    kind: task
+    taskRef: amazon-cart-tabs
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: tabs
+    onVerified: initial_capture
+  initial_capture:
+    kind: task
+    taskRef: amazon-cart-final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: initial_query
+  initial_query:
+    kind: task
+    taskRef: amazon-cart-initial_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: initial_controls
+  initial_controls:
+    kind: task
+    taskRef: amazon-cart-initial_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_anchor_target
+  baseline:
+    kind: task
+    taskRef: amazon-cart-baseline
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: baseline_gate
+  baseline_gate:
+    kind: task
+    taskRef: amazon-cart-baseline_gate
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: items
+  items:
+    kind: foreach
+    items:
+      from: prepare.outputs.worklist.items
+    itemKey: id
+    bindAs: request_record
+    enumeration: snapshot
+    ordering: source
+    maxItems: 8
+    onLimit: final_cart_capture
+    body:
+      flowRef: recovering-item
+      inputs:
+        item:
+          from: request_record
+        context:
+          from: prepare.outputs.worklist.context
+        worklist:
+          from: prepare.outputs.mission.items
+        initial:
+          from: initial_controls.outputs.compact.matches
+        tab_id:
+          from: tabs.outputs.data.tabs.0.id
+        budget:
+          from: budget_context.outputs.data.right
+        counter_selector:
+          from: counter_field_inspect.outputs.data.selector
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+      compact:
+        collect: body.outputs
+        indexBy: itemKey
+        view:
+          fields:
+            id: true
+            outcome: true
+            outputs:
+              request:
+                value: true
+              price:
+                decimal: true
+              verification: true
+              basket:
+                matches:
+                  selected:
+                    id: true
+                    text: true
+                    aria: true
+          maxBytes: 24576
+    onEmpty: final_cart_capture
+    onComplete: final_cart_capture
+  done:
+    kind: end
+    outcome: succeeded
+  final_cart_capture:
+    kind: task
+    taskRef: amazon-cart-final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_query
+  final_cart_query:
+    kind: task
+    taskRef: amazon-cart-final_cart_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_controls
+  final_cart_controls:
+    kind: task
+    taskRef: amazon-cart-final_cart_controls
+    onError:
+      retry: 0
+      then: final_cart_controls_many
+    onVerified: final_cart_advice_single
+
+  final_cart_select:
+    kind: task
+    taskRef: amazon-cart-final_cart_select
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    promptSupplement: 'Original navigation controls: {{ final_cart_controls_many.outputs.compact.matches }}.'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_inspect
+  final_cart_inspect:
+    kind: task
+    taskRef: amazon-cart-final_cart_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_identity
+  final_cart_identity:
+    kind: task
+    taskRef: amazon-cart-final_cart_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_click
+  final_cart_click:
+    kind: task
+    taskRef: amazon-cart-final_cart_click
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_fresh
+  final_cart_fresh:
+    kind: task
+    taskRef: amazon-cart-final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_anchor_query
+  final_cart_read:
+    kind: task
+    taskRef: amazon-cart-final_cart_read
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_total_query
+  counter_anchor_target:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    promptSupplement: Choose the observed control whose caption or ARIA states the current number of shopping-cart
+      items. Original controls {{ initial_controls.outputs.compact.matches }}. Give brief advice identifying
+      the supported original record, or explain why none is supported. Do not choose a keyboard shortcut
+      or a Go-to-cart button without a count. If unsupported briefly explain.
+    onVerified: counter_anchor
+  counter_anchor:
+    kind: task
+    taskRef: amazon-cart-counter_anchor
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_anchor_inspect
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    promptSupplement: '
+
+      Original choices: {{ initial_controls.outputs.compact.matches }}
+
+      Recommendation: {{ counter_anchor_target.outputs.advice }}'
+  counter_anchor_inspect:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_anchor_identity
+  counter_anchor_identity:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_fields
+  counter_fields:
+    kind: task
+    taskRef: amazon-cart-counter_fields
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_field
+  counter_field:
+    kind: task
+    taskRef: amazon-cart-counter_field
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_field_inspect
+  counter_field_inspect:
+    kind: task
+    taskRef: amazon-cart-counter_field_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: counter_field_identity
+  counter_field_identity:
+    kind: task
+    taskRef: amazon-cart-counter_field_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: initial_capture
+    onVerified: baseline
+  final_anchor_query:
+    kind: task
+    taskRef: amazon-cart-final_anchor_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: cart_headings
+  final_anchor_target:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    promptSupplement: Choose the main current cart page heading from these original heading records {{
+      cart_headings.outputs.compact.matches }}. Page title {{ final_cart_fresh.outputs.data.metadata.title
+      }}. Use available visibility and heading evidence. Product recommendations, product names and hidden
+      side panels are not the main basket heading. Give brief advice in ordinary prose identifying the
+      supported original record, or explain why none is supported. If unsupported, explain briefly.
+    onVerified: final_anchor_select
+  final_anchor_select:
+    kind: task
+    taskRef: amazon-cart-final_anchor_select
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_anchor_inspect
+    promptSupplement: '
+
+      Original choices: {{ cart_headings.outputs.selection_view.matches }}
+
+      Recommendation: {{ final_anchor_target.outputs.advice }}'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+  final_anchor_inspect:
+    kind: task
+    taskRef: amazon-cart-final_anchor_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_anchor_identity
+  final_anchor_identity:
+    kind: task
+    taskRef: amazon-cart-final_anchor_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: cart_regions_prepare
+  final_items_select:
+    kind: task
+    taskRef: amazon-cart-final_items_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_summary_fresh
+  final_summary_fresh:
+    kind: task
+    taskRef: amazon-cart-final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_read
+  final_total_query:
+    kind: task
+    taskRef: amazon-cart-final_total_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_total_records
+  quantities:
+    kind: foreach
+    items:
+      from: prepare.outputs.worklist.items
+    itemKey: id
+    bindAs: quantity_item
+    enumeration: snapshot
+    ordering: source
+    maxItems: 8
+    onLimit:
+      status: paused
+      reason: The requested quantity verification could not be completed.
+      resumeAt: final_cart_capture
+    body:
+      flowRef: recovering-cart-quantity
+      inputs:
+        item:
+          from: quantity_item
+        tab_id:
+          from: tabs.outputs.data.tabs.0.id
+        cart_scope:
+          from: final_items_select.outputs.data.selected.outputs.scope_inspect.data.selector
+        budget:
+          from: budget_context.outputs.data.right
+        executions:
+          from: items.outputs.full
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onEmpty:
+      status: paused
+      reason: The requested quantity verification could not be completed.
+      resumeAt: final_cart_capture
+    onComplete: verified_capture
+  verified_capture:
+    kind: task
+    taskRef: amazon-cart-final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: verified_read
+  verified_read:
+    kind: task
+    taskRef: amazon-cart-verified_read
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: verified_total
+  verified_total:
+    kind: task
+    taskRef: amazon-cart-verified_total
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: verified_total_records
+  cart_headings:
+    kind: task
+    taskRef: amazon-cart-cart_headings
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_anchor_target
+  cart_regions_prepare:
+    kind: task
+    taskRef: amazon-cart-cart_regions_prepare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: cart_regions
+  cart_regions:
+    kind: foreach
+    items:
+      from: cart_regions_prepare.outputs.data.matches
+    itemKey: index
+    bindAs: region_tier
+    enumeration: snapshot
+    ordering: source
+    maxItems: 1
+    onLimit:
+      status: paused
+      reason: No supported active-cart form was found. Review the page before resuming.
+      resumeAt: final_cart_capture
+    body:
+      flowRef: recovering-cart-form-region
+      inputs:
+        region_tier:
+          from: region_tier
+        anchor_selector:
+          from: final_anchor_inspect.outputs.data.selector
+        anchor_brief:
+          from: final_anchor_inspect.outputs.brief
+        mission:
+          from: prepare.outputs.worklist.items
+        purpose:
+          from: region_tier.selected.purpose
+        tab_id:
+          from: tabs.outputs.data.tabs.0.id
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: final_items_select
+    onEmpty:
+      status: paused
+      reason: No supported active-cart form was found. Review the page before resuming.
+      resumeAt: final_cart_capture
+    onComplete:
+      status: paused
+      reason: No supported active-cart form was found. Review the page before resuming.
+      resumeAt: final_cart_capture
+  final_total_records:
+    kind: task
+    taskRef: amazon-cart-final_total_records
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: quantities
+  verified_total_records:
+    kind: task
+    taskRef: amazon-cart-verified_total_records
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_subtotal_advice
+  final_subtotal_advice:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then: &id001
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: final_cart_capture
+    promptSupplement: 'Original current cart subtotal labels: {{ verified_total_records.outputs.compact.matches
+      }}. Identify the record for merchandise subtotal in ordinary prose, or explain the missing evidence.
+      Shipping, tax and per-item prices are different measurements.'
+    onVerified: final_subtotal_record
+  final_subtotal_record:
+    kind: task
+    taskRef: amazon-cart-final_subtotal_record
+    onError:
+      retry: 1
+      then: *id001
+    onVerified: final_subtotal_inspect
+    routes:
+      unresolved:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: final_cart_capture
+    promptSupplement: '
+
+      Original choices: {{ verified_total_records.outputs.selection_view.matches }}
+
+      Recommendation: {{ final_subtotal_advice.outputs.advice }}'
+  final_subtotal_inspect:
+    kind: task
+    taskRef: amazon-cart-final_subtotal_inspect
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: final_subtotal_identity
+  final_subtotal_identity:
+    kind: task
+    taskRef: amazon-cart-final_subtotal_identity
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: final_subtotal_value
+  final_subtotal_value:
+    kind: task
+    taskRef: amazon-cart-final_subtotal_value
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: final_budget_compare
+  final_budget_compare:
+    kind: task
+    taskRef: amazon-cart-final_budget_compare
+    onError:
+      retry: 0
+      then: *id001
+    onVerified: final_budget_guard
+  final_budget_guard:
+    kind: task
+    taskRef: amazon-cart-final_budget_guard
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The observed final merchandise subtotal is not strictly below the budget.
+        resumeAt: final_cart_capture
+    onVerified: done
+  final_cart_select_single:
+    kind: task
+    taskRef: amazon-cart-final_cart_select_single
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    promptSupplement: 'Original navigation controls: {{ final_cart_controls.outputs.compact.matches }}.'
+    onVerified: final_cart_inspect_single
+
+  final_cart_inspect_single:
+    kind: task
+    taskRef: amazon-cart-final_cart_inspect_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_identity_single
+
+  final_cart_identity_single:
+    kind: task
+    taskRef: amazon-cart-final_cart_identity_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_click_single
+
+  final_cart_click_single:
+    kind: task
+    taskRef: amazon-cart-final_cart_click_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_fresh
+
+  final_cart_controls_many:
+    kind: task
+    taskRef: amazon-cart-final_cart_controls_many
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onVerified: final_cart_select
+
+  final_cart_advice_single:
+    kind: task
+    taskRef: amazon-cart-navigation_advice
+    promptSupplement: 'Observed control: {{ final_cart_controls.outputs.compact.matches }}.'
+    onVerified: final_cart_gate_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+
+  final_cart_gate_single:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    promptSupplement: 'Adviser instruction: {{ final_cart_advice_single.outputs.advice }}. Original control:
+      {{ final_cart_controls.outputs.compact.matches }}.'
+    routes:
+      'yes': final_cart_select_single
+      'no':
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+      unknown:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: final_cart_capture
+
+
+setup:
+  path: setup.json
+  sha256: 7d40fceafbe05c63495a99bf87777cd5d5037f77385117168ceb7fbbd554e021

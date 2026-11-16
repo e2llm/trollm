@@ -132,6 +132,7 @@ android {
             resources.srcDir(repoDir.resolve("crates/trollm-uniffi/tests/fixtures"))
         }
         getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/third-party-notices/assets"))
             // cargo-ndk writes libtrollm_uniffi.so per ABI here.
             jniLibs.srcDir(jniLibsDir)
             // uniffi-bindgen Kotlin output.

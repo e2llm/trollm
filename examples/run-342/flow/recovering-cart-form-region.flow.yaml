@@ -1,0 +1,350 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 600
+  maxReasonerCalls: 128
+  maxTokensTotal: 1000000
+  timeoutS: 7200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: recovering-cart-form-region
+version: 322
+entryStep: anchor_capture
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  anchor_capture:
+    kind: task
+    taskRef: recovering-cart-form-region-anchor_capture
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_query
+  scope_query:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_query
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_candidates
+  scope_candidates:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_candidates
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_presence
+  scope_presence:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_presence
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_advice
+  scope_advice:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then: scope_skipped
+    promptSupplement: 'Which observed form contains active cart products and quantity controls? Exclude
+      search, recommendation Add forms and saved-for-later forms. Original forms: {{ scope_candidates.outputs.compact.matches
+      }}. Give brief advice in ordinary prose identifying the supported original record, or explain why
+      none is supported.'
+    onVerified: scope_member
+  scope_member:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_member
+    onError:
+      retry: 1
+      then: scope_skipped
+    promptSupplement: '
+
+      Original choices: {{ scope_candidates.outputs.compact.matches }}
+
+      Recommendation: {{ scope_advice.outputs.advice }}'
+    onVerified: scope_inspect
+    routes:
+      unresolved: scope_skipped
+  scope_inspect:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_inspect
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_identity
+  scope_identity:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_identity
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: selector_query
+  selector_query:
+    kind: task
+    taskRef: recovering-cart-form-region-selector_query
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: selector_unique
+  selector_unique:
+    kind: task
+    taskRef: recovering-cart-form-region-selector_unique
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_capture
+  scope_capture:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_capture
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_read
+  scope_read:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_read
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: caption_query
+  caption_query:
+    kind: task
+    taskRef: recovering-cart-form-region-caption_query
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: caption_records
+  caption_records:
+    kind: task
+    taskRef: recovering-cart-form-region-caption_records
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: caption_presence
+  caption_presence:
+    kind: task
+    taskRef: recovering-cart-form-region-caption_presence
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: control_query
+  control_query:
+    kind: task
+    taskRef: recovering-cart-form-region-control_query
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: control_records
+  control_records:
+    kind: task
+    taskRef: recovering-cart-form-region-control_records
+    onError:
+      retry: 0
+      then: scope_skipped
+    onVerified: scope_review
+  scope_review:
+    kind: task
+    taskRef: recovering-cart-form-region-scope_review
+    onError:
+      retry: 0
+      then: scope_skipped
+    promptSupplement: 'Observed region text: {{ scope_read.outputs.review.content }}.
+      Original control records: {{ control_records.outputs.compact.matches }}.'
+    onVerified: scope_review_gate
+  scope_review_gate:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    onError:
+      retry: 0
+      then: scope_skipped
+    promptSupplement: 'Adviser instruction: {{ scope_review.outputs.advice }}'
+    routes:
+      yes: scope_done
+      no: scope_skipped
+      unknown: scope_skipped
+  scope_done:
+    kind: end
+    outcome: succeeded
+  scope_skipped:
+    kind: end
+    outcome: skipped

@@ -1,0 +1,14 @@
+Moray kernel clock reader
+Copyright 2026 Insitu
+
+The files kernel-clock-probe.c and kernel-clock-reader.h are distributed
+under the Apache License, Version 2.0; see LICENSE in this directory.
+The project owner authorized this grant on 2026-11-15. It applies to these
+two files only, not to other code in the original Moray RPA project.
+
+The probe was introduced in source revision
+2dadbf0691b6c5cd560c7700623a65ee1e2eb6cc on 2026-10-31.
+The shared interface and header were introduced in revision
+1f5f4a603f557195d43aee7ddd5bbc2a8815ac6b on 2026-11-04.
+Both commits were authored by the Moray RPA development account.
+The C and header bytes remain unchanged; source.json records their hashes.

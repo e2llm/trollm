@@ -1390,8 +1390,16 @@ impl McpGateway {
                     Duration::from_secs(policy.timeout_s.unwrap_or(30)).min(remaining),
                 )?;
                 let result = self.measured("transport", || {
-                    self.server(&call.server)?
-                        .with_client(|client| client.call_tool(&call.tool, &args, Some(timeout)))
+                    self.server(&call.server)?.with_client(|client| {
+                        let check = || {
+                            if let Some(gate) = &self.send_gate {
+                                gate()?;
+                            }
+                            self.bounded_timeout(timeout)?;
+                            Ok(())
+                        };
+                        client.call_tool_checked(&call.tool, &args, Some(timeout), Some(&check))
+                    })
                 })?;
                 let payload = extract_tool_payload(&result);
                 self.response_size(
@@ -1702,16 +1710,7 @@ impl McpGateway {
             if let Some(path) = &result_path {
                 let bytes = serde_json::to_vec(&payload)?;
                 if self.prepared_for(call)?.is_some() {
-                    use std::io::Write;
-                    use std::os::unix::fs::OpenOptionsExt;
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .mode(0o600)
-                        .open(path)?;
-                    file.write_all(&bytes)?;
-                    file.sync_all()?;
-                    std::fs::File::open(&self.artifact_dir)?.sync_all()?;
+                    crate::cache::write_file_new_atomic(path, &bytes)?;
                 } else {
                     write_file_atomic(path, &bytes)?;
                 }

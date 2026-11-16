@@ -1,0 +1,2333 @@
+schemaVersion: ledger.execution-plan.v1
+input:
+  promptTemplate: '{{ user_input }}'
+limits:
+  maxSteps: 600
+  maxReasonerCalls: 128
+  maxTokensTotal: 1000000
+  timeoutS: 7200
+  artifactMaxMb: 64
+onLimit: abort
+models:
+  coder:
+    ctx: 8192
+  reasoner:
+    ctx: 8192
+id: recovering-item
+version: 322
+entryStep: current_capture
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.list_tabs:
+      class: read
+      timeoutS: 60
+      resultArtifact: tabs
+      resultValidation:
+        maxBytes: 32768
+        schema:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              minItems: 1
+              maxItems: 1
+    e2llm.sifr_capture:
+      class: read
+      timeoutS: 60
+      resultArtifact: observation
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    e2llm.inspect:
+      class: read
+      timeoutS: 60
+      resultArtifact: element
+    e2llm.explore:
+      class: read
+      timeoutS: 60
+      resultArtifact: exploration
+    e2llm.act:
+      class: mutation
+      passthrough: true
+      timeoutS: 60
+      resultArtifact: action
+    e2llm.read_page:
+      class: read
+      timeoutS: 60
+      resultArtifact: browser-text
+    local.extract_decimal:
+      class: read
+      resultArtifact: price-extraction
+    local.calculate:
+      class: read
+      resultArtifact: calculation
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - operation
+          - left
+          - right
+          - result
+          properties:
+            format:
+              const: trollm.local.calculate.v1
+            operation:
+              enum:
+              - multiply
+              - add
+              - compare
+              - subtract
+              - divide
+            left:
+              type: string
+            right:
+              type: string
+            result:
+              type: string
+              minLength: 1
+    local.select_matching:
+      class: read
+      resultArtifact: matching-selection
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+    local.assert_equal:
+      class: read
+      resultArtifact: equality-proof
+      resultValidation:
+        maxBytes: 1024
+        schema:
+          type: object
+          required:
+          - equal
+          properties:
+            equal:
+              const: true
+          additionalProperties: false
+    local.prepare_worklist:
+      class: read
+      resultArtifact: prepared-worklist
+      resultValidation:
+        maxBytes: 49152
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required:
+          - format
+          - context
+          - items
+          properties:
+            format:
+              const: trollm.local.prepare_worklist.v1
+            context:
+              type: string
+              maxLength: 4096
+            items:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $schema: https://json-schema.org/draft/2020-12/schema
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - value
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  value:
+                    type: object
+                    required:
+                    - request
+                    - quantity
+                    properties:
+                      request:
+                        type: string
+                        minLength: 1
+                        maxLength: 2000
+                      quantity:
+                        type: string
+                        pattern: ^[1-9][0-9]{0,2}$
+    local.order_records:
+      class: read
+      resultArtifact: ordered-records
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+nodes:
+  current_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: counter_before_query
+  input_query:
+    kind: task
+    taskRef: recovering-item-input_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: input_controls
+  input_select:
+    kind: task
+    taskRef: recovering-item-input_select
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: 'Choose the shopping search text field. Do not select a browser address field. Copy
+      an actual canonical id from these original records: {{ input_controls.outputs.compact.matches }}.
+      If no unambiguous supported target exists, choose unresolved. For equals use only the top-level
+      canonical id, including any leading #. Copy the id field exactly; do not substitute attributes.id
+      or a label.'
+    routes:
+      unresolved:
+        status: paused
+        reason: The available observation does not support the next step. Review it before resuming.
+        resumeAt: current_capture
+    onVerified: input_inspect
+  input_inspect:
+    kind: task
+    taskRef: recovering-item-input_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: input_identity
+  input_identity:
+    kind: task
+    taskRef: recovering-item-input_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: paste
+  paste:
+    kind: task
+    taskRef: recovering-item-paste
+    onError:
+      retry: 0
+      then: input_reobserve
+    onVerified: input_reobserve
+  pasted_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_ancestors
+  submit_query:
+    kind: task
+    taskRef: recovering-item-submit_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_controls
+  submit_select:
+    kind: task
+    taskRef: recovering-item-submit_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_inspect
+    promptSupplement: 'Original submission candidates: {{ submit_controls.outputs.compact.matches }}. Adviser recommendation: {{ submit_advice.outputs.advice }}'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+  submit_inspect:
+    kind: task
+    taskRef: recovering-item-submit_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_identity
+  submit_identity:
+    kind: task
+    taskRef: recovering-item-submit_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_owner_capture
+  submit:
+    kind: task
+    taskRef: recovering-item-submit
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: results_capture
+  results_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: price_query
+  card:
+    kind: task
+    taskRef: recovering-item-card
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: current_prices
+  price:
+    kind: task
+    taskRef: recovering-item-price
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: current_price
+  subtotal:
+    kind: task
+    taskRef: recovering-item-subtotal
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: subtotal_known
+  sum:
+    kind: task
+    taskRef: recovering-item-sum
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: compare
+  compare:
+    kind: task
+    taskRef: recovering-item-compare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: under
+  under:
+    kind: task
+    taskRef: recovering-item-under
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: add_query
+  add_query:
+    kind: task
+    taskRef: recovering-item-add_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: native_add_controls
+  add_select:
+    kind: task
+    taskRef: recovering-item-add_select
+    onError:
+      retry: 1
+      then: repair_card
+    promptSupplement: '
+
+      Original choices: {{ add_controls.outputs.compact.matches }}
+
+      Current instruction: {{ add_target.outputs.advice }}'
+    routes:
+      unresolved: repair_card
+    onVerified: add_scroll
+  add_inspect:
+    kind: task
+    taskRef: recovering-item-add_inspect
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: add_identity
+  add_identity:
+    kind: task
+    taskRef: recovering-item-add_identity
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: add
+  add:
+    kind: task
+    taskRef: recovering-item-add
+    onError:
+      retry: 0
+      then: confirmation_attempts
+    onVerified: confirmation_attempts
+  done:
+    kind: end
+    outcome: succeeded
+  submit_controls:
+    kind: task
+    taskRef: recovering-item-submit_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_advice
+  add_controls:
+    kind: task
+    taskRef: recovering-item-add_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: add_target
+  search_ancestors:
+    kind: task
+    taskRef: recovering-item-input_reobserve
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_forms
+  search_form:
+    kind: task
+    taskRef: recovering-item-search_form
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_form_inspect
+  search_form_inspect:
+    kind: task
+    taskRef: recovering-item-search_form_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_form_identity
+  search_form_identity:
+    kind: task
+    taskRef: recovering-item-search_form_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_form_scope
+  search_form_scope:
+    kind: task
+    taskRef: recovering-item-search_form_scope
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_query
+  input_reobserve:
+    kind: task
+    taskRef: recovering-item-input_reobserve
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: input_live_query
+  input_reread:
+    kind: task
+    taskRef: recovering-item-input_reread
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified:
+      status: paused
+      reason: The fresh structured input observation did not establish the saved query. Readable evidence
+        was retained; no repeated input or search submission was dispatched.
+      resumeAt: current_capture
+  input_controls:
+    kind: task
+    taskRef: recovering-item-input_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_input_select
+  price_query:
+    kind: task
+    taskRef: recovering-item-price_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: price_order
+  price_order:
+    kind: task
+    taskRef: recovering-item-price_order
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: title_lookup_word
+  budget_cart_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_query
+  budget_cart_query:
+    kind: task
+    taskRef: recovering-item-budget_cart_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_controls
+  budget_cart_controls:
+    kind: task
+    taskRef: recovering-item-budget_cart_controls
+    onError:
+      retry: 0
+      then: budget_cart_controls_many
+    onVerified: budget_cart_advice_single
+
+  budget_cart_select:
+    kind: task
+    taskRef: recovering-item-budget_cart_select
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: 'Original navigation controls: {{ budget_cart_controls_many.outputs.compact.matches }}.'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_inspect
+  budget_cart_inspect:
+    kind: task
+    taskRef: recovering-item-budget_cart_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_identity
+  budget_cart_identity:
+    kind: task
+    taskRef: recovering-item-budget_cart_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_click
+  budget_cart_click:
+    kind: task
+    taskRef: recovering-item-budget_cart_click
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_fresh
+  budget_cart_fresh:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_labels
+  subtotal_known:
+    kind: task
+    taskRef: recovering-item-subtotal_known
+    onVerified: remaining
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+  search_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: input_query
+  price_groups:
+    kind: foreach
+    items:
+      from: price_order.outputs.data.groups
+    itemKey: index
+    bindAs: price_group
+    enumeration: snapshot
+    ordering: source
+    maxItems: 32
+    onLimit:
+      status: paused
+      reason: No supported offer was found within this candidate window.
+      resumeAt: current_capture
+    body:
+      flowRef: recovering-price-group
+      inputs:
+        price_group:
+          from: price_group
+        source_prices:
+          from: price_query.outputs.data
+        item:
+          from: item
+        worklist:
+          from: worklist
+        context:
+          from: context
+        subtotal:
+          from: subtotal_known.outputs.data.decimal
+        budget:
+          from: budget
+        tab_id:
+          from: tab_id
+        ceiling:
+          from: quantity_ceiling.outputs.data.result
+        lookup_term:
+          from: title_lookup_word.outputs.text
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: group_accept
+    onEmpty:
+      status: paused
+      reason: No supported offer was found within this candidate window.
+      resumeAt: current_capture
+    onComplete:
+      status: paused
+      reason: No supported offer was found within this candidate window.
+      resumeAt: current_capture
+  group_accept:
+    kind: task
+    taskRef: recovering-item-group_accept
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: offer_select
+  chosen_price_equal:
+    kind: task
+    taskRef: recovering-item-chosen_price_equal
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: sum
+  remaining:
+    kind: task
+    taskRef: recovering-item-remaining
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: quantity_ceiling
+  offer_select:
+    kind: task
+    taskRef: recovering-item-offer_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: card
+  count_before:
+    kind: task
+    taskRef: recovering-item-count_before
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: expected_count
+  expected_count:
+    kind: task
+    taskRef: recovering-item-expected_count
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: empty_subtotal_guard
+  add_target:
+    kind: task
+    taskRef: amazon-cart-record_action_advice
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: Choose the observed control that adds the current product to the cart (Add to cart
+      or Add to basket). Original action records {{ add_controls.outputs.compact.matches }}. Ignore comparison,
+      rating, Delete and checkout. A quantity control changes an existing cart row; it is not Add. Give
+      brief prose advice naming the exact original id, or explain why none is supported.
+    onVerified: add_select
+  search_forms:
+    kind: task
+    taskRef: recovering-item-search_forms
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_form
+  current_prices:
+    kind: task
+    taskRef: recovering-item-current_prices
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: price
+  current_price:
+    kind: task
+    taskRef: recovering-item-current_price
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: chosen_price_equal
+  add_owner_capture:
+    kind: task
+    taskRef: recovering-item-add_owner_capture
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: add_owner_query
+  add_owner_query:
+    kind: task
+    taskRef: recovering-item-add_owner_query
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: add_owner
+  add_owner:
+    kind: task
+    taskRef: recovering-item-add_owner
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: add_visible_query
+  submit_owner_capture:
+    kind: task
+    taskRef: recovering-item-submit_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_owner_query
+  submit_owner_query:
+    kind: task
+    taskRef: recovering-item-submit_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit_owner
+  submit_owner:
+    kind: task
+    taskRef: recovering-item-submit_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: submit
+  empty_subtotal_guard:
+    kind: task
+    taskRef: recovering-item-empty_subtotal_guard
+    onError:
+      retry: 0
+      then: subtotal_labels
+    onVerified: subtotal
+  counter_before_query:
+    kind: task
+    taskRef: recovering-item-counter_before_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: counter_before
+  counter_before:
+    kind: task
+    taskRef: recovering-item-counter_before
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: count_before
+  subtotal_labels:
+    kind: task
+    taskRef: recovering-item-subtotal_labels
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_label_records
+  subtotal_values:
+    kind: task
+    taskRef: recovering-item-subtotal_values
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_candidates
+  subtotal_candidates:
+    kind: task
+    taskRef: recovering-item-subtotal_candidates
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_target
+  subtotal_target:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    promptSupplement: 'Identify the current merchandise subtotal using the visible labels and their amounts in
+      this original text: {{ subtotal_context.outputs.brief.content }}. Original selectable records: {{ subtotal_candidates.outputs.compact.matches
+      }}. Name the supported original record. Shipping thresholds, amount needed for free shipping, savings and
+      unit reference prices are not merchandise subtotal. CSS class names do not establish measurement meaning.
+      If unclear, say the evidence is insufficient.'
+    onVerified: subtotal_member
+  subtotal_member:
+    kind: task
+    taskRef: recovering-item-subtotal_member
+    onError:
+      retry: 1
+      then: budget_cart_capture
+    onVerified: subtotal_source
+    routes:
+      unresolved: budget_cart_capture
+    promptSupplement: '
+
+      Original choices: {{ subtotal_candidates.outputs.selection_view.matches }}
+
+      Recommendation: {{ subtotal_target.outputs.advice }}'
+  subtotal_source:
+    kind: task
+    taskRef: recovering-item-subtotal_source
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_budget_guard
+  budget_subtotal_labels:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_labels
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_label_records
+  budget_subtotal_values:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_values
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_candidates
+  budget_subtotal_candidates:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_candidates
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_target
+  budget_subtotal_target:
+    kind: task
+    taskRef: amazon-cart-counter_anchor_target
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: 'Identify the current merchandise subtotal using the visible labels and their amounts in
+      this original text: {{ budget_subtotal_context.outputs.brief.content }}. Original selectable records: {{
+      budget_subtotal_candidates.outputs.compact.matches }}. Name the supported original record. Shipping thresholds,
+      amount needed for free shipping, savings and unit reference prices are not merchandise subtotal. CSS class
+      names do not establish measurement meaning. If unclear, say the evidence is insufficient.'
+    onVerified: budget_subtotal_member
+  budget_subtotal_member:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_member
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_source
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: '
+
+      Original choices: {{ budget_subtotal_candidates.outputs.selection_view.matches }}
+
+      Recommendation: {{ budget_subtotal_target.outputs.advice }}'
+  budget_subtotal_source:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_source
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_budget_guard
+  repair_card:
+    kind: task
+    taskRef: recovering-item-card
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_current_prices
+  repair_current_prices:
+    kind: task
+    taskRef: recovering-item-repair_current_prices
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_price
+  repair_price:
+    kind: task
+    taskRef: recovering-item-repair_price
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_current_price
+  repair_current_price:
+    kind: task
+    taskRef: recovering-item-repair_current_price
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_chosen_price_equal
+  repair_chosen_price_equal:
+    kind: task
+    taskRef: recovering-item-repair_chosen_price_equal
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_sum
+  repair_sum:
+    kind: task
+    taskRef: recovering-item-repair_sum
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_compare
+  repair_compare:
+    kind: task
+    taskRef: recovering-item-repair_compare
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_under
+  repair_under:
+    kind: task
+    taskRef: recovering-item-repair_under
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_query
+  repair_add_query:
+    kind: task
+    taskRef: recovering-item-repair_add_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add_controls
+  repair_add_controls:
+    kind: task
+    taskRef: recovering-item-repair_add_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_target
+  repair_add_target:
+    kind: task
+    taskRef: amazon-cart-record_action_advice
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    promptSupplement: Choose the observed control that adds the current product to the cart (Add to cart
+      or Add to basket). Original action records {{ repair_add_controls.outputs.compact.matches }}. Ignore
+      comparison, rating, Delete and checkout. A quantity control changes an existing cart row; it is
+      not Add. Give brief prose advice naming the exact original id, or explain why none is supported.
+    onVerified: repair_add_select
+  repair_add_select:
+    kind: task
+    taskRef: recovering-item-repair_add_select
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    promptSupplement: '
+
+      Original choices: {{ repair_add_controls.outputs.compact.matches }}
+
+      Current instruction: {{ repair_add_target.outputs.advice }}'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_scroll
+  repair_add_inspect:
+    kind: task
+    taskRef: recovering-item-repair_add_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_identity
+  repair_add_identity:
+    kind: task
+    taskRef: recovering-item-repair_add_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add
+  repair_add_owner_capture:
+    kind: task
+    taskRef: recovering-item-repair_add_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_owner_query
+  repair_add_owner_query:
+    kind: task
+    taskRef: recovering-item-repair_add_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_owner
+  repair_add_owner:
+    kind: task
+    taskRef: recovering-item-repair_add_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: repair_add_visible_query
+  repair_add:
+    kind: task
+    taskRef: recovering-item-repair_add
+    onError:
+      retry: 0
+      then: confirmation_attempts
+    onVerified: confirmation_attempts
+  confirmation_attempts:
+    kind: task
+    taskRef: recovering-item-confirmation_attempts
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: confirmation_attempts
+    onVerified: confirmations
+  confirmations:
+    kind: foreach
+    items:
+      from: confirmation_attempts.outputs.data.matches
+    itemKey: index
+    bindAs: confirmation_tick
+    enumeration: snapshot
+    ordering: source
+    maxItems: 4
+    onLimit:
+      status: paused
+      reason: The Add outcome is unconfirmed. Resume only repeats the bounded read-only confirmation,
+        never Add.
+      resumeAt: confirmation_attempts
+    body:
+      flowRef: recovering-cart-confirm
+      inputs:
+        tab_id:
+          from: tab_id
+        counter_selector:
+          from: counter_selector
+        expected_count:
+          from: expected_count
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: confirmed_record
+    onEmpty:
+      status: paused
+      reason: The Add outcome is unconfirmed. Resume only repeats the bounded read-only confirmation,
+        never Add.
+      resumeAt: confirmation_attempts
+    onComplete:
+      status: paused
+      reason: The Add outcome is unconfirmed. Resume only repeats the bounded read-only confirmation,
+        never Add.
+      resumeAt: confirmation_attempts
+  confirmed_record:
+    kind: task
+    taskRef: recovering-item-confirmed_record
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: confirmation_attempts
+    onVerified: done
+  quantity_ceiling:
+    kind: task
+    taskRef: recovering-item-quantity_ceiling
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: search_capture
+  subtotal_label_records:
+    kind: task
+    taskRef: recovering-item-subtotal_label_records
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_label_select
+  budget_subtotal_label_records:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_label_records
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_label_select
+  role_input_identity:
+    kind: task
+    taskRef: recovering-item-role_input_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_paste
+  role_input_inspect:
+    kind: task
+    taskRef: recovering-item-role_input_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_input_identity
+  role_input_reobserve:
+    kind: task
+    taskRef: recovering-item-role_input_reobserve
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_input_live_query
+  role_input_reread:
+    kind: task
+    taskRef: recovering-item-role_input_reread
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified:
+      status: paused
+      reason: The fresh structured input observation did not establish the saved query. Readable evidence
+        was retained; no repeated input or search submission was dispatched.
+      resumeAt: current_capture
+  role_input_select:
+    kind: task
+    taskRef: recovering-item-role_input_select
+    onError:
+      retry: 0
+      then: input_select
+    promptSupplement: Locate the unique observed searchbox through the bound role predicate.
+    onVerified: role_input_inspect
+  role_paste:
+    kind: task
+    taskRef: recovering-item-role_paste
+    onError:
+      retry: 0
+      then: role_input_reobserve
+    onVerified: role_input_reobserve
+  role_pasted_capture:
+    kind: task
+    taskRef: recovering-cart-confirm-after_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_ancestors
+  role_search_ancestors:
+    kind: task
+    taskRef: recovering-item-role_search_ancestors
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_forms
+  role_search_form:
+    kind: task
+    taskRef: recovering-item-role_search_form
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_form_inspect
+  role_search_form_identity:
+    kind: task
+    taskRef: recovering-item-role_search_form_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_form_scope
+  role_search_form_inspect:
+    kind: task
+    taskRef: recovering-item-role_search_form_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_form_identity
+  role_search_form_scope:
+    kind: task
+    taskRef: recovering-item-role_search_form_scope
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_query
+  role_search_forms:
+    kind: task
+    taskRef: recovering-item-role_search_forms
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_search_form
+  role_submit:
+    kind: task
+    taskRef: recovering-item-role_submit
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: results_capture
+  role_submit_controls:
+    kind: task
+    taskRef: recovering-item-role_submit_controls
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_advice
+  role_submit_identity:
+    kind: task
+    taskRef: recovering-item-role_submit_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_owner_capture
+  role_submit_inspect:
+    kind: task
+    taskRef: recovering-item-role_submit_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_identity
+  role_submit_owner:
+    kind: task
+    taskRef: recovering-item-role_submit_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit
+  role_submit_owner_capture:
+    kind: task
+    taskRef: recovering-item-role_submit_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_owner_query
+  role_submit_owner_query:
+    kind: task
+    taskRef: recovering-item-role_submit_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_owner
+  role_submit_query:
+    kind: task
+    taskRef: recovering-item-role_submit_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_controls
+  role_submit_select:
+    kind: task
+    taskRef: recovering-item-role_submit_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: role_submit_inspect
+    promptSupplement: 'Original submission candidates: {{ role_submit_controls.outputs.compact.matches }}. Adviser recommendation: {{ role_submit_advice.outputs.advice }}'
+    routes:
+      unresolved:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+  native_add_controls:
+    kind: task
+    taskRef: recovering-item-native_add_controls
+    onError:
+      retry: 0
+      then: add_controls
+    onVerified: native_add_select
+  native_add_select:
+    kind: task
+    taskRef: recovering-item-native_add_select
+    onError:
+      retry: 0
+      then: add_controls
+    promptSupplement: 'Original choices: {{ native_add_controls.outputs.compact.matches }}'
+    routes:
+      unresolved: add_controls
+    onVerified: native_add_scroll
+  native_add_inspect:
+    kind: task
+    taskRef: recovering-item-native_add_inspect
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: native_add_identity
+  native_add_identity:
+    kind: task
+    taskRef: recovering-item-native_add_identity
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: native_add
+  native_add_owner_capture:
+    kind: task
+    taskRef: recovering-item-native_add_owner_capture
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: native_add_owner_query
+  native_add_owner_query:
+    kind: task
+    taskRef: recovering-item-native_add_owner_query
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: native_add_owner
+  native_add_owner:
+    kind: task
+    taskRef: recovering-item-native_add_owner
+    onError:
+      retry: 0
+      then: repair_card
+    onVerified: native_add_visible_query
+  native_add:
+    kind: task
+    taskRef: recovering-item-native_add
+    onError:
+      retry: 0
+      then: confirmation_attempts
+    onVerified: confirmation_attempts
+  native_repair_add_controls:
+    kind: task
+    taskRef: recovering-item-native_repair_add_controls
+    onError:
+      retry: 0
+      then: repair_add_controls
+    onVerified: native_repair_add_select
+  native_repair_add_select:
+    kind: task
+    taskRef: recovering-item-native_repair_add_select
+    onError:
+      retry: 0
+      then: repair_add_controls
+    promptSupplement: 'Original choices: {{ native_repair_add_controls.outputs.compact.matches }}'
+    routes:
+      unresolved: repair_add_controls
+    onVerified: native_repair_add_scroll
+  native_repair_add_inspect:
+    kind: task
+    taskRef: recovering-item-native_repair_add_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add_identity
+  native_repair_add_identity:
+    kind: task
+    taskRef: recovering-item-native_repair_add_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add
+  native_repair_add_owner_capture:
+    kind: task
+    taskRef: recovering-item-native_repair_add_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add_owner_query
+  native_repair_add_owner_query:
+    kind: task
+    taskRef: recovering-item-native_repair_add_owner_query
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation;
+          it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add_owner
+  native_repair_add_owner:
+    kind: task
+    taskRef: recovering-item-native_repair_add_owner
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+    onVerified: native_repair_add_visible_query
+  native_repair_add:
+    kind: task
+    taskRef: recovering-item-native_repair_add
+    onError:
+      retry: 0
+      then: confirmation_attempts
+    onVerified: confirmation_attempts
+  subtotal_label_select:
+    kind: task
+    taskRef: recovering-item-subtotal_label_select
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_label_inspect
+    routes:
+      unresolved: budget_cart_capture
+    promptSupplement: 'Original subtotal label records: {{ subtotal_label_records.outputs.selection_view.matches
+      }}'
+
+  subtotal_label_inspect:
+    kind: task
+    taskRef: recovering-item-subtotal_label_inspect
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_label_identity
+
+  subtotal_label_identity:
+    kind: task
+    taskRef: recovering-item-subtotal_label_identity
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_scope
+
+  subtotal_scope:
+    kind: task
+    taskRef: recovering-item-subtotal_scope
+    onError:
+      retry: 0
+      then: budget_cart_capture
+    onVerified: subtotal_context
+  budget_subtotal_label_select:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_label_select
+    onError:
+      retry: 0
+      then: &id001
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_label_inspect
+    routes:
+      unresolved: *id001
+    promptSupplement: 'Original subtotal label records: {{ budget_subtotal_label_records.outputs.selection_view.matches
+      }}'
+
+  budget_subtotal_label_inspect:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_label_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_label_identity
+
+  budget_subtotal_label_identity:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_label_identity
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_scope
+
+  budget_subtotal_scope:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_scope
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does
+          not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_subtotal_context
+  input_live_query:
+    kind: task
+    taskRef: recovering-item-input_live_query
+    onError:
+      retry: 0
+      then: input_retry_capture
+    onVerified: input_live_member
+  input_live_member:
+    kind: task
+    taskRef: recovering-item-input_live_member
+    onError:
+      retry: 0
+      then: input_retry_capture
+    onVerified: input_live_inspect
+  input_live_inspect:
+    kind: task
+    taskRef: recovering-item-input_live_inspect
+    onError:
+      retry: 0
+      then: input_retry_capture
+    onVerified: input_live_identity
+  input_live_identity:
+    kind: task
+    taskRef: recovering-item-input_live_identity
+    onError:
+      retry: 0
+      then: input_retry_capture
+    onVerified: input_live_check
+  input_live_check:
+    kind: task
+    taskRef: recovering-item-input_live_check
+    onError:
+      retry: 0
+      then: input_retry_capture
+    onVerified: pasted_capture
+  role_input_live_query:
+    kind: task
+    taskRef: recovering-item-role_input_live_query
+    onError:
+      retry: 0
+      then: role_input_retry_capture
+    onVerified: role_input_live_member
+  role_input_live_member:
+    kind: task
+    taskRef: recovering-item-role_input_live_member
+    onError:
+      retry: 0
+      then: role_input_retry_capture
+    onVerified: role_input_live_inspect
+  role_input_live_inspect:
+    kind: task
+    taskRef: recovering-item-role_input_live_inspect
+    onError:
+      retry: 0
+      then: role_input_retry_capture
+    onVerified: role_input_live_identity
+  role_input_live_identity:
+    kind: task
+    taskRef: recovering-item-role_input_live_identity
+    onError:
+      retry: 0
+      then: role_input_retry_capture
+    onVerified: role_input_live_check
+  role_input_live_check:
+    kind: task
+    taskRef: recovering-item-role_input_live_check
+    onError:
+      retry: 0
+      then: role_input_retry_capture
+    onVerified: role_pasted_capture
+  input_retry_capture:
+    kind: task
+    taskRef: recovering-item-input_retry_capture
+    onError:
+      retry: 0
+      then: input_reread
+    onVerified: input_retry_query
+  input_retry_query:
+    kind: task
+    taskRef: recovering-item-input_retry_query
+    onError:
+      retry: 0
+      then: input_retry_reread
+    onVerified: input_retry_member
+  input_retry_member:
+    kind: task
+    taskRef: recovering-item-input_retry_member
+    onError:
+      retry: 0
+      then: input_retry_reread
+    onVerified: input_retry_inspect
+  input_retry_inspect:
+    kind: task
+    taskRef: recovering-item-input_retry_inspect
+    onError:
+      retry: 0
+      then: input_retry_reread
+    onVerified: input_retry_identity
+  input_retry_identity:
+    kind: task
+    taskRef: recovering-item-input_retry_identity
+    onError:
+      retry: 0
+      then: input_retry_reread
+    onVerified: input_retry_check
+  input_retry_check:
+    kind: task
+    taskRef: recovering-item-input_retry_check
+    onError:
+      retry: 0
+      then: input_retry_reread
+    onVerified: pasted_capture
+  input_retry_reread:
+    kind: task
+    taskRef: recovering-item-input_retry_reread
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified:
+      status: paused
+      reason: The fresh structured input observation did not establish the saved query. Readable evidence
+        was retained; no repeated input or search submission was dispatched.
+      resumeAt: current_capture
+  role_input_retry_capture:
+    kind: task
+    taskRef: recovering-item-role_input_retry_capture
+    onError:
+      retry: 0
+      then: role_input_reread
+    onVerified: role_input_retry_query
+  role_input_retry_query:
+    kind: task
+    taskRef: recovering-item-role_input_retry_query
+    onError:
+      retry: 0
+      then: role_input_retry_reread
+    onVerified: role_input_retry_member
+  role_input_retry_member:
+    kind: task
+    taskRef: recovering-item-role_input_retry_member
+    onError:
+      retry: 0
+      then: role_input_retry_reread
+    onVerified: role_input_retry_inspect
+  role_input_retry_inspect:
+    kind: task
+    taskRef: recovering-item-role_input_retry_inspect
+    onError:
+      retry: 0
+      then: role_input_retry_reread
+    onVerified: role_input_retry_identity
+  role_input_retry_identity:
+    kind: task
+    taskRef: recovering-item-role_input_retry_identity
+    onError:
+      retry: 0
+      then: role_input_retry_reread
+    onVerified: role_input_retry_check
+  role_input_retry_check:
+    kind: task
+    taskRef: recovering-item-role_input_retry_check
+    onError:
+      retry: 0
+      then: role_input_retry_reread
+    onVerified: role_pasted_capture
+  role_input_retry_reread:
+    kind: task
+    taskRef: recovering-item-role_input_retry_reread
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified:
+      status: paused
+      reason: The fresh structured input observation did not establish the saved query. Readable evidence
+        was retained; no repeated input or search submission was dispatched.
+      resumeAt: current_capture
+
+  title_lookup_word:
+    kind: task
+    taskRef: recovering-item-title_lookup_word
+    promptSupplement: 'Current item request: {{ item.value.request }}'
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: price_groups
+  subtotal_context:
+    kind: task
+    taskRef: recovering-item-subtotal_context
+    onVerified: subtotal_values
+    onError:
+      retry: 0
+      then: budget_cart_capture
+
+  subtotal_budget_guard:
+    kind: task
+    taskRef: recovering-item-subtotal_budget_guard
+    onVerified: subtotal_known
+    onError:
+      retry: 0
+      then: budget_cart_capture
+
+  budget_subtotal_context:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_context
+    onVerified: budget_subtotal_values
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: Fresh cart evidence still does not establish a merchandise subtotal below the mission budget.
+          No further item was added.
+        resumeAt: current_capture
+
+  budget_subtotal_budget_guard:
+    kind: task
+    taskRef: recovering-item-budget_subtotal_budget_guard
+    onVerified: subtotal_known
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: Fresh cart evidence still does not establish a merchandise subtotal below the mission budget.
+          No further item was added.
+        resumeAt: current_capture
+
+  add_scroll:
+    kind: task
+    taskRef: recovering-item-add_scroll
+    onVerified: add_owner_capture
+    onError:
+      retry: 0
+      then: repair_card
+  add_visible_query:
+    kind: task
+    taskRef: recovering-item-add_visible_query
+    onVerified: add_visible
+    onError:
+      retry: 0
+      then: repair_card
+  add_visible:
+    kind: task
+    taskRef: recovering-item-add_visible
+    onVerified: add_inspect
+    onError:
+      retry: 0
+      then: repair_card
+  repair_add_scroll:
+    kind: task
+    taskRef: recovering-item-repair_add_scroll
+    onVerified: repair_add_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  repair_add_visible_query:
+    kind: task
+    taskRef: recovering-item-repair_add_visible_query
+    onVerified: repair_add_visible
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  repair_add_visible:
+    kind: task
+    taskRef: recovering-item-repair_add_visible
+    onVerified: repair_add_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  native_add_scroll:
+    kind: task
+    taskRef: recovering-item-native_add_scroll
+    onVerified: native_add_owner_capture
+    onError:
+      retry: 0
+      then: repair_card
+  native_add_visible_query:
+    kind: task
+    taskRef: recovering-item-native_add_visible_query
+    onVerified: native_add_visible
+    onError:
+      retry: 0
+      then: repair_card
+  native_add_visible:
+    kind: task
+    taskRef: recovering-item-native_add_visible
+    onVerified: native_add_inspect
+    onError:
+      retry: 0
+      then: repair_card
+  native_repair_add_scroll:
+    kind: task
+    taskRef: recovering-item-native_repair_add_scroll
+    onVerified: native_repair_add_owner_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  native_repair_add_visible_query:
+    kind: task
+    taskRef: recovering-item-native_repair_add_visible_query
+    onVerified: native_repair_add_visible
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  native_repair_add_visible:
+    kind: task
+    taskRef: recovering-item-native_repair_add_visible
+    onVerified: native_repair_add_inspect
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: results_capture
+  submit_advice:
+    kind: task
+    taskRef: recovering-item-search_submit_advice
+    promptSupplement: 'Entered search query: {{ item.value.request }}. Original submission candidates: {{ submit_controls.outputs.compact.matches }}'
+    onVerified: submit_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+  role_submit_advice:
+    kind: task
+    taskRef: recovering-item-search_submit_advice
+    promptSupplement: 'Entered search query: {{ item.value.request }}. Original submission candidates: {{ role_submit_controls.outputs.compact.matches }}'
+    onVerified: role_submit_select
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it does not replay an uncertain write.
+        resumeAt: current_capture
+  budget_cart_select_single:
+    kind: task
+    taskRef: recovering-item-budget_cart_select_single
+    onError:
+      retry: 1
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    promptSupplement: 'Original navigation controls: {{ budget_cart_controls.outputs.compact.matches }}.'
+    onVerified: budget_cart_inspect_single
+
+  budget_cart_inspect_single:
+    kind: task
+    taskRef: recovering-item-budget_cart_inspect_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_identity_single
+
+  budget_cart_identity_single:
+    kind: task
+    taskRef: recovering-item-budget_cart_identity_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_click_single
+
+  budget_cart_click_single:
+    kind: task
+    taskRef: recovering-item-budget_cart_click_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_fresh
+
+  budget_cart_controls_many:
+    kind: task
+    taskRef: recovering-item-budget_cart_controls_many
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onVerified: budget_cart_select
+
+  budget_cart_advice_single:
+    kind: task
+    taskRef: amazon-cart-navigation_advice
+    promptSupplement: 'Observed control: {{ budget_cart_controls.outputs.compact.matches }}.'
+    onVerified: budget_cart_gate_single
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+
+  budget_cart_gate_single:
+    kind: task
+    taskRef: amazon-cart-fit_dispatch
+    promptSupplement: 'Adviser instruction: {{ budget_cart_advice_single.outputs.advice }}. Original control:
+      {{ budget_cart_controls.outputs.compact.matches }}.'
+    routes:
+      'yes': budget_cart_select_single
+      'no':
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+      unknown:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+    onError:
+      retry: 0
+      then:
+        status: paused
+        reason: The step could not establish its required evidence. Resume starts a fresh observation; it
+          does not replay an uncertain write.
+        resumeAt: current_capture
+
+
+exports:
+  request:
+    from: item
+  basket:
+    from: confirmed_record.outputs.data.selected.outputs.counter_after.scalar
+  offer:
+    from: offer_select.outputs.data.selected.outputs.offer_inspect.data
+  price:
+    from: current_price.outputs.data.selected.items.0
+  verification:
+    from: confirmed_record.outputs.data.selected.outputs.counter_after.scalar
+  product_headings:
+    from: offer_select.outputs.data.selected.outputs.offer_headings.data

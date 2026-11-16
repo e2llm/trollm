@@ -161,12 +161,12 @@ comparison remain necessary before claiming app-level performance.
 
 | Production path | Frequency and source-derived cost |
 | --- | --- |
-| Run screen | [RunScreen.kt](../../apps/android/app/src/main/java/com/trollm/app/ui/RunScreen.kt#L150) calls `tailEvents`, then `pollStatus`, then delays 300 ms. Each call scans the full main journal; the cursor filters returned records, not disk reads. |
-| Tail reader | [run.rs](../../crates/trollm-uniffi/src/run.rs#L1234) visits and validates every record, including the old prefix. O(B) parsing/read work per call for B journal bytes; only new returned records are retained. |
-| Status reader | [lib.rs](../../crates/trollm-uniffi/src/lib.rs#L438) always calls `last_event_seq`, another full scan. Success additionally invokes the report reconstruction scan. |
-| Foreground service | [RunService.kt](../../apps/android/app/src/main/java/com/trollm/app/RunService.kt#L60) independently calls `pollStatus`, then delays 1000 ms. This adds status scans while service observation is active. |
-| History list | [FlowListScreen.kt](../../apps/android/app/src/main/java/com/trollm/app/ui/FlowListScreen.kt#L98) reads summaries initially and refreshes active rows every two seconds. `run_summary` reads snapshot/failure metadata, not event logs or result artifacts. |
-| Cached pagination | [gateway.rs](../../crates/trollm-mcp/src/gateway.rs#L953) calls `read_page_with_size` for each selected page. [cache.rs](../../crates/trollm-mcp/src/cache.rs#L197) validates the whole JSONL collection and counts bytes in that same pass, retaining only the selected page. |
+| Run screen | [RunScreen.kt](../../apps/android/app/src/main/java/com/trollm/app/ui/RunScreen.kt) calls `tailEvents`, then `pollStatus`, then delays 300 ms. Each call scans the full main journal; the cursor filters returned records, not disk reads. |
+| Tail reader | [run.rs](../../crates/trollm-uniffi/src/run.rs) visits and validates every record, including the old prefix. O(B) parsing/read work per call for B journal bytes; only new returned records are retained. |
+| Status reader | [lib.rs](../../crates/trollm-uniffi/src/lib.rs) always calls `last_event_seq`, another full scan. Success additionally invokes the report reconstruction scan. |
+| Foreground service | [RunService.kt](../../apps/android/app/src/main/java/com/trollm/app/RunService.kt) independently calls `pollStatus`, then delays 1000 ms. This adds status scans while service observation is active. |
+| History list | [FlowListScreen.kt](../../apps/android/app/src/main/java/com/trollm/app/ui/FlowListScreen.kt) reads summaries initially and refreshes active rows every two seconds. `run_summary` reads snapshot/failure metadata, not event logs or result artifacts. |
+| Cached pagination | [gateway.rs](../../crates/trollm-mcp/src/gateway.rs) calls `read_page_with_size` for each selected page. [cache.rs](../../crates/trollm-mcp/src/cache.rs) validates the whole JSONL collection and counts bytes in that same pass, retaining only the selected page. |
 
 The screen therefore performs at least two full main-journal scans per successful
 poll iteration. Its theoretical maximum cadence is about 3.3 iterations/second;
@@ -211,14 +211,14 @@ characters, HTTP wire bytes, memory use or tokens.
 | Event `ts` | Wall-clock event timestamp. Useful for a timeline; not a monotonic duration or a reliable additive phase timer. |
 
 Contracts and implementation:
-[size semantics](../ARCHITECTURE-ANDROID.md#L1095),
-[proxy event fields](../../crates/trollm-mcp/src/events.rs#L10),
-[gateway boundary counting](../../crates/trollm-mcp/src/gateway.rs#L610),
-[core result accounting](../../crates/trollm-core/src/exec.rs#L1672),
-[binding accounting](../../crates/trollm-core/src/exec.rs#L2188),
-[model diagnostic fields](../../crates/trollm-models/src/lib.rs#L57),
-[lazy loading](../../crates/trollm-uniffi/src/run.rs#L700), and
-[native phases](../../crates/trollm-models/src/llama.rs#L130).
+[size semantics](../ARCHITECTURE-ANDROID.md),
+[proxy event fields](../../crates/trollm-mcp/src/events.rs),
+[gateway boundary counting](../../crates/trollm-mcp/src/gateway.rs),
+[core result accounting](../../crates/trollm-core/src/exec.rs),
+[binding accounting](../../crates/trollm-core/src/exec.rs),
+[model diagnostic fields](../../crates/trollm-models/src/lib.rs),
+[lazy loading](../../crates/trollm-uniffi/src/run.rs), and
+[native phases](../../crates/trollm-models/src/llama.rs).
 
 Null or absent means unknown, unentered or unmeasured according to the field's
 contract. Zero means an actual zero-sized representation or a measured
@@ -346,10 +346,10 @@ trust change, native-model benchmark or phone action is part of these checks.
 
 ## Accounting costs that are not journal scans
 
-[EventLog](../../crates/trollm-core/src/events.rs#L77) retains sequence and byte
+[EventLog](../../crates/trollm-core/src/events.rs) retains sequence and byte
 counts in memory, serializes one new event and flushes before returning. It
 validates history on opening. The
-[proxy writer](../../crates/trollm-uniffi/src/run.rs#L460) likewise validates its
+[proxy writer](../../crates/trollm-uniffi/src/run.rs) likewise validates its
 history on opening and subsequently maintains sequence in its writer closure.
 These append paths do not reread the journal for each size number.
 
@@ -362,15 +362,15 @@ semantics permit it.
 Core reads returned artifacts to hash, account and journal them, then output
 verification reads artifact bindings. Registry outputs and node overrides can
 read the same file again; multiple bindings can also reference one artifact.
-See [artifact accounting](../../crates/trollm-core/src/exec.rs#L1722) and
-[binding verification](../../crates/trollm-core/src/exec.rs#L2166). These reads
+See [artifact accounting](../../crates/trollm-core/src/exec.rs) and
+[binding verification](../../crates/trollm-core/src/exec.rs). These reads
 perform evidence/verification work as well as size accounting. Reuse must be
 scoped to an unchanged artifact generation and preserve original evidence.
 
 Test-only `EventLog::read_all` uses are not production telemetry paths.
-[check_native_probe.py](../../scripts/android/check_native_probe.py#L120) reads
+[check_native_probe.py](../../scripts/android/check_native_probe.py) reads
 selected run files for an explicitly invoked diagnostic;
-[flow_smoke.py](../../scripts/android/flow_smoke.py#L225) rereads a fixture log
+[flow_smoke.py](../../scripts/android/flow_smoke.py) rereads a fixture log
 during smoke checks. Neither establishes app polling behavior or device cost.
 
 ## Missing measurements and correlation
@@ -397,7 +397,7 @@ transport/cache/schema/shaping phases. Prompt bytes and actual input tokens
 answer different questions. Track any processed-prefill token counter separately
 from full prompt tokens. Failure paths need timing without inventing a successful
 tool result. Snapshot writes currently serialize the entire state
-([exec.rs](../../crates/trollm-core/src/exec.rs#L697)); measure before redesigning.
+([exec.rs](../../crates/trollm-core/src/exec.rs)); measure before redesigning.
 
 ## Staged work and remaining gates
 
@@ -447,7 +447,7 @@ The original sequence below remains the roadmap for later measurement and reuse.
   sub-millisecond zero, partial prefill, timeout and model/gateway failures.
 - Retain strict API tests for corrupt old prefixes, partial appends, oversized
   records/logs, future cursors, truncation and replacement. Existing
-  [tail tests](../../crates/trollm-uniffi/src/run.rs#L1420) explicitly validate
+  [tail tests](../../crates/trollm-uniffi/src/run.rs) explicitly validate
   the old prefix. Live projection behavior must be documented separately.
 - Exercise cached-page scaling and unchanged integrity/error behavior. Count
   actual collection reads; test replacement/incomplete generations and byte
@@ -458,7 +458,7 @@ The original sequence below remains the roadmap for later measurement and reuse.
 - Keep raw prompts, model/tool content, call identities, argument hashes, paths,
   endpoints and device/run identities private. Export aggregate numeric offline
   summaries without raw identifiers or automatic uploads, consistent with
-  [enterprise security](../SECURITY-ENTERPRISE.md#L43).
+  [enterprise security](../SECURITY-ENTERPRISE.md).
 
 Scripted/stub tests establish measurement wiring and scaling properties. Native
 host tests can establish phase boundaries. Representative phone measurements

@@ -7,6 +7,7 @@ and size boundaries overlap: this tool never adds different boundaries together.
 This is an observer, not a recovery validator or execution authority.
 """
 import argparse
+import hashlib
 import json
 import sys
 
@@ -23,6 +24,20 @@ SIZE_STAGES = (
     "raw_payload", "raw_page", "raw_error_payload", "complete_collection",
     "selected_page", "gateway_result", "failed_result",
 )
+PUBLIC_PHASE_MARKERS = {
+    f"[redacted utf8Bytes={len(value)} sha256={hashlib.sha256(value.encode()).hexdigest()}]": value
+    for value in ("attempt", "tool_call")
+}
+
+
+def phase(event):
+    """Recognize only public runtime phase constants in historical redactions.
+
+    This does not recover page content, model prose or arbitrary private values.
+    The archived bytes and all measured numbers remain unchanged.
+    """
+    value = event.get("phase")
+    return PUBLIC_PHASE_MARKERS.get(value, value) if isinstance(value, str) else value
 
 
 def integer(value):
@@ -96,7 +111,7 @@ def summarize(streams):
             attempt = context_key(event.get("attemptContext"))
             if attempt:
                 attempts.add(attempt)
-            if (ty == "node_exited" and event.get("phase") == "attempt") or (
+            if (ty == "node_exited" and phase(event) == "attempt") or (
                     ty in ("run_ended", "paused") and isinstance(event.get("measurement"), dict)):
                 if attempt is None:
                     counts["unknownAttemptIdentity"] += 1
@@ -138,7 +153,7 @@ def summarize(streams):
                     counts["unknownToolIntentIdentity"] += 1
                 else:
                     intents.add(call)
-            elif ty == "tool_call_result" or (ty == "error" and event.get("phase") == "tool_call"):
+            elif ty == "tool_call_result" or (ty == "error" and phase(event) == "tool_call"):
                 call = context_key(event.get("callContext"), call=True)
                 if call is None:
                     counts["unknownToolIdentity"] += 1

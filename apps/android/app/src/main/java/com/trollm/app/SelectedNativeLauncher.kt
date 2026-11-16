@@ -9,7 +9,10 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import uniffi.trollm_uniffi.TrollmException
 
 /** Private debug installation channel. Intents carry only a request-file hash.
@@ -28,7 +31,11 @@ internal object SelectedNativeLauncher {
     }
     const val ACTION = "com.trollm.app.PRIVATE_SELECTED_REQUEST"
     const val EXTRA = "requestSha256"
-    private val executor = Executors.newSingleThreadExecutor()
+    internal fun requestExecutor() = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(8),
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+    private val executor = requestExecutor()
     private val handles = mutableMapOf<String, SelectedNativeRun>()
     private val hashPattern = Regex("[a-f0-9]{64}")
 
@@ -39,7 +46,11 @@ internal object SelectedNativeLauncher {
         if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
             key == null || !hashPattern.matches(key)) return
         val app = context.applicationContext
-        executor.execute { process(app, key) }
+        try {
+            executor.execute { process(app, key) }
+        } catch (_: RejectedExecutionException) {
+            // No claim is created for a request that never enters the queue.
+        }
     }
 
     private fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")
@@ -107,17 +118,24 @@ internal object SelectedNativeLauncher {
         if (!OsConstants.S_ISDIR(parent.st_mode) || parent.st_uid != android.os.Process.myUid() ||
             parent.st_mode and 0x3f != 0 ||
             directory.canonicalFile != File(context.filesDir.canonicalFile, "trollm/selected-launcher")) return
+        // An arbitrary intent hash must not create files. Only a private,
+        // hash-matched, structurally valid request can reserve a claim.
+        val request = try {
+            val bytes = privateBytes(File(directory, "$key.request.json"), 262144)
+            require(sha(bytes) == key)
+            JSONObject(bytes.toString(Charsets.UTF_8)).also {
+                validateRequest(it, BuildConfig.SOURCE_REVISION)
+            }
+        } catch (_: Exception) {
+            return
+        }
         val claim = File(directory, "$key.claim")
         // Duplicate intents cannot start again, including after a process crash.
         try { writeNew(claim, byteArrayOf(1)) } catch (_: Exception) { return }
         var run: SelectedNativeRun? = null
-        var stage = "read-request"
+        var stage = "installed-apk"
         val result = try {
-            val bytes = privateBytes(File(directory, "$key.request.json"), 262144)
-            require(sha(bytes) == key)
-            val request = JSONObject(bytes.toString(Charsets.UTF_8))
-            val operation = validateRequest(request, BuildConfig.SOURCE_REVISION)
-            stage = "installed-apk"
+            val operation = request.getString("operation")
             val expectedApk = request.getString("apkSha256")
             require(hashPattern.matches(expectedApk))
             // Refuse split APKs in this bounded profile. Hash actual installed bytes.

@@ -1,0 +1,16 @@
+{
+  "run": "abec4388-db0b-4276-8f55-6e91373cda09",
+  "elapsedSeconds": 15626.1,
+  "seq": 4218,
+  "node": "done",
+  "modelCalls": {
+    "coder": 550,
+    "reasoner": 28
+  },
+  "toolResults": 533,
+  "status": "succeeded",
+  "lastError": {
+    "node": "write_route",
+    "class": "verification-failed"
+  }
+}

@@ -1,0 +1,107 @@
+schemaVersion: ledger.execution-plan.v1
+id: recovering-cart-heading-source
+version: 322
+input:
+  promptTemplate: '{{ user_input }}'
+models:
+  coder:
+    ctx: 8192
+limits:
+  maxSteps: 32
+  maxReasonerCalls: 0
+  maxTokensTotal: 131072
+  timeoutS: 3600
+  artifactMaxMb: 16
+onLimit: abort
+entryStep: titles
+mcp:
+  servers:
+  - name: e2llm
+    url: https://mcp.e2llm.com/mcp
+  policies:
+    e2llm.query:
+      class: read
+      timeoutS: 60
+      cache:
+        ttlS: 0
+        key: []
+      paginate:
+        param: cursor
+        deliver: first_page
+        backgroundFetch: all
+        responseCursor: /pagination/cursor
+        responseHasMore: /pagination/hasMore
+    local.filter_records:
+      class: read
+      resultArtifact: filtered-records
+    local.select_unique:
+      class: read
+      resultArtifact: unique-selection
+      resultValidation:
+        maxBytes: 262144
+        schema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          title: local.select_unique v1 result
+          type: object
+          additionalProperties: false
+          required:
+          - selected
+          - index
+          - sourceSha256
+          properties:
+            selected:
+              type: object
+            index:
+              type: integer
+              minimum: 0
+            sourceSha256:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+nodes:
+  titles:
+    kind: task
+    taskRef: recovering-cart-quantity-titles
+    onVerified: heading_reviews
+    onError:
+      retry: 0
+      then: next
+  heading_reviews:
+    kind: foreach
+    items:
+      from: tiers
+    itemKey: index
+    bindAs: identity_tier
+    enumeration: snapshot
+    ordering: source
+    maxItems: 2
+    onLimit: next
+    body:
+      flowRef: recovering-cart-heading
+      inputs:
+        records:
+          from: titles.outputs.data
+        needle:
+          from: source_heading.text
+        predicate:
+          from: identity_tier.selected.schema
+    outputs:
+      full:
+        collect: body.outputs
+        indexBy: itemKey
+    onItemOutcome:
+      succeeded: heading_review_select
+    onEmpty: next
+    onComplete: next
+  heading_review_select:
+    kind: task
+    taskRef: recovering-cart-quantity-heading_review_select
+    onVerified: matched
+    onError:
+      retry: 0
+      then: next
+  matched:
+    kind: end
+    outcome: succeeded
+  next:
+    kind: end
+    outcome: skipped

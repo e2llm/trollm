@@ -154,7 +154,7 @@ indices retained in the private mapping. Completed native child records are
 `outcome-unknown`; untouched items remain `not-started`. A scalar run has no
 invented collection items. The source wire outcome remains `unknown` because
 this slice has no independent business predicate; the private observation
-retains the actual native succeeded/failed status and counters. More than128
+retains the actual native succeeded/failed status and counters. More than 128
 items or unavailable nested cursor joins refuse without truncation. Receipt
 acceptance does not settle UNKNOWN or extend execution authority.
 

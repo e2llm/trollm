@@ -2,7 +2,8 @@
 
 The Kotlin/Compose app uses the Rust runtime through UniFFI. This is a developer
 prototype targeting Android 13/API 33+, with S21-class hardware or newer as the
-phone target. No ready consumer APK is provided here.
+phone target. [Version 1.0.0](https://github.com/e2llm/trollm/releases/tag/v1.0.0)
+provides a native APK; see the [installation guide](../../docs/INSTALL-ANDROID.md).
 
 The included app has flow installation, run history, foreground run ownership
 and execution controls. Source includes verified model downloads and a browser
@@ -53,10 +54,10 @@ and reuses the browser starter's pinned models. It performs no browser or purcha
 actions. Arithmetic is exact for the selected operands; selection and advice are
 model work. Its scripted tests do not establish native-device acceptance.
 
-Current source prepares **0.1.0-rc.8 / Android code 43**. It adds prepared-list
-tools, explicit child returns, bounded live observation and correlated timing.
-Host checks use scripted dependencies; this build needs separate native CI and
-real-model device acceptance.
+Current release metadata is **1.0.0 / Android code 70**. Source includes prepared-list
+tools, explicit child returns, bounded observations and correlated timing.
+Host checks use scripted dependencies. The [recorded v342 runs](../../examples/run-342/README.md)
+used an earlier APK and remain separate observations.
 
 Edit starters under `flows/starters/`, update their setup pins if needed, and run
 `python3 scripts/android/make_starter_bundles.py` from the repository root. The
@@ -83,8 +84,8 @@ controls, recovery and page guards on their respective builds.
 Actual OAuth refresh, ordinary download transfer/recovery, Doze-specific behavior
 and physical-phone acceptance remain open. Downloads are blocked by Android
 validated-network connectivity. Emulator results do not establish phone
-performance or arbitrary-page accuracy. No ready consumer APK/public release is
-provided; see [versioning](../../docs/VERSIONING.md).
+performance or arbitrary-page accuracy. See [versioning](../../docs/VERSIONING.md)
+for the identity of each release.
 
 ## On-device data layout
 
@@ -229,13 +230,25 @@ export TROLLM_RELEASE_KEY_PASSWORD="$TROLLM_RELEASE_STORE_PASSWORD"
 The example uses the same key/store password; set `TROLLM_RELEASE_KEY_PASSWORD`
 separately if your keystore uses a different key password. Back up the key
 securely and keep its identity for future updates. A build signed by your own
-key cannot update an installation signed by another publisher. From
+key cannot update an installation signed by another publisher. Set
+`ANDROID_NDK_HOME` to the installed NDK 27.2.12479018 directory. From
 `apps/android/`, with these variables set:
 
 ```sh
 ./gradlew --no-daemon --max-workers=2 -Ptrollm.rustFeatures=llama \
+  -Ptrollm.androidBuildType=release --init-script ../../scripts/android-sbom.gradle \
+  :app:exportAndroidSbom :app:exportAndroidNotices
+python3 ../../scripts/android/make_apk_notices.py \
+  --android-inventory app/build/reports/android-notices.json \
+  --ndk "$ANDROID_NDK_HOME" --backend llama \
+  --output app/build/generated/third-party-notices/assets
+./gradlew --no-daemon --max-workers=2 -Ptrollm.rustFeatures=llama \
   -Ptrollm.androidBuildType=release \
   :app:testReleaseUnitTest :app:assembleRelease :app:lintRelease
+cp app/build/generated/third-party-notices/assets/THIRD_PARTY_NOTICES.txt \
+  app/build/outputs/apk/release/THIRD_PARTY_NOTICES.txt
+cp app/build/generated/third-party-notices/assets/third-party-manifest.json \
+  app/build/outputs/apk/release/third-party-manifest.json
 ```
 
 After building, clear the passwords from your shell:
@@ -247,8 +260,13 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`0.1.0-rc.8` (code `43`), read from the root Cargo manifest through
-`cargo metadata --no-deps --offline --locked`. This is a build recipe; physical-phone acceptance and public APK delivery remain unfinished.
+`1.0.0` (code `70`), read from the root Cargo manifest through
+`cargo metadata --no-deps --offline --locked`. The generated notices are included in the
+APK and copied beside it after assembly, which recreates the APK output directory.
+The collector follows bounded parent-POM chains for
+inherited Maven licenses and records the declaring POM's coordinates. If using
+`trollm.buildRoot`, adjust the generated-asset and report paths accordingly.
+Build checks and the historical phone observations retain their separate scopes.
 
 Run only flows from authors you trust. Bundles are not publisher signed and
 can request remote tool calls that read, send or change data using granted

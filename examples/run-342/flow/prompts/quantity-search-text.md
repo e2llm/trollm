@@ -1,0 +1,1 @@
+Copy the quantity control action wording from the current advice as one plain search phrase. Do not include an ID, quotes, explanation or new facts. If the advice identifies no supported control, describe that missing evidence briefly.
