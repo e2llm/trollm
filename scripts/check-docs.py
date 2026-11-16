@@ -9,7 +9,7 @@ paths = set(root.glob('*.md'))
 for directory in ('docs', 'examples/run-342', 'ci/public-mirror/overlays'):
     paths.update((root / directory).rglob('*.md'))
 paths.update((root / 'apps').glob('*/README.md'))
-joined = re.compile(r'\b(?:at|to|than|most|existing|whose|remains|mode)\d{2,}')
+joined = re.compile(r'\b(?:at|to|than|most|existing|whose|remains|mode|code)\d{2,}')
 errors = []
 for path in sorted(paths):
     text = path.read_text(encoding='utf-8')

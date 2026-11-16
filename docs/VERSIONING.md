@@ -7,7 +7,10 @@ crates inherit it with `version.workspace = true`. Android uses that value as
 `cargo metadata --no-deps --offline --locked`; Android configuration needs no
 Python version parser.
 
-The current release is **1.0.0 / Android code 70**. It includes the reviewed
+The current release is **1.0.1 / Android code 71**. It adds node-ID and artifact
+filename validation to keep snapshots within their artifact directory, plus
+launch documentation corrections. The original **1.0.0 / Android code 70**
+release, APK and tags remain unchanged. Both include the earlier reviewed
 runtime and launcher fixes, curated v342 run evidence and a native Android APK.
 The historical v342 runs used APK68 / 0.1.0-rc.24; their observations remain tied
 to those recorded bytes. Source-only updates do not allocate a new APK identity.
@@ -22,8 +25,9 @@ Keep the signing identity for ordinary Android updates. Record the source commit
 APK checksum, package/version and signing certificate with the distributed build;
 a version label alone does not identify its bytes or acceptance evidence.
 
-The product version selected for this release is `v1.0.0`; compatible fixes advance
-to `v1.0.1` and the next feature release to `v1.1.0`. Never move a published release
+The product version selected for this patch release is `v1.0.1`; subsequent
+compatible fixes advance the patch version and the next feature release is
+`v1.1.0`. Use annotated tags for new releases. Never move a published release
 tag or replace its APK with different bytes. Prepare another version instead.
 
 To prepare a candidate, edit the two root manifest values and refresh the local

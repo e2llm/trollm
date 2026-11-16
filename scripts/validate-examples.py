@@ -96,7 +96,8 @@ for root_flow, registry_path in references:
                 completion = task.get("completion", "model-prose")
                 routing = completion in ("flow-route", "tool-or-route")
                 if routing != ("routes" in node) or (("onVerified" in node) != (completion != "flow-route")):
-                    raise ValueError(f"{flow_id}: routes require flow-route completion")
+                    raise ValueError(f"{flow_id}: flow-route requires routes without onVerified; "
+                                     "tool-or-route requires both; other completions require onVerified without routes")
                 if routing and (task["model"] != "coder" or "flow.choose" not in task.get("tools", [])):
                     raise ValueError(f"{flow_id}: routing requires coder and flow.choose")
                 if len(node.get("promptSupplement", "").encode("utf-8")) > 16 * 1024:

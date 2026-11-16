@@ -100,6 +100,12 @@ fn validate_one(plan: &ExecutionPlan, problems: &mut Vec<String>) {
     }
 
     for (name, node) in &plan.nodes {
+        if !valid_node_id(name) {
+            problems.push(format!(
+                "{}: node ID must contain 1 through 128 ASCII letters, digits, underscores or hyphens",
+                at(name)
+            ));
+        }
         if let Some(policy) = &node.on_error {
             if policy.backoff_s > MAX_ON_ERROR_BACKOFF_S {
                 problems.push(format!(
@@ -522,7 +528,7 @@ fn check_plan_against_registry(
                 | crate::registry::TaskCompletion::ToolOrRoute
         ) && matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.values().any(|o| matches!(o, NodeOutputBinding::FromModel { .. })))
         {
-            problems.push(format!("plan '{}' node '{name}': tool-result/flow-route completion cannot bind model outputs", plan.id));
+            problems.push(format!("plan '{}' node '{name}': tool-result, flow-route and tool-or-route completion cannot bind model outputs", plan.id));
         }
         let exits_valid = match task.completion {
             crate::registry::TaskCompletion::ToolOrRoute => {
@@ -534,7 +540,7 @@ fn check_plan_against_registry(
             _ => node.routes.is_none() && node.on_verified.is_some(),
         };
         if !exits_valid {
-            problems.push(format!("plan '{}' node '{name}': flow-route requires routes, other completions require onVerified", plan.id));
+            problems.push(format!("plan '{}' node '{name}': flow-route requires routes without onVerified; tool-or-route requires both; other completions require onVerified without routes", plan.id));
         }
         if !plan.models.contains_key(&task.model) {
             problems.push(format!(

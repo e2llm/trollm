@@ -82,9 +82,8 @@ inferred from a local storage operation.
 
 The machine source batch is not yet qualified on an APK, actual issuer/API or
 device. Declared/JVM controls, source review and historical interactive results
-must retain their separate scopes. Its passive-report source dependency is the
-explicitly held MR54/7285 branch; preparing it does not release that merge or its
-temporary CI-selector action.
+must retain their separate scopes. Source preparation does not establish
+deployment or acceptance of the passive-report integration.
 
 ## Source and report custody
 
@@ -276,8 +275,8 @@ installation and stopped-worker completion still require the coherent profile jo
 pending observer acknowledgement before the native send. Source-only preparation
 and focused controls do not qualify a collection runtime or any model workload.
 
-The private outcome transport consumes the closed RPA ACK checkpoint
-`364c121910491f6f1c598bc5957993d97dd1a128` at its literal scope. Within the same
+The private outcome transport consumes the closed RPA acknowledgement contract.
+Within the same
 adapter lifetime and original cutoff it retains received HTTP request bytes and
 returned ACK bytes, repeats that exact ACK only for identical received bytes,
 and fences conflicts. This is separate from RPA-generated JSON.stringify evidence.
@@ -367,8 +366,10 @@ predicate, navigation observer or full workload acceptance. Production native
 clock/current-authority and selected worker installation remain unfinished.
 
 
-The native kernel reader vendors the exact RPA source/header from
-`1f5f4a603f557195d43aee7ddd5bbc2a8815ac6b`, with raw hashes in its source manifest.
+The native kernel reader vendors an exact RPA source/header pair. Its
+[source manifest](../crates/trollm-mcp/vendor/rpa-kernel-clock/source.json)
+records the private upstream revision and raw file hashes; the
+[notice](../crates/trollm-mcp/vendor/rpa-kernel-clock/NOTICE) records the licensing grant.
 The Cargo build compiles that unchanged C source with
 MORAY_KERNEL_CLOCK_NO_MAIN and no syscall override. Both C and Rust assert the
 fixed-width 32-byte ABI and every field offset using the actual target compiler.

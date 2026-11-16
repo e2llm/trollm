@@ -1,11 +1,13 @@
 # Generalizing the Amazon demonstrator
 
-Status: **source implemented; host validation passed**, 2026-10-25.
-The current source is flow105 / `0.1.0-rc.8` / Android code43. Generic
-capabilities and the count-independent package are implemented; CI/security
-gates and the native APK are pending. The comparison baseline is flow104 /
-Android code42 at `239e7e6`. See [the checkpoint](IMPLEMENTATION.md#current-implementation-checkpoint).
-Phone acceptance is separate.
+These design and implementation records began with flow105 / `0.1.0-rc.8` /
+Android code 43 on 2026-10-25. The comparison baseline was flow104 / Android
+code 42 at `239e7e6`, which lives in private development history, not the curated
+GitHub history. See [the historical checkpoint](IMPLEMENTATION.md#historical-implementation-checkpoint).
+Current release identity and APK downloads are in [versioning](../VERSIONING.md)
+and [Android installation](../INSTALL-ANDROID.md). The later
+[v342 phone examples](../../examples/run-342/README.md) retain their own flow,
+APK and model identities; they do not establish general workflow reliability.
 
 The maintainer clarified the scope: this is a **technological demonstrator** of
 trollm executing complex authored procedures, not a complete shopping product.

@@ -1,7 +1,10 @@
 # Explicit child returns and retained evidence
 
-Status: implemented in flow105 / `0.1.0-rc.8` / Android code43 source.
-Host unit/integration checks pass; CI/native APK and phone acceptance are pending.
+Implemented contract, first delivered in flow105 / `0.1.0-rc.8` / Android code 43
+source. Current release identity and build evidence are linked from
+[versioning](../VERSIONING.md) and [Android installation](../INSTALL-ANDROID.md).
+The [later v342 phone examples](../../examples/run-342/README.md) describe their
+own tested inputs and builds; they are not acceptance of every use of this contract.
 
 Implemented optional syntax:
 

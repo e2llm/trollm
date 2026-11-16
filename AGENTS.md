@@ -9,7 +9,7 @@ input, and follows its progress. Tools run locally or through remote MCP
 
 The design breaks a larger job into short model tasks. Ordinary code handles
 exact computation, saved data, allowed transitions and execution limits. This is
-an Android 13/API 33+ integration prototype. [README.md](README.md) records
+an experimental Android 13/API 33+ app with signed APK releases. [README.md](README.md) records
 current capabilities and acceptance gaps.
 
 ## The three roles
@@ -211,7 +211,8 @@ CI polling loops.
 This file applies to both. Public source has curated history and fewer operator
 files. Use local `CONTRIBUTING.md` for the contribution destination and any export
 manifest/overlays present here. Portable checks need no omitted private tooling;
-source publication does not publish APKs.
+the source export and signed APK release are separate publication steps. See
+[Android installation](docs/INSTALL-ANDROID.md) for release downloads and verification.
 
 Remote tools can transmit data and require connectivity. Keep credentials,
 private endpoints, device details, caches and unsanitized diagnostics out of Git

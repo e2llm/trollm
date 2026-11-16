@@ -25,6 +25,75 @@ fn registry_value() -> Value {
 }
 
 #[test]
+fn node_ids_are_portable_in_root_and_child_plans() {
+    for name in [
+        "",
+        ".",
+        "..",
+        "./../escaped",
+        "a/b",
+        "a\\b",
+        "C:drive",
+        "a.b",
+        "space name",
+        "line\n",
+        "é",
+        &"n".repeat(129),
+    ] {
+        let mut value = plan_value();
+        value["nodes"][name] = json!({"kind": "end", "outcome": "failed"});
+        let mut plan = ExecutionPlan::from_yaml_str(&value.to_string()).unwrap();
+        let error = trollm_core::validate::validate_plan(&plan).unwrap_err();
+        assert!(
+            error.to_string().contains("node ID must contain"),
+            "{name:?}: {error}"
+        );
+        plan.id = "child".into();
+        let mut root = ExecutionPlan::from_yaml_str(&plan_value().to_string()).unwrap();
+        root.subflows.insert("child".into(), plan);
+        let error = trollm_core::validate::validate_plan(&root).unwrap_err();
+        assert!(error.to_string().contains("plan 'child'"), "{error}");
+    }
+    for name in ["n", "9_A-z", &"n".repeat(128)] {
+        let mut value = plan_value();
+        value["nodes"][name] = json!({"kind": "end", "outcome": "failed"});
+        let plan = ExecutionPlan::from_yaml_str(&value.to_string()).unwrap();
+        trollm_core::validate::validate_plan(&plan).unwrap();
+    }
+}
+
+#[test]
+fn executor_rejects_programmatic_unsafe_node_before_creating_run() {
+    let mut plan: ExecutionPlan = serde_json::from_value(plan_value()).unwrap();
+    let node = plan.nodes.remove("work").unwrap();
+    plan.entry_step = "./../escaped".into();
+    plan.nodes.insert(plan.entry_step.clone(), node);
+    let registry: TaskRegistry = serde_json::from_value(registry_value()).unwrap();
+    let base = common::tmp_dir("unsafe-node-integrity");
+    let run = RunDir::under(&base);
+    let run_path = run.path().to_owned();
+    let error = Executor::new(
+        plan,
+        registry,
+        String::new(),
+        SlotMap::<trollm_models::MockModel>::new(),
+        common::ScriptGateway::new(run.artifacts_dir()),
+        run,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.to_string().contains("node ID must contain"),
+        "{error}"
+    );
+    assert!(
+        !run_path.exists(),
+        "invalid plans must fail before run creation"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn plan_boundaries_reject_unknown_keys_with_context() {
     for (path, extra) in [
         ("", json!({"unrecognized": true})),

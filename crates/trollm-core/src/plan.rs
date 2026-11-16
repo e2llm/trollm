@@ -11,6 +11,16 @@ pub const EXECUTION_PLAN_SCHEMA: &str = "ledger.execution-plan.v1";
 /// Maximum authored delay for each onError retry in the interactive app.
 pub const MAX_ON_ERROR_BACKOFF_S: u64 = 300;
 
+/// Node IDs also form part of snapshot filenames. Keep them portable and leave
+/// room for the content hash and suffix within a filesystem component.
+pub(crate) fn valid_node_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionPlan {

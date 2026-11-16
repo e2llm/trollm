@@ -2,7 +2,7 @@
 
 The Kotlin/Compose app uses the Rust runtime through UniFFI. This is a developer
 prototype targeting Android 13/API 33+, with S21-class hardware or newer as the
-phone target. [Version 1.0.0](https://github.com/e2llm/trollm/releases/tag/v1.0.0)
+phone target. [Version 1.0.1](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
 provides a native APK; see the [installation guide](../../docs/INSTALL-ANDROID.md).
 
 The included app has flow installation, run history, foreground run ownership
@@ -54,7 +54,7 @@ and reuses the browser starter's pinned models. It performs no browser or purcha
 actions. Arithmetic is exact for the selected operands; selection and advice are
 model work. Its scripted tests do not establish native-device acceptance.
 
-Current release metadata is **1.0.0 / Android code 70**. Source includes prepared-list
+Current release metadata is **1.0.1 / Android code 71**. Source includes prepared-list
 tools, explicit child returns, bounded observations and correlated timing.
 Host checks use scripted dependencies. The [recorded v342 runs](../../examples/run-342/README.md)
 used an earlier APK and remain separate observations.
@@ -260,7 +260,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`1.0.0` (code `70`), read from the root Cargo manifest through
+`1.0.1` (code `71`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. The generated notices are included in the
 APK and copied beside it after assembly, which recreates the APK output directory.
 The collector follows bounded parent-POM chains for

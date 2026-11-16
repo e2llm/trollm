@@ -51,7 +51,8 @@ Use the [reading tracks](docs/README.md) to choose preparation for your task.
 the [architecture](docs/ARCHITECTURE-ANDROID.md), schemas and readers describe
 the affected runtime contract and implementation qualifications.
 
-The Android app is an integration prototype. [Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md)
+The Android app is experimental and distributed as signed APK releases.
+[Flow contract direction](docs/FLOW-CONTRACT-DIRECTION.md)
 and the proposed pack in the [authoring guide](docs/FLOW-AUTHORING.md) do not
 replace the current format; the guide's task-design and testing method can be
 used today. Follow [versioning](docs/VERSIONING.md) for the shared Rust/Android
@@ -136,9 +137,18 @@ For schemas, versions, the Gradle wrapper and Android helpers, use Python 3.11+:
 python3 -m pip install -r scripts/requirements.txt
 python3 scripts/release_version.py --check
 python3 scripts/validate-examples.py
+python3 scripts/check-docs.py
+python3 scripts/check-run-examples.py
+python3 -m unittest discover -s scripts -p 'test_*.py'
 scripts/check-wrapper.sh
 python3 -m unittest discover -s scripts/android -p 'test_*.py'
 ```
+
+`check-docs.py` checks Markdown hygiene; `check-run-examples.py` verifies the
+curated run checksums, identities and measurements. Android release builds use
+`scripts/android/make_apk_notices.py` to collect notices from resolved Rust,
+Maven and NDK inputs. Run it through the [Android build procedure](apps/android/README.md)
+so its inputs match the APK; its unit tests are included in the helper suite above.
 
 See the [Android guide](apps/android/README.md) for local Gradle commands. Keep
 weights, generated libraries, bindings, APKs, credentials and unsanitized reports
