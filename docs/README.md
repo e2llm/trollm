@@ -17,6 +17,10 @@ It gives the exact source path, bundle command and scripted checks for an existi
 starter. The longer authoring track below provides the wider design/evaluation
 background when you need it.
 
+For a fully specified ordinary operation that needs no model decision, see
+[direct tool execution](DIRECT-TOOL-EXECUTION.md) and its zero-model calculation
+example. This source capability is newer than the published 1.0.1 APK.
+
 ## Reading tracks
 
 Costs describe complete assigned routes, not individual documents. They are

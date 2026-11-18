@@ -111,6 +111,26 @@ describe("inspection view logic", () => {
     );
     expect(isPresentation(doc.presentation)).toBe(true);
   });
+  it("shows direct execution without a model or prompt and exposes mode changes", () => {
+    const before = fixture(), after = structuredClone(before);
+    const task = after.registry!.tasks.shared;
+    task.execution = "tool";
+    delete task.model;
+    delete task.prompt;
+    task.tools = ["local.calculate"];
+    task.toolArguments = {
+      "local.calculate": { modelFields: [], fromVars: { left: "start.outputs.total" }, fixed: { operation: "compare", right: "80" } },
+    };
+    expect(graphLabel("start", after.plans[0].nodes.start, after.registry)).toBe(
+      "start\ntask · Direct tool\nshared",
+    );
+    expect(promptPath(after.registry, task)).toBe("");
+    expect(promptUses(after, "prompts/shared.md")).toEqual([]);
+    expect(bindingReferences("", {}, task)).toEqual(["start.outputs.total"]);
+    expect(compare(before, after)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target: "task:shared.execution", category: "Execution", after: "tool" }),
+    ]));
+  });
   it("identifies static binding names without evaluating values", () => {
     expect(
       bindingReferences(

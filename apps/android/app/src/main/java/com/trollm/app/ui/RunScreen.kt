@@ -230,7 +230,7 @@ fun RunScreen(
                     configurationJson = null
                     preparing = true
                 }) {
-                    Text(if (configurationJson == null) "Prepare models" else "Model setup")
+                    Text(if (setup?.models?.isEmpty() == true) "Flow setup" else if (configurationJson == null) "Prepare models" else "Model setup")
                 }
             }
             val fields = setup?.inputFields.orEmpty()

@@ -5,6 +5,11 @@ Inputs stay private. Output contains fixed aggregate names and numbers only;
 no run/call identities, prompt/tool content, hashes, paths or endpoints. Phase
 and size boundaries overlap: this tool never adds different boundaries together.
 This is an observer, not a recovery validator or execution authority.
+
+directToolSteps is present only when direct_tool_step events occur. It counts
+charged direct attempts, including failures before tool dispatch, independently
+of modelCalls and toolCalls. Optional duplicate/unknown-identity counts accompany
+that field; historical summaries without direct events retain their exact shape.
 """
 import argparse
 import hashlib
@@ -89,6 +94,7 @@ def summarize(streams):
     )}
     attempts, measured, models, tools, proxy_calls, proxy_records = set(), set(), set(), set(), set(), set()
     intents = set()
+    direct_steps = set()
     attempt_stats = {key: Stats() for key in ATTEMPT_FIELDS}
     model_stats = {key: Stats() for key in MODEL_FIELDS + MODEL_PHASES}
     tool_stats = {"ms": Stats(), "gatewayResultCompactJsonUtf8Bytes": Stats(), "toolResultContextCandidateUtf8Bytes": Stats()}
@@ -126,6 +132,18 @@ def summarize(streams):
                 counts["partialAttemptMeasurements"] += measurement.get("boundarySnapshotIncluded") is False
                 for key, stats in attempt_stats.items():
                     stats.add(measurement.get(key))
+            elif ty == "direct_tool_step":
+                counts.setdefault("directToolSteps", 0)
+                counts.setdefault("duplicateDirectToolSteps", 0)
+                counts.setdefault("unknownDirectIdentity", 0)
+                if attempt is None:
+                    counts["unknownDirectIdentity"] += 1
+                elif attempt in direct_steps:
+                    counts["duplicateDirectToolSteps"] += 1
+                    continue
+                else:
+                    direct_steps.add(attempt)
+                counts["directToolSteps"] += 1
             elif ty == "model_call":
                 ordinal = event.get("modelCallOrdinal")
                 model = (*attempt, ordinal) if attempt and integer(ordinal) and ordinal > 0 else None

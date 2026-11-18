@@ -9,6 +9,12 @@ retain first-use lazy loading for all slots, avoiding an extra foreground load
 alongside two background loaders.
 Opening the app, setup or history never starts preparation or resumes a run.
 
+Explicit `execution: tool` tasks reference no model slot and never schedule model
+preparation. A direct-only plan uses `models: {}` and needs no model files or
+inference backend. Mixed flows prepare their actual model-task slots as before.
+Declared-but-unused model slots retain the existing setup/configuration rules;
+authors should remove unused declarations rather than expect implicit rewriting.
+
 Each preparation verifies the configured SHA-256 before constructing the native
 model. It uses the saved effective configuration on Resume and retains the loaded
 weights for that executor. No weights are downloaded, copied or loaded from

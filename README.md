@@ -1,28 +1,29 @@
 # trollm: pronounced “tro-le-lem”
 
-trollm is an Android-first runtime for authored AI workflows. Small local models
-perform focused interpretation and tool choices; ordinary code carries the
-procedure, exact operations, saved evidence, limits and recovery. A user chooses
-a flow, supplies its inputs and follows the result instead of asking a small
-model to discover an entire method in one conversation.
+trollm lets you experiment with small local language models on your Android
+phone. Summarize a passage, or give it two item prices and a budget to check
+with the phone's calculator. Choose a supplied flow, enter your input and follow
+its progress.
 
-The **coder** is the tool-capable model role and can also write prose. The
-**reasoner** supplies tool-free advice. The **runtime** runs the authored graph,
-validates calls and outputs, and preserves progress. A coder can choose a declared
-exit with `flow.choose`; model prose cannot invent graph edges or become a branch
-condition. A flow can use one or both model roles.
+[Download the 1.0.1 APK](https://github.com/e2llm/trollm/releases/download/v1.0.1/app-release.apk)
+for **Android 13/API 33+** and follow the
+[installation guide](docs/INSTALL-ANDROID.md). No Rust or llama.cpp build is
+needed to try the app. Models are downloaded separately; **Summarize text** and
+**Check a total** need no browser or MCP account once their models are available.
+The app is **experimental**.
 
-This is an **experimental Android app**, with a Rust workspace and
-Kotlin/Compose UI. [Download the 1.0.1 APK](https://github.com/e2llm/trollm/releases/download/v1.0.1/app-release.apk)
-and follow the [Android installation guide](docs/INSTALL-ANDROID.md).
-Android 13/API 33+ is required. Signed sideloaded APKs are the distribution route.
-The name draws
-on TRM and RLM, with “o” for open.
+A **flow** is an authored procedure: its author supplies the steps, prompts and
+allowed tools. Models interpret input, choose permitted tools and write responses.
+Ordinary code runs the steps, performs exact operations, saves evidence and enforces
+limits. A flow can use one or both model roles: a tool-capable **coder** and a
+tool-free **reasoner**. The calculator's arithmetic is exact; selecting the intended
+prices remains model work.
 
-The intended experience is choose a supplied flow → configure its model files and
-connections → provide input → Start → inspect progress and results. A connected
-browser may run on a PC while inference runs on the phone. Remote tools require
-their services and network access; local inference does not make every flow offline.
+For other tasks, [adapt or author flows](docs/FLOW-AUTHORING.md) using local tools
+or remote services through MCP (Model Context Protocol). Browser flows require
+a separate connected browser and service; the browser can run on another computer.
+The Android app and Rust runtime are open source: adapt the flows, change the app,
+or reuse the runtime as a foundation for your own applications.
 
 ## One flow in practice
 

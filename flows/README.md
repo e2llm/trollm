@@ -39,6 +39,7 @@ updated together.
 | Material | Status | Files |
 | --- | --- | --- |
 | Minimal summary | Directly authored, tool-free reference exercised with a scripted model | [plan](examples/minimal-summary.flow.yaml), [task registry](tasks/minimal-summary.tasks.yaml), [prompt](tasks/prompts/minimal-summary.md) |
+| Direct calculation | Fully bound addition/comparison with real local tools, no model slots or prompts; requires the direct-execution source capability | [plan](examples/direct-calculation.flow.yaml), [registry](tasks/direct-calculation.tasks.yaml), [contract](../docs/DIRECT-TOOL-EXECUTION.md), [tests](../crates/trollm-core/tests/direct_tool_execution.rs) |
 | Readable record lookup | Coder selects through original text, native lookup preserves the complete record, reasoner reviews it; synthetic teaching records and scripted tests | [plan](examples/record-lookup.flow.yaml), [registry](tasks/record-lookup.tasks.yaml), [walkthrough](../docs/FLOW-PRACTICES.md#worked-example-readable-reference-to-original-record), [test](../crates/trollm-core/tests/record_lookup.rs) |
 | Prose calculation | Builtin exact arithmetic, then tool-free reasoner advice and a coder report; scripted models with the real gateway | [plan](examples/prose-calculation.flow.yaml), [task registry](tasks/prose-calculation.tasks.yaml), [prompts](tasks/prompts/), [executor test](../crates/trollm-core/tests/prose_calculation.rs) |
 | Check a total | Installable local-tool starter with a user-supplied budget and the same evidence handoff | [plan](starters/check-total/check-total.flow.yaml), [task registry](starters/check-total/check-total.tasks.yaml), [setup](starters/check-total/setup.json), [executor test](../crates/trollm-core/tests/local_starter.rs) |
@@ -78,6 +79,23 @@ The test loads these actual files and runs the real executor with a scripted
 model, checking the input binding, final report and absence of tool calls. A
 real run still requires an app-configured coder model. This is source material,
 not a bundled model or a claim of real inference acceptance.
+
+## Direct calculation
+
+The direct example accepts structured input such as
+`{"left":"39.99","right":"40.10","budget":"80"}`. Two `execution: tool`
+tasks add the supplied decimal amounts and compare the saved result with the
+budget. They retain the exact calculation outputs without prompts, model files
+or model token usage. This does not select amounts from prose or decide whether
+the inputs were the intended ones.
+
+```sh
+cargo test --locked -p trollm-core --test direct_tool_execution --no-default-features
+```
+
+The [direct execution contract](../docs/DIRECT-TOOL-EXECUTION.md) explains step
+accounting, mutation recovery and the selected-call exclusion. This is a source
+example, not an installable bundle; the published 1.0.1 APK predates this mode.
 
 ## Prose calculation
 

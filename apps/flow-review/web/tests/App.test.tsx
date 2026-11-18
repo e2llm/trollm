@@ -25,6 +25,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("review page", () => {
+  it("presents a direct task without prompts, generation settings or a model slot", async () => {
+    const doc = fixture();
+    doc.registry!.tasks.shared = {
+      execution: "tool", completion: "tool-result", tools: ["local.calculate"],
+      toolArguments: {"local.calculate": {modelFields: [], fixed: {operation: "add", left: "1", right: "2"}}},
+    };
+    vi.stubGlobal("fetch", vi.fn(async (path: string) => ({
+      ok: true,
+      json: async () => path === "/api/packages"
+        ? {packages: [{id: "fixture", name: "Mounted fixture", kind: "source"}]}
+        : doc,
+    })));
+    render(<App />);
+    await screen.findByRole("option", {name: "Mounted fixture (source)"});
+    fireEvent.change(screen.getByLabelText("Mounted packages"), {target: {value: "fixture"}});
+    await screen.findByRole("heading", {name: "Review example"});
+    openNodes();
+    fireEvent.click(screen.getByRole("button", {name: /start task/}));
+    const inspector = screen.getByRole("complementary", {name: "Inspector"});
+    expect(within(inspector).getByRole("heading", {name: "Direct tool execution"})).toBeTruthy();
+    expect(within(inspector).getByText("task · Direct tool")).toBeTruthy();
+    expect(within(inspector).queryByText(/Output ceiling/)).toBeNull();
+    expect(within(inspector).queryByText(/Base prompt:/)).toBeNull();
+    fireEvent.click(screen.getByRole("tab", {name: "Package"}));
+    expect(within(inspector).getByText("Model slots: None")).toBeTruthy();
+  });
   it("shows view defaults and selected-task defaults without assigning a task policy to end nodes", async () => {
     const doc = fixture();
     doc.plans[0].nodes.unreachable.onError = null;

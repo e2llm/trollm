@@ -60,6 +60,23 @@ class FlowSetupOverridesTest {
         assertEquals("https://example.com/issuer", applied.connections.getValue("browser").issuerUrl)
     }
 
+    @Test fun directOnlySetupKeepsConnectionOverridesWithoutModelPaths() {
+        val direct = FlowSetup.parse("""{"format":"trollm.flow-setup.v1","title":"Direct read","models":{},"connections":{"browser":{"url":"https://example.com/mcp","auth":"oauth","issuerUrl":"https://example.com/issuer"}}}""")
+        val saved = mutableMapOf<String, String>()
+        val store = FlowSetupOverrideStore({ saved[it] }, { key, value ->
+            if (value == null) saved.remove(key) else saved[key] = value
+            true
+        })
+        store.save(flow, direct, direct.copy(connections = mapOf("browser" to
+            direct.connections.getValue("browser").copy(url = "https://other.example/mcp"))))
+        val effective = store.load(flow, direct)
+        assertTrue(effective.models.isEmpty())
+        assertEquals("oauth", effective.connections.getValue("browser").auth)
+        val configuration = JSONObject(effective.configuration(emptyMap()))
+        assertEquals(0, configuration.getJSONObject("models").length())
+        assertEquals("https://other.example/mcp", configuration.getJSONObject("connections").getJSONObject("browser").getString("url"))
+    }
+
     @Test fun staleUnknownAndMalformedStoredEntriesFailWithoutSilentFallback() {
         val valid = FlowSetupOverrides.between(defaults, defaults.copy(models = mapOf("coder" to
             defaults.models.getValue("coder").copy(temperature = 0.5)))).toJson()

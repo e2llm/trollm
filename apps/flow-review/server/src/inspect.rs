@@ -170,7 +170,9 @@ fn preflight(
         let registry =
             TaskRegistry::from_yaml_str(files.get(path).context("missing registry")?, ".")?;
         for task in registry.tasks.values() {
-            reference(path, &task.prompt, files)?;
+            if let Some(prompt) = task.prompt_path() {
+                reference(path, prompt, files)?;
+            }
         }
     }
     Ok(())

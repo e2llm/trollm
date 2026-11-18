@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 from jsonschema import Draft202012Validator
-from flow_checks import validate_fixed_tool_arguments
+from flow_checks import validate_fixed_tool_arguments, validate_task_execution, validate_task_node
 
 ROOT = Path(__file__).resolve().parents[1]
 schema = json.loads((ROOT / "schemas/execution-plan.v1.schema.json").read_text())
@@ -53,6 +53,7 @@ references = [(name, ROOT / "flows/tasks" / registry) for name, registry in (
     ("prose-calculation", "prose-calculation.tasks.yaml"),
     ("adaptive-routing", "adaptive-routing.tasks.yaml"),
     ("record-lookup", "record-lookup.tasks.yaml"),
+    ("direct-calculation", "direct-calculation.tasks.yaml"),
 )]
 # A starter package can contain reusable child plans sharing its root registry.
 # Validate every plan above, then resolve each package from its named root.
@@ -64,6 +65,7 @@ for root_flow, registry_path in references:
     registry = yaml.safe_load(registry_path.read_text())
     assert registry["schemaVersion"] == "ledger.task-registry.v1"
     for name, task in registry["tasks"].items():
+        validate_task_execution(task, ROOT / "schemas")
         task_result_validator.validate(task)
         validate_fixed_tool_arguments(task, ROOT / "schemas")
         for output in task.get("outputContract", {}).get("outputs", {}).values():
@@ -74,11 +76,10 @@ for root_flow, registry_path in references:
             if "view" in output:
                 binding = {key: value for key, value in output.items() if key not in ("type", "schema")}
                 Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/nodeOutputBinding"}).validate(binding)
-        prompt = (registry_path.parent / task["prompt"]).resolve()
-        if not prompt.is_relative_to(registry_path.parent.resolve()) or not prompt.is_file():
-            raise ValueError(f"{name}: missing or escaping prompt")
-        if task["model"] not in ("coder", "reasoner"):
-            raise ValueError(f"{name}: unknown model")
+        if task.get("execution", "model") == "model":
+            prompt = (registry_path.parent / task["prompt"]).resolve()
+            if not prompt.is_relative_to(registry_path.parent.resolve()) or not prompt.is_file():
+                raise ValueError(f"{name}: missing or escaping prompt")
 
     pending, seen = [root_flow], set()
     while pending:
@@ -93,15 +94,10 @@ for root_flow, registry_path in references:
                 raise ValueError(f"{flow_id}: missing task {node['taskRef']}")
             if node["kind"] == "task":
                 task = registry["tasks"][node["taskRef"]]
-                completion = task.get("completion", "model-prose")
-                routing = completion in ("flow-route", "tool-or-route")
-                if routing != ("routes" in node) or (("onVerified" in node) != (completion != "flow-route")):
-                    raise ValueError(f"{flow_id}: flow-route requires routes without onVerified; "
-                                     "tool-or-route requires both; other completions require onVerified without routes")
-                if routing and (task["model"] != "coder" or "flow.choose" not in task.get("tools", [])):
-                    raise ValueError(f"{flow_id}: routing requires coder and flow.choose")
-                if len(node.get("promptSupplement", "").encode("utf-8")) > 16 * 1024:
-                    raise ValueError(f"{flow_id}: promptSupplement exceeds 16 KiB")
+                try:
+                    validate_task_node(task, node, plans[flow_id]["models"])
+                except ValueError as error:
+                    raise ValueError(f"{flow_id}: {error}") from error
             for key in ("body", "between"):
                 if key in node:
                     pending.append(node[key]["flowRef"])

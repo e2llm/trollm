@@ -31,16 +31,19 @@ the model can perform it reliably and extra handoffs or calls add more risk or
 cost. Stop decomposing once the evidence, model capability and recovery needs
 are met. Compare direct and split versions with the same representative evidence
 and model settings; measure selection quality, failure handling and call cost.
-Keep computation in isolated coder-invoked tools and procedure in the graph;
-combining a task does not introduce model-free operation nodes or an expression
-language.
+Keep computation in isolated tools and procedure in the graph. Combining a task
+does not introduce additional node kinds or an expression language.
 
 Use a single-call `tool-result` task for an exact browser operation or calculation.
 Bind known arguments from original artifacts or user input with `toolArguments`;
 ask the coder only for values that require selection from current evidence.
 Use `modelFields` when the task should expose only specific model-owned argument
 names, for example `modelFields: [left, right]` with a bound calculator operation.
-A fully bound call uses `modelFields: []` and the coder emits `args: {}`. Required
+A fully bound model task uses `modelFields: []` and the coder emits `args: {}`.
+If reaching the node already determines the ordinary operation and all arguments,
+an explicit [direct tool task](DIRECT-TOOL-EXECUTION.md) can omit that generation.
+Keep semantic choice/decline tasks and selected-guard calls in model mode; do not
+convert existing tasks implicitly from their shape. Required
 fields still come from the tool/setup schema; listing a field does not make it
 required. Typed bindings can select an array index such as
 `observed.outputs.records.0.id` when an earlier contract establishes that index.

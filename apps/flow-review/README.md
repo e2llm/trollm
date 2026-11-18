@@ -21,8 +21,17 @@ models, Android SDK, MCP accounts or LLM API key.
 
 ## Run with Podman
 
-Use a maintainer-built image identified by its full source commit, or build from
-the repository root:
+The [GitHub Actions workflow](../../.github/workflows/flow-review-image.yml) is
+configured to publish Linux/amd64 images at
+`ghcr.io/e2llm/trollm-flow-review`. **Public image availability is not yet
+verified.** The planned [GitHub package page](https://github.com/orgs/e2llm/packages/container/package/trollm-flow-review)
+will also be linked from this repository's **Packages** sidebar once published.
+The workflow publishes a full public GitHub commit tag and updates `latest` after
+its checks. A full commit tag or digest identifies a deployment; image publication
+does not imply a new Android release. See the [deployment guide](deploy/README.md)
+for the planned pull command and the current local-build route.
+
+Build from the repository root:
 
 ```sh
 podman build --format docker --ignorefile apps/flow-review/.containerignore \
@@ -116,10 +125,12 @@ From `apps/flow-review/web`:
 
 ```sh
 npm ci
+npm run audit:prebuild
 npm run check
 npm run lint
 npm test
 npm run build
+npm run audit:final
 npm run test:browser
 ```
 
@@ -147,6 +158,11 @@ cargo run --locked -p trollm-flow-review
 `FLOW_REVIEW_BIND` accepts numeric IPv4/IPv6 socket addresses, such as
 `127.0.0.1:8080` or `[::]:8080`, and `localhost:8080` as an explicit IPv4 loopback
 alias. Other hostnames are rejected rather than resolved through DNS.
+
+The Containerfile runs `audit:prebuild`, builds the browser assets and then runs
+`audit:final` in the same build stage. Keep the original receipt and generated
+inventory together; the [security exception record](../../docs/SECURITY-EXCEPTIONS.md)
+defines the bounded development-dependency allowance and expiry.
 
 The container uses `trollm-flow-review --healthcheck` to probe its own endpoint.
 This command succeeds only for HTTP 200 with `status: ok`, has a three-second

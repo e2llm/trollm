@@ -23,6 +23,48 @@ def context(epoch="private-epoch", attempt=1, call=None):
 
 
 class RunMetricsTest(unittest.TestCase):
+    def test_direct_attempts_count_binding_failures_without_model_calls_or_tokens(self):
+        events = [
+            {"type": "direct_tool_step", "attemptContext": context(), "task": "private-task"},
+            {"type": "error", "attemptContext": context(), "message": "private missing binding"},
+            {"type": "direct_tool_step", "attemptContext": context(attempt=2)},
+            {"type": "tool_call_result", "attemptContext": context(attempt=2),
+             "callContext": context(attempt=2, call=1), "ms": 2},
+        ]
+        direct = summarize([Once(events)])
+        self.assertEqual(direct["counts"]["directToolSteps"], 2)
+        self.assertEqual(direct["counts"]["modelCalls"], 0)
+        self.assertEqual(direct["counts"]["toolCalls"], 1)
+        for field in ("ms", "tokensIn", "tokensOut"):
+            self.assertEqual(direct["model"][field]["known"], 0)
+            self.assertEqual(direct["model"][field]["sum"], 0)
+        self.assertNotIn("private-task", json.dumps(direct))
+        self.assertNotIn("private missing binding", json.dumps(direct))
+        mixed = summarize([Once(events + [{"type": "model_call", "attemptContext": context(attempt=3),
+            "modelCallOrdinal": 1, "tokensIn": 5, "tokensOut": 3}])])
+        self.assertEqual(mixed["counts"]["directToolSteps"], 2)
+        self.assertEqual(mixed["counts"]["modelCalls"], 1)
+        self.assertEqual(mixed["model"]["tokensIn"]["sum"], 5)
+        self.assertEqual(mixed["model"]["tokensOut"]["sum"], 3)
+
+    def test_direct_count_deduplicates_attempts_without_hiding_unknown_identity(self):
+        first = {"type": "direct_tool_step", "attemptContext": context()}
+        result = summarize([Once([first, first,
+            {"type": "direct_tool_step", "attemptContext": context(epoch="second-epoch")},
+            {"type": "direct_tool_step"}])])
+        self.assertEqual(result["counts"]["directToolSteps"], 3)
+        self.assertEqual(result["counts"]["duplicateDirectToolSteps"], 1)
+        self.assertEqual(result["counts"]["unknownDirectIdentity"], 1)
+        self.assertEqual(result["counts"]["modelCalls"], 0)
+
+    def test_legacy_summaries_have_no_new_direct_fields(self):
+        for events in ([], [{"type": "model_call", "attemptContext": context(), "modelCallOrdinal": 1}]):
+            with self.subTest(events=events):
+                counts = summarize([Once(events)])["counts"]
+                self.assertNotIn("directToolSteps", counts)
+                self.assertNotIn("duplicateDirectToolSteps", counts)
+                self.assertNotIn("unknownDirectIdentity", counts)
+
     def test_historical_public_phase_redactions_preserve_numeric_metrics(self):
         events = [
             {"type": "node_exited", "phase": "attempt", "attemptContext": context(),

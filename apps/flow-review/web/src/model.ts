@@ -263,17 +263,19 @@ export function compare(before: Inspection, after: Inspection): Change[] {
     for (const field of new Set([...Object.keys(old), ...Object.keys(next)]))
       diff(
         `task:${id}.${field}`,
-        field === "tools"
-          ? "Tool grants"
-          : field === "completion"
-            ? "Completion"
-            : field === "mutations"
-              ? "Mutation recovery"
-              : ["maxOutputTokens", "generationTimeoutS", "loop"].includes(
-                    field,
-                  )
-                ? "Generation / task-loop limits"
-                : "Task field",
+        field === "execution"
+          ? "Execution"
+          : field === "tools"
+            ? "Tool grants"
+            : field === "completion"
+              ? "Completion"
+              : field === "mutations"
+                ? "Mutation recovery"
+                : ["maxOutputTokens", "generationTimeoutS", "loop"].includes(
+                      field,
+                    )
+                  ? "Generation / task-loop limits"
+                  : "Task field",
         old[field],
         next[field],
       );
@@ -401,6 +403,13 @@ export function isPresentation(value: unknown): value is Presentation {
   );
 }
 
+export function taskExecutionLabel(task: RecordValue | undefined) {
+  if (!task) return "runtime control";
+  return task.execution === "tool"
+    ? "Direct tool"
+    : `model: ${task.model ?? "unspecified"}`;
+}
+
 export function graphLabel(
   id: string,
   node: RecordValue,
@@ -410,7 +419,7 @@ export function graphLabel(
     typeof node.taskRef === "string"
       ? registry?.tasks[node.taskRef]
       : undefined;
-  return `${id}\n${node.kind}${task ? ` · model: ${task.model}` : ""}\n${node.taskRef ?? node.outcome ?? ""}`;
+  return `${id}\n${node.kind}${task ? ` · ${taskExecutionLabel(task)}` : ""}\n${node.taskRef ?? node.outcome ?? ""}`;
 }
 
 /** Effective executor behavior, separate from authored graph edges. */

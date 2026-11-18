@@ -889,8 +889,10 @@ mod outcome_association_controls {
             run_id: "actual-run".into(),
             node: "node".into(),
             task_ref: "task".into(),
-            model_slot: "coder".into(),
-            model_call_ordinal: 1,
+            origin: trollm_mcp::preparation::CallOrigin::Model {
+                slot: "coder".into(),
+                ordinal: 1,
+            },
             frames: vec![],
             cursors: vec![],
             argument_bindings: vec![],

@@ -1,0 +1,21 @@
+# Exact structured input -> direct addition -> direct comparison; no model slots.
+# Input: {"left":"39.99","right":"40.10","budget":"80"}
+# Decimal strings retain their types; no prose extraction or semantic judgment.
+schemaVersion: ledger.execution-plan.v1
+id: direct-calculation
+version: 1
+limits: {maxSteps: 2, maxReasonerCalls: 0, maxTokensTotal: 0, timeoutS: 30, artifactMaxMb: 1}
+onLimit: abort
+models: {}
+mcp:
+  servers: []
+  policies:
+    local.calculate: {class: read, resultArtifact: calculation}
+exports:
+  sum: {from: sum.outputs.calculation}
+  comparison: {from: compare.outputs.calculation}
+entryStep: sum
+nodes:
+  sum: {kind: task, taskRef: add-inputs, onVerified: compare}
+  compare: {kind: task, taskRef: compare-budget, onVerified: done}
+  done: {kind: end, outcome: succeeded}

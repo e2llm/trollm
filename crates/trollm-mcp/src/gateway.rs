@@ -812,11 +812,23 @@ impl ToolGateway for McpGateway {
         self.preparation_fenced = false;
         Ok(())
     }
+    fn validate_direct_call(&self, call: &ToolCall) -> Result<()> {
+        anyhow::ensure!(
+            !self
+                .required_preparations
+                .contains(&crate::policy::policy_key(&call.server, &call.tool)),
+            "direct tool execution does not support selected preparation"
+        );
+        Ok(())
+    }
     fn prepare_call(
         &mut self,
         call: &ToolCall,
         context: &PreparationContext,
     ) -> Result<Option<PreparedCall>> {
+        if context.origin.model_identity().is_none() {
+            self.validate_direct_call(call)?;
+        }
         if !self
             .required_preparations
             .contains(&crate::policy::policy_key(&call.server, &call.tool))

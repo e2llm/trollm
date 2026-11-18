@@ -61,8 +61,7 @@
     "onLimit": { "description": "Terminal run-level budget policy.", "enum": ["abort", "respond_partial"] },
     "models": {
       "type": "object",
-      "description": "SLOTS ONLY. Weights are pinned by the app, never by the plan.",
-      "minProperties": 1,
+      "description": "SLOTS ONLY. Weights are pinned by the app, never by the plan. A direct-tool-only plan may declare an empty object; model tasks must reference declared slots.",
       "additionalProperties": {
         "type": "object",
         "required": ["ctx"],

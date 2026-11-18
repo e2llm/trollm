@@ -75,6 +75,38 @@ class StarterBundles(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "root flow"):
                 fixture.build_bundle(source)
 
+    def test_direct_source_needs_no_placeholder_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            shutil.copytree(fixture.SOURCE, source)
+            registry_path = source / "text-summary.tasks.yaml"
+            registry = yaml.safe_load(registry_path.read_text())
+            registry["tasks"] = {"calculate": {
+                "execution": "tool", "completion": "tool-result", "tools": ["local.calculate"],
+                "toolArguments": {"local.calculate": {"modelFields": [],
+                    "fixed": {"operation": "add", "left": "2", "right": "3"}}},
+            }}
+            registry_path.write_text(yaml.safe_dump(registry))
+            (source / "prompts/minimal-summary.md").unlink()
+            setup_path = source / "setup.json"
+            setup = json.loads(setup_path.read_text())
+            setup["models"] = {}
+            setup_path.write_text(json.dumps(setup))
+            flow_path = source / "text-summary.flow.yaml"
+            flow = yaml.safe_load(flow_path.read_text())
+            flow["models"] = {}
+            flow["nodes"][flow["entryStep"]]["taskRef"] = "calculate"
+            flow["setup"]["sha256"] = hashlib.sha256(setup_path.read_bytes()).hexdigest()
+            flow_path.write_text(yaml.safe_dump(flow))
+            with tarfile.open(fileobj=io.BytesIO(fixture.build_bundle(source)), mode="r:") as archive:
+                files = {member.name: archive.extractfile(member).read() for member in archive}
+            self.assertEqual(set(files), {"text-summary.flow.yaml", "text-summary.tasks.yaml",
+                                          "setup.json", "manifest.json"})
+            self.assertEqual(files["text-summary.tasks.yaml"], registry_path.read_bytes())
+            manifest = json.loads(files["manifest.json"])
+            for entry in manifest["files"]:
+                self.assertEqual(entry["sha256"], hashlib.sha256(files[entry["path"]]).hexdigest())
+
     def test_cli_check_does_not_modify_matching_asset(self):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(fixture.main(["--check"]), 0)

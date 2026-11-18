@@ -20,5 +20,5 @@ pub use error::{ErrorClass, TaskFailure, ValidationError};
 pub use events::{EventLog, EventType};
 pub use exec::{Executor, RunDir, RunStatus, SlotMap};
 pub use plan::{ExecutionPlan, Node, NodeKind, Transition};
-pub use registry::{TaskDef, TaskRegistry};
+pub use registry::{TaskDef, TaskExecution, TaskRegistry};
 pub use state::RunState;

@@ -66,6 +66,12 @@ pub struct CallContext {
 }
 
 pub trait ToolGateway: Send {
+    /// Pure capability check before a direct attempt can prepare or dispatch.
+    /// Custom gateways must explicitly support authored calls; model calls keep
+    /// the existing contract. This does not replace argument/schema validation.
+    fn validate_direct_call(&self, _call: &ToolCall) -> Result<()> {
+        anyhow::bail!("gateway does not support direct tool execution")
+    }
     /// After native intent custody, before any selected effect dispatch.
     /// Selected gateways must bind this to the original journal, not a flag.
     fn after_retained_intent(

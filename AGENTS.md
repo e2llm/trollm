@@ -52,7 +52,7 @@ the complete, tool-free minimal-summary example and its existing test.
 | Source | What belongs there |
 | --- | --- |
 | `*.flow.yaml` (plan) | Graph nodes, transitions, run budgets and references to tasks. A node is one position in the graph. |
-| `*.tasks.yaml` (registry) | Reusable task definitions: model role, prompt file, tool grants, generation bounds, completion mode and expected outputs. A node's `taskRef` selects a registry key. |
+| `*.tasks.yaml` (registry) | Reusable task definitions: execution mode, tool grants/bindings, completion and outputs; model tasks also declare a model, prompt and generation bounds. A node's `taskRef` selects a registry key. |
 | Prompt `.md` files | Instructions for a model task, with bindings such as `{{ user_input }}`. A node's `promptSupplement` adds instructions for that step. |
 | Optional `setup.json` | Android input fields, pinned model downloads/settings and connection defaults. Credentials stay outside it. |
 
@@ -64,6 +64,12 @@ selects bounded JSON fields for the next prompt without modifying saved evidence
 These are structural contracts, not expressions or semantic extraction; see the
 architecture and small-model practices below. Preserve original evidence alongside
 model advice.
+
+An explicit [`execution: tool` task](docs/DIRECT-TOOL-EXECUTION.md) invokes one
+ordinary local/MCP tool without model inference when every argument is fixed or
+bound. It has no model or prompt. It uses the same checked dispatch and mutation
+journal; selected-guard calls remain model tasks in this first implementation.
+This source capability requires a new APK; published 1.0.1 predates it.
 
 For a readable label instead of an opaque ID, see the small
 [record-lookup example](flows/examples/record-lookup.flow.yaml) and its
@@ -151,9 +157,10 @@ scripted tests; procurement is an incomplete design sketch.
 
 ## Design rules to preserve
 
-- Keep computation in isolated coder-invoked tools and procedure in the graph.
-  Do not add site/task-name special cases to the executor, model-free tool nodes,
-  or a flow expression language.
+- Keep computation in isolated tools and procedure in the graph. Model tasks
+  ask the coder to choose calls; explicitly authored `execution: tool` tasks
+  invoke one fully bound ordinary call. Do not add site/task-name special cases,
+  extra graph node kinds or a flow expression language.
 - Model prose stays advisory. Structured model output goes through the validated
   tool-call boundary; do not require a model to emit JSON worklists or magic
   completion words. The reasoner remains tool-free.

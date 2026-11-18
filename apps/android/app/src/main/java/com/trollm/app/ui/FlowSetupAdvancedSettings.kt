@@ -35,8 +35,8 @@ fun FlowSetupAdvancedSettings(
     if (!expanded) return
     ContentCard {
         SectionHeading("Advanced settings")
-        Text("Model identities, context and sampling settings. Changes are validated before saving.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (!enabled) Text("Settings are locked while models are downloading or being checked.")
+        Text(if (effective.models.isEmpty()) "Connection endpoints. Changes are validated before saving." else "Model identities, context and sampling settings. Changes are validated before saving.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!enabled) Text(if (effective.models.isEmpty()) "Settings are being checked." else "Settings are locked while models are downloading or being checked.")
         effective.models.forEach { (slot, _) ->
             Text(effective.modelDisplayLabel(slot, defaults), style = MaterialTheme.typography.titleMedium)
             val draft = models.getValue(slot)

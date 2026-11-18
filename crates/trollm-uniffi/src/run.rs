@@ -424,6 +424,9 @@ pub struct ControlledGateway {
 }
 
 impl trollm_mcp::ToolGateway for ControlledGateway {
+    fn validate_direct_call(&self, call: &trollm_mcp::ToolCall) -> Result<()> {
+        self.inner.validate_direct_call(call)
+    }
     fn prepare_call(
         &mut self,
         call: &trollm_mcp::ToolCall,
@@ -616,7 +619,7 @@ fn validate_declared_text(plan: &RunPlan) -> Result<()> {
         .tasks
         .get(entry.task_ref.as_deref().unwrap_or(""))
         .context("declared text task unavailable")?;
-    if task.model != "coder"
+    if task.model_slot() != Some("coder")
         || !task.tools.is_empty()
         || task.completion != TaskCompletion::ModelProse
         || task.loop_spec.is_some()
@@ -1019,7 +1022,6 @@ impl ModelSlot for LazyModel {
 }
 
 /// Collect every slot name + ctx declared by the plan tree.
-#[cfg(any(feature = "llama", feature = "stub"))]
 fn slot_decls(plan: &ExecutionPlan, out: &mut Vec<(String, u32)>) {
     for (name, decl) in &plan.models {
         out.push((name.clone(), decl.ctx));
@@ -1115,12 +1117,17 @@ fn build_slots(
 
 #[cfg(not(any(feature = "llama", feature = "stub")))]
 fn build_slots(
-    _plan: &ExecutionPlan,
+    plan: &ExecutionPlan,
     _registry: &TaskRegistry,
     _base: &Path,
     _configuration: Option<&RunConfiguration>,
     _ctl: Arc<RunControl>,
 ) -> Result<(SlotMap<ControlledModel>, Preparations)> {
+    let mut decls = Vec::new();
+    slot_decls(plan, &mut decls);
+    if decls.is_empty() {
+        return Ok((SlotMap::new(), Preparations::default()));
+    }
     bail!(
         "this build has no model runtime: built without the 'llama' feature \
          (and without the 'stub' test feature)"
@@ -1177,10 +1184,6 @@ pub fn spawn_run(
     )
 }
 
-#[cfg_attr(
-    not(any(feature = "llama", feature = "stub")),
-    allow(unused_variables, unreachable_code)
-)]
 pub fn spawn_source_run(
     base: PathBuf,
     flow_sha: String,
@@ -1205,10 +1208,6 @@ pub fn spawn_source_run(
 /// Native embedding entry. The ordinary/public source entry cannot infer or
 /// manufacture this out-of-band installation from a publication support flag.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(
-    not(any(feature = "llama", feature = "stub")),
-    allow(unused_variables, unreachable_code)
-)]
 pub fn spawn_installed_source_run(
     base: PathBuf,
     flow_sha: String,
@@ -1219,12 +1218,6 @@ pub fn spawn_installed_source_run(
     source: Option<(String, Value)>,
     selected_installation: Option<crate::collection_provider::SelectedRunInstallation>,
 ) -> Result<SpawnedRun> {
-    // Fail synchronously when this build carries no model runtime at all.
-    #[cfg(not(any(feature = "llama", feature = "stub")))]
-    bail!(TrollmError::ModelUnavailable(
-        "this build has no model runtime: built without the 'llama' feature (and without the 'stub' test feature)".into()
-    ));
-
     let (installation, source_association) = match source {
         Some((id, association)) => (Some(id), Some(association)),
         None => (None, None),
@@ -1272,6 +1265,18 @@ pub fn spawn_installed_source_run(
         }
     }
     let mut run_plan = load_run_plan(&base, &flow_sha, installation.as_deref())?;
+    // Direct-only plans need no model backend. Preserve synchronous rejection
+    // of declared model slots before creating any worker or run state.
+    #[cfg(not(any(feature = "llama", feature = "stub")))]
+    {
+        let mut decls = Vec::new();
+        slot_decls(&run_plan.plan, &mut decls);
+        if !decls.is_empty() {
+            bail!(TrollmError::ModelUnavailable(
+                "this build has no model runtime: built without the 'llama' feature (and without the 'stub' test feature)".into()
+            ));
+        }
+    }
     let setup = match &installation {
         Some(id) => crate::bundle::revision_setup(&base, id)?,
         None => crate::bundle::installed_flow_setup(&base, &flow_sha)?,
@@ -3521,10 +3526,10 @@ mod regression_tests {
         let mut child = plan.clone();
         child.nodes.get_mut("summarize").unwrap().task_ref = Some("reason".into());
         let mut reasoner = coder.clone();
-        reasoner.model = "reasoner".into();
+        reasoner.model = Some("reasoner".into());
         registry.tasks.insert("reason".into(), reasoner);
         let mut unused = coder.clone();
-        unused.model = "unused".into();
+        unused.model = Some("unused".into());
         registry.tasks.insert("unused-task".into(), unused);
         plan.subflows.insert("child".into(), child);
         assert_eq!(
@@ -3532,7 +3537,7 @@ mod regression_tests {
             vec!["coder", "reasoner"]
         );
         let mut extra = coder;
-        extra.model = "extra".into();
+        extra.model = Some("extra".into());
         registry.tasks.insert("extra-task".into(), extra);
         let mut extra_node = plan.nodes["summarize"].clone();
         extra_node.task_ref = Some("extra-task".into());
@@ -3540,6 +3545,38 @@ mod regression_tests {
         assert_eq!(
             preparation::selected_slots(&plan, &registry),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn preparation_ignores_direct_tasks_and_keeps_nested_model_references() {
+        let mut plan = ExecutionPlan::from_yaml_str(include_str!(
+            "../../../flows/examples/minimal-summary.flow.yaml"
+        ))
+        .unwrap();
+        plan.models.clear();
+        let mut registry = TaskRegistry::from_yaml_str(
+            "schemaVersion: ledger.task-registry.v1\ntasks:\n  summarize-text:\n    execution: tool\n    completion: tool-result\n    tools: [local.calculate]\n    toolArguments:\n      local.calculate:\n        modelFields: []\n        fixed: {operation: add, left: '1', right: '2'}\n",
+            ".",
+        )
+        .unwrap();
+        assert!(preparation::selected_slots(&plan, &registry).is_empty());
+        let mut model = TaskRegistry::from_yaml_str(
+            include_str!("../../../flows/tasks/minimal-summary.tasks.yaml"),
+            ".",
+        )
+        .unwrap()
+        .tasks
+        .remove("summarize-text")
+        .unwrap();
+        model.model = Some("analyst".into());
+        registry.tasks.insert("model-task".into(), model);
+        let mut child = plan.clone();
+        child.nodes.get_mut("summarize").unwrap().task_ref = Some("model-task".into());
+        plan.subflows.insert("child".into(), child);
+        assert_eq!(
+            preparation::selected_slots(&plan, &registry),
+            vec!["analyst"]
         );
     }
 

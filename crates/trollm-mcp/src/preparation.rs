@@ -33,6 +33,44 @@ pub struct BoundArgument {
     pub value: serde_json::Value,
 }
 
+/// Actual request origin. Model contexts keep their original serialized fields
+/// and byte order; authored calls never invent a model slot or generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallOrigin {
+    Model { slot: String, ordinal: u32 },
+    Tool,
+}
+
+impl CallOrigin {
+    pub fn model_identity(&self) -> Option<(&str, u32)> {
+        match self {
+            Self::Model { slot, ordinal } => Some((slot, *ordinal)),
+            Self::Tool => None,
+        }
+    }
+}
+
+impl Serialize for CallOrigin {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(if matches!(self, Self::Model { .. }) {
+            2
+        } else {
+            1
+        }))?;
+        match self {
+            Self::Model { slot, ordinal } => {
+                map.serialize_entry("modelSlot", slot)?;
+                map.serialize_entry("modelCallOrdinal", ordinal)?;
+            }
+            Self::Tool => map.serialize_entry("execution", "tool")?,
+        }
+        map.end()
+    }
+}
+
 /// Supplied by the executor, never deserialized from model arguments.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,8 +78,8 @@ pub struct PreparationContext {
     pub run_id: String,
     pub node: String,
     pub task_ref: String,
-    pub model_slot: String,
-    pub model_call_ordinal: u32,
+    #[serde(flatten)]
+    pub origin: CallOrigin,
     pub frames: Vec<FramePosition>,
     pub cursors: Vec<CursorPosition>,
     pub argument_bindings: Vec<BoundArgument>,
@@ -277,8 +315,10 @@ mod tests {
             run_id: "actual-test-run".into(),
             node: "work".into(),
             task_ref: "task".into(),
-            model_slot: "coder".into(),
-            model_call_ordinal: 1,
+            origin: CallOrigin::Model {
+                slot: "coder".into(),
+                ordinal: 1,
+            },
             frames: vec![],
             cursors: vec![],
             argument_bindings: vec![],
@@ -289,6 +329,18 @@ mod tests {
             },
         };
         let raw = c.raw().unwrap();
+        assert_eq!(
+            raw.json,
+            r#"{"runId":"actual-test-run","node":"work","taskRef":"task","modelSlot":"coder","modelCallOrdinal":1,"frames":[],"cursors":[],"argumentBindings":[],"callContext":{"epoch":"actual-test-epoch","attempt":18446744073709551615,"call":4294967295}}"#
+        );
+        let mut direct = c.clone();
+        direct.origin = CallOrigin::Tool;
+        let direct_raw = direct.raw().unwrap();
+        let direct_value: serde_json::Value = serde_json::from_str(&direct_raw.json).unwrap();
+        assert_eq!(direct_value["execution"], "tool");
+        assert!(direct_value.get("modelSlot").is_none());
+        assert!(direct_value.get("modelCallOrdinal").is_none());
+        assert_ne!(direct_raw.sha256, raw.sha256);
         assert!(raw.json.contains("18446744073709551615"));
         let outer = serde_json::to_value(&raw).unwrap();
         assert!(outer["json"].is_string());

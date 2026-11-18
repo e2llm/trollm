@@ -70,7 +70,7 @@ fun FlowSetupScreen(
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val coordinator = remember(context.applicationContext) { ModelDownloadCoordinator.get(context) }
+    val coordinator by remember(context.applicationContext) { lazy { ModelDownloadCoordinator.get(context) } }
     val scope = rememberCoroutineScope()
     val overrideStore = remember(context.applicationContext) { flowSetupOverrideStore(context) }
     var defaults by remember(flowSha) { mutableStateOf<FlowSetup?>(null) }
@@ -128,6 +128,13 @@ fun FlowSetupScreen(
 
     LaunchedEffect(setup, lifecycle, refresh) {
         val descriptor = setup ?: return@LaunchedEffect
+        if (descriptor.models.isEmpty()) {
+            states = emptyMap()
+            checking = null
+            inspecting = false
+            error = null
+            return@LaunchedEffect
+        }
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             // UI-scoped observation only; Android owns transfers while stopped.
             while (isActive) {
@@ -197,11 +204,13 @@ fun FlowSetupScreen(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ScreenHeader("Prepare models", onBack, setup?.title)
+        val hasModels = setup?.models?.isNotEmpty() == true
+        ScreenHeader(if (hasModels) "Prepare models" else "Flow setup", onBack, setup?.title)
         setup?.description?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        Text("Download the models this flow uses. They stay saved on your device.")
+        if (hasModels) Text("Download the models this flow uses. They stay saved on your device.")
+        else if (setup != null) Text("This flow does not use a model.")
         val downloadsIdle = !busy && !preparing && !inspecting && checking == null && states.values.none { it.downloading }
-        ContentCard {
+        if (hasModels) ContentCard {
             SectionHeading(if (allowMetered) "Metered downloads allowed" else "Unmetered network only")
             Text("Downloads continue in the background. Keep this screen open to start the next model in a batch.", style = MaterialTheme.typography.bodyMedium)
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -214,7 +223,7 @@ fun FlowSetupScreen(
         val remaining = setup?.let { descriptor ->
             remainingModelDownloads(descriptor.models, states.filterValues { it.path != null }.keys)
         }.orEmpty()
-        SectionHeading("Models", "${states.values.count { it.path != null }} of ${setup?.models?.size ?: 0} ready")
+        if (hasModels) SectionHeading("Models", "${states.values.count { it.path != null }} of ${setup?.models?.size ?: 0} ready")
         setup?.models?.forEach { (slot, model) ->
             val state = states[slot]
             val label = defaults?.let { pinned -> setup?.modelDisplayLabel(slot, pinned) } ?: slot
@@ -296,7 +305,7 @@ fun FlowSetupScreen(
         }
         val pinned = defaults
         val effective = setup
-        if (pinned != null && effective != null) {
+        if (pinned != null && effective != null && (effective.models.isNotEmpty() || effective.connections.isNotEmpty() || settingsError != null)) {
             FlowSetupAdvancedSettings(
                 defaults = pinned,
                 effective = effective,
@@ -340,13 +349,13 @@ fun FlowSetupScreen(
             )
         }
         settingsError?.let { StatusPanel("Check advanced settings", it, StatusTone.ERROR) }
-        error?.let { StatusPanel("Model preparation", it, StatusTone.ERROR) }
+        error?.let { StatusPanel(if (hasModels) "Model preparation" else "Flow setup", it, StatusTone.ERROR) }
         val descriptor = setup
         val ready = settingsValid && descriptor != null && states.keys == descriptor.models.keys && states.values.all { it.path != null }
         Button(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = ready && !busy && !inspecting && checking == null, onClick = {
             descriptor?.let { onReady(it.configuration(states.mapValues { entry -> requireNotNull(entry.value.path) })) }
         }) { Text("Continue") }
-        if (!ready) Text("Finish downloading and verifying all models to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!ready) Text(if (hasModels) "Finish downloading and verifying all models to continue." else "Finish configuring this flow to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     cancelTarget?.let { (slot, model) ->

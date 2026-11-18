@@ -13,8 +13,10 @@ tool call. The runtime validates, records and applies it at a node boundary.
 The reasoner supplies advisory prose and has no tools. A selected route is a
 model decision, not independent proof that a real-world objective was achieved.
 
-Keep the graph a coordinator of model tasks. Computation and external work live
-in isolated tools invoked by the coder. Do not add model-free tool nodes,
+Keep the graph a coordinator of authored tasks. Computation and external work live
+in isolated tools. Model tasks use coder-selected calls; the later
+[direct execution mode](DIRECT-TOOL-EXECUTION.md) explicitly permits one fully
+bound ordinary call without inference. It does not add a graph node kind,
 expressions, natural-language parsers or a second programming language to the
 flow. No task name, artifact name, product name or website selector changes core
 execution semantics. E2LLM owns browser perception/readiness. Authors guide

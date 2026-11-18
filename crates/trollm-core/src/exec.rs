@@ -325,6 +325,23 @@ enum TaskLoopOutcome {
     Cancelled,
 }
 
+type BoundToolArguments = BTreeMap<String, BTreeMap<String, (Value, &'static str)>>;
+
+struct ToolDispatchInputs<'a> {
+    node_id: &'a str,
+    node: &'a Node,
+    task: &'a TaskDef,
+    fp: &'a FramePlan,
+    bound_arguments: &'a BoundToolArguments,
+    origin: trollm_mcp::preparation::CallOrigin,
+    diagnostic: Option<(&'a GenerateRequest, &'a trollm_models::GenerateResponse)>,
+}
+
+enum ToolDispatchOutcome {
+    Returned(Option<String>),
+    Cancelled,
+}
+
 enum ModelFailureEvidence<'a> {
     Response(&'a trollm_models::GenerateResponse),
     Error {
@@ -1255,7 +1272,25 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .cloned()
             .ok_or_else(|| anyhow!("taskRef {:?} not in registry", node.task_ref))?;
 
-        if task.completion == TaskCompletion::ToolOrRoute || task.result_artifact.is_some() {
+        if task.execution == TaskExecution::Tool {
+            if let Err(failure) = self.check_step_budget(node_id, &task, fp) {
+                return self.apply_run_limit(fp, &failure.detail);
+            }
+            self.state.stack.last_mut().unwrap().counters.steps += 1;
+            self.state.counters.steps += 1;
+            self.emit(
+                EventType::DirectToolStep,
+                json!({
+                    "node": node_id, "taskRef": node.task_ref, "tool": task.tools[0],
+                    "execution": "tool",
+                }),
+            )?;
+        }
+
+        if task.execution == TaskExecution::Tool
+            || task.completion == TaskCompletion::ToolOrRoute
+            || task.result_artifact.is_some()
+        {
             let frame = self.state.stack.last_mut().unwrap();
             vars_obj_mut(frame).remove(node_id);
             frame.node_outputs.remove(node_id);
@@ -1298,14 +1333,14 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 .gateway
                 .begin_result_artifact_attempt(server, method, name)
             {
-                Ok(()) => self.run_task_loop(node_id, node, &task, fp),
+                Ok(()) => self.run_task_attempt(node_id, node, &task, fp),
                 Err(error) => Err(TaskFailure::new(
                     ErrorClass::ArtifactIo,
                     format!("task resultArtifact: {error:#}"),
                 )),
             }
         } else {
-            self.run_task_loop(node_id, node, &task, fp)
+            self.run_task_attempt(node_id, node, &task, fp)
         };
         let cancelled = self.control_cancelled();
         match outcome {
@@ -1374,51 +1409,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 .unwrap()
                 .insert("runtime".into(), runtime.clone());
         }
-        let mut bound_arguments = BTreeMap::new();
-        if let Some(bindings) = &task.tool_arguments {
-            let input = if bindings.values().any(|rule| !rule.from_input.is_empty()) {
-                match serde_json::from_str::<Value>(&self.user_input) {
-                    Ok(Value::Object(input)) => Some(input),
-                    _ => {
-                        return Err(TaskFailure::new(
-                            ErrorClass::VerificationFailed,
-                            "fromInput requires user_input to be a JSON object",
-                        ))
-                    }
-                }
-            } else {
-                None
-            };
-            for (tool, rule) in bindings {
-                let mut values = BTreeMap::new();
-                for (argument, path) in &rule.from_vars {
-                    let value = template::lookup(path, &frame_vars).ok_or_else(|| {
-                        TaskFailure::new(
-                            ErrorClass::VerificationFailed,
-                            format!("tool argument source '{path}' is not bound"),
-                        )
-                    })?;
-                    values.insert(argument.clone(), (value.clone(), "fromVars"));
-                }
-                for (argument, key) in &rule.from_input {
-                    let value =
-                        input
-                            .as_ref()
-                            .and_then(|input| input.get(key))
-                            .ok_or_else(|| {
-                                TaskFailure::new(
-                                    ErrorClass::VerificationFailed,
-                                    format!("fromInput source '{key}' is not bound"),
-                                )
-                            })?;
-                    values.insert(argument.clone(), (value.clone(), "fromInput"));
-                }
-                for (argument, value) in &rule.fixed {
-                    values.insert(argument.clone(), (value.clone(), "fixed"));
-                }
-                bound_arguments.insert(tool.clone(), values);
-            }
-        }
+        let bound_arguments = self.resolve_tool_arguments(task, &frame_vars)?;
         let prompt_started = Instant::now();
         let template_text = self
             .registry
@@ -1682,7 +1673,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         let prompt_assembly_ns = elapsed_ns(prompt_started);
         for model_ordinal in 1..=max_steps {
             self.check_deadline(node_id)?;
-            self.check_generation_budget(node_id, task, fp)?;
+            self.check_step_budget(node_id, task, fp)?;
 
             let req = GenerateRequest {
                 prompt: context.clone(),
@@ -1727,12 +1718,18 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             };
             let t0 = Instant::now();
             let resp = {
-                let slot = self.models.get_mut(&task.model).ok_or_else(|| {
-                    TaskFailure::new(
-                        ErrorClass::ModelError,
-                        format!("no model bound to slot '{}'", task.model),
-                    )
-                })?;
+                let slot = self
+                    .models
+                    .get_mut(task.model_slot().expect("validated model task"))
+                    .ok_or_else(|| {
+                        TaskFailure::new(
+                            ErrorClass::ModelError,
+                            format!(
+                                "no model bound to slot '{}'",
+                                task.model_slot().unwrap_or_default()
+                            ),
+                        )
+                    })?;
                 slot.generate(req.clone())
             };
             let mut resp = match resp {
@@ -1776,13 +1773,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
                 let frame = self.state.stack.last_mut().unwrap();
                 frame.counters.steps += 1;
                 frame.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
-                if task.model == CANONICAL_REASONER_SLOT {
+                if task.model_slot() == Some(CANONICAL_REASONER_SLOT) {
                     frame.counters.reasoner_calls += 1;
                 }
             }
             self.state.counters.steps += 1;
             self.state.counters.tokens += resp.tokens_in as u64 + resp.tokens_out as u64;
-            if task.model == CANONICAL_REASONER_SLOT {
+            if task.model_slot() == Some(CANONICAL_REASONER_SLOT) {
                 self.state.counters.reasoner_calls += 1;
             }
             self.emit(
@@ -2000,352 +1997,26 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             }
 
             for call in &mut calls {
-                let model_proposal = call.clone();
-                let fqn = format!("{}.{}", call.server, call.tool);
-                if !task.tools.iter().any(|t| t == &fqn) {
-                    // Post-hoc validation failure (§5.1): the model called a
-                    // tool outside its allowlist. Counted as tool-call-parse
-                    // (see OPEN QUESTIONS in the implementation report).
-                    self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
-                    return Err(TaskFailure::new(
-                        ErrorClass::ToolCallParse,
-                        format!("tool '{fqn}' not in allowlist of task '{task_ref}'"),
-                    ));
-                }
-
-                if let Some(bindings) = bound_arguments.get(&fqn) {
-                    let args = call.args.as_object_mut().ok_or_else(|| {
-                        TaskFailure::new(ErrorClass::ToolCallParse, "tool args must be an object")
-                    })?;
-                    for (name, (value, source)) in bindings {
-                        match args.get(name) {
-                            Some(provided) if provided != value => {
-                                self.save_model_failure_diagnostic(
-                                    node_id,
-                                    node,
-                                    task,
-                                    fp,
-                                    &req,
-                                    Some(&resp),
-                                );
-                                return Err(TaskFailure::new(
-                                    ErrorClass::ToolCallParse,
-                                    format!(
-                                        "tool '{fqn}' argument '{name}' conflicts with {source}"
-                                    ),
-                                ));
-                            }
-                            Some(_) => {}
-                            None => {
-                                args.insert(name.clone(), value.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Recheck the actual dispatch policy; plan/gateway composition
-                // must never allow an unjournaled declared mutation.
-                let journaled = task
-                    .mutations
-                    .as_ref()
-                    .is_some_and(|m| m.idempotency == Idempotency::IntentLog);
-                if (self.gateway.tool_class(&call.server, &call.tool)
-                    == trollm_mcp::policy::ToolClass::Mutation
-                    || self
-                        .plan
-                        .mcp
-                        .policies
-                        .get(&fqn)
-                        .and_then(|p| p.get("class"))
-                        .and_then(|c| c.as_str())
-                        == Some("mutation"))
-                    && !journaled
-                {
-                    return Err(TaskFailure::new(
-                        ErrorClass::McpError,
-                        format!("mutation '{fqn}' requires intent-log before dispatch"),
-                    ));
-                }
-                self.check_deadline(node_id)?;
-                self.gateway
-                    .set_deadline(Instant::now().checked_add(self.remaining_duration()));
-                let call_context = self.next_call_context();
-                self.gateway.set_call_context(Some(call_context.clone()));
-                let preparation_context = trollm_mcp::preparation::PreparationContext {
-                    run_id: self.state.run_id.clone(),
-                    node: node_id.to_owned(),
-                    task_ref: task_ref.clone(),
-                    model_slot: task.model.clone(),
-                    model_call_ordinal: model_ordinal,
-                    frames: self
-                        .state
-                        .stack
-                        .iter()
-                        .map(|frame| trollm_mcp::preparation::FramePosition {
-                            plan: frame.plan.clone(),
-                            node: frame.node.clone(),
-                        })
-                        .collect(),
-                    cursors: self
-                        .state
-                        .cursors()
-                        .map(|(node, cursor)| trollm_mcp::preparation::CursorPosition {
-                            node: node.clone(),
-                            snapshot_ref: cursor.snapshot_ref.clone(),
-                            index: cursor.index as u64,
-                            phase: match cursor.phase {
-                                crate::state::ForeachPhase::Next => "next",
-                                crate::state::ForeachPhase::InBody => "inBody",
-                                crate::state::ForeachPhase::InBetween => "inBetween",
-                            }
-                            .into(),
-                        })
-                        .collect(),
-                    call_context: call_context.clone(),
-                    argument_bindings: bound_arguments
-                        .get(&fqn)
-                        .map(|values| {
-                            values
-                                .iter()
-                                .map(|(name, (value, source))| {
-                                    let rule = task
-                                        .tool_arguments
-                                        .as_ref()
-                                        .and_then(|rules| rules.get(&fqn));
-                                    let path = match *source {
-                                        "fromVars" => {
-                                            rule.and_then(|r| r.from_vars.get(name)).cloned()
-                                        }
-                                        "fromInput" => {
-                                            rule.and_then(|r| r.from_input.get(name)).cloned()
-                                        }
-                                        _ => None,
-                                    };
-                                    trollm_mcp::preparation::BoundArgument {
-                                        name: name.clone(),
-                                        source: (*source).into(),
-                                        path,
-                                        value: value.clone(),
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                let tool_context = match self.dispatch_tool_call(
+                    ToolDispatchInputs {
+                        node_id,
+                        node,
+                        task,
+                        fp,
+                        bound_arguments: &bound_arguments,
+                        origin: trollm_mcp::preparation::CallOrigin::Model {
+                            slot: task.model_slot().expect("validated model task").to_owned(),
+                            ordinal: model_ordinal,
+                        },
+                        diagnostic: Some((&req, &resp)),
+                    },
+                    call,
+                    &mut artifacts,
+                )? {
+                    ToolDispatchOutcome::Cancelled => return Ok(TaskLoopOutcome::Cancelled),
+                    ToolDispatchOutcome::Returned(context) => context,
                 };
-                let mut selected_prepared = false;
-                let requested_call = call.clone();
-                let preparation_started = Instant::now();
-                if let Some(prepared) = self
-                    .gateway
-                    .prepare_call(call, &preparation_context)
-                    .map_err(|e| {
-                        TaskFailure::new(ErrorClass::McpError, format!("preparation: {e:#}"))
-                    })?
-                {
-                    // Preparation may already have issued a remote guard. Track
-                    // it before any local validation, cancellation or journal
-                    // failure can enter an authored retry or suffix.
-                    self.selected_call_pending = true;
-                    prepared.validate(call, &preparation_context).map_err(|e| {
-                        TaskFailure::new(ErrorClass::ToolCallParse, format!("preparation: {e:#}"))
-                    })?;
-                    self.check_deadline(node_id)?;
-                    if self.control_cancelled() {
-                        return Ok(TaskLoopOutcome::Cancelled);
-                    }
-                    self.emit(EventType::ToolCallPrepared, json!({
-                        "node":node_id,"taskRef":task_ref,"callContext":call_context,
-                        "modelProposal":model_proposal,"requestedCall":requested_call,
-                        "resolvedCall":prepared.call,"evidence":prepared.evidence,
-                        "nativeContext":preparation_context.raw()
-                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?,
-                        "preparationMs":preparation_started.elapsed().as_millis() as u64,
-                    })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
-                    *call = prepared.call;
-                    selected_prepared = true;
-                }
-                self.gateway.validate_call(call).map_err(|e| {
-                    self.save_model_failure_diagnostic(node_id, node, task, fp, &req, Some(&resp));
-                    TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
-                })?;
-
-                self.check_deadline(node_id)?;
-
-                if self.control_cancelled() {
-                    return Ok(TaskLoopOutcome::Cancelled);
-                }
-
-                // Mutation journaling (§6): intent BEFORE the call for tasks
-                // with mutations.idempotency = intent-log.
-                let intent_seq = if task
-                    .mutations
-                    .as_ref()
-                    .map(|m| m.idempotency == Idempotency::IntentLog)
-                    .unwrap_or(false)
-                {
-                    let args_sha256 = hash_json(&call.args)
-                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                    Some(
-                        self.emit(
-                            EventType::ToolCallIntent,
-                            json!({
-                                "node": node_id, "taskRef": task_ref,
-                                "server": call.server, "tool": call.tool,
-                                "args": call.args, "argsSha256": args_sha256,
-                                "callContext":call_context,
-                            }),
-                        )
-                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?,
-                    )
-                } else {
-                    None
-                };
-
-                if selected_prepared && intent_seq.is_none() {
-                    return Err(TaskFailure::new(
-                        ErrorClass::ArtifactIo,
-                        "selected effect requires retained native intent",
-                    ));
-                }
-
-                let is_mutation = self.gateway.tool_class(&call.server, &call.tool)
-                    == trollm_mcp::policy::ToolClass::Mutation
-                    || self
-                        .plan
-                        .mcp
-                        .policies
-                        .get(&fqn)
-                        .and_then(|p| p.get("class"))
-                        .and_then(Value::as_str)
-                        == Some("mutation");
-                let previous_mutation_outcome = self.mutation_outcome;
-                if is_mutation {
-                    self.mutation_outcome = crate::state::MutationOutcome::Unknown;
-                }
-                self.gateway
-                    .after_retained_intent(call, &preparation_context, intent_seq)
-                    .map_err(|error| {
-                        TaskFailure::new(
-                            ErrorClass::ArtifactIo,
-                            format!("retained intent association: {error:#}"),
-                        )
-                    })?;
-                self.selected_call_pending |= selected_prepared;
-                let t0 = Instant::now();
-                let result =
-                    match self
-                        .gateway
-                        .call_with_result_artifact(call, task.result_artifact.as_deref())
-                    {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let failure =
-                                TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {error}"));
-                            self.emit(EventType::Error, json!({
-                            "phase":"tool_call","node":node_id,"callContext":call_context,
-                            "class":failure.class.as_str(),"detail":failure.detail,"plan":fp.id,
-                            "ms":t0.elapsed().as_millis() as u64,"failed":true,
-                        })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
-                            self.tool_failure_observed = true;
-                            // A late failed mutation can already have taken effect.
-                            // Retain its original uncertainty before a run deadline
-                            // finalizes the run, including respond_partial limits.
-                            if self.remaining_duration().is_zero() {
-                                self.record_task_failure(node_id, &failure);
-                                self.check_deadline(node_id)?;
-                            }
-                            return Err(failure);
-                        }
-                    };
-                if is_mutation
-                    && !selected_prepared
-                    && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
-                {
-                    self.mutation_outcome = crate::state::MutationOutcome::Returned;
-                }
-                let call_ms = t0.elapsed().as_millis() as u64;
-
-                let gateway_result_bytes =
-                    crate::json_size::compact_json_bytes(&result.content_for_model)
-                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                let tool_context = (!matches!(task.completion, TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute)).then(|| {
-                    // Display serializes the borrowed Value directly into the
-                    // continuation string, without cloning the result tree.
-                    format!(
-                        "\n<tool_result>{{\"result\":{},\"server\":{},\"tool\":{}}}</tool_result>\n",
-                        result.content_for_model, json!(call.server), json!(call.tool),
-                    )
-                });
-                let retained_result_seq = self.emit(
-                    EventType::ToolCallResult,
-                    json!({
-                        "taskRef": task_ref, "callContext":call_context,
-                        "resultArtifact": task.result_artifact,
-                        "argsHash": trollm_mcp::CacheStore::hash_args(&call.args, None, None),
-                        "gatewayResultCompactJsonUtf8Bytes": gateway_result_bytes,
-                        "toolResultContextCandidateUtf8Bytes": tool_context.as_ref().map_or(0, String::len),
-                        "artifacts": result.artifacts,
-                        "intentSeq": intent_seq, "node": node_id,
-                        "server": call.server, "tool": call.tool,
-                        "provenance": format!("{:?}", result.provenance), "ms": call_ms,
-                    }),
-                )
-                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
                 tool_calls_made += 1;
-
-                for art in &result.artifacts {
-                    if let Ok(bytes) = std::fs::read(art) {
-                        let sha = hex_sha256(&bytes);
-                        self.emit(
-                            EventType::ArtifactWritten,
-                            json!({ "path": art, "bytes": bytes.len(), "sha256": sha }),
-                        )
-                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
-                        self.account_artifact_bytes(bytes.len() as u64, fp)?;
-                        if let Some(name) = artifacts::logical_name(art) {
-                            artifacts.insert(name, art.clone());
-                        }
-                    }
-                }
-
-                self.gateway
-                    .after_retained_result(
-                        call,
-                        &preparation_context,
-                        &result,
-                        intent_seq,
-                        retained_result_seq,
-                    )
-                    .map_err(|e| {
-                        TaskFailure::new(
-                            ErrorClass::ArtifactIo,
-                            format!("retained result acknowledgement: {e:#}"),
-                        )
-                    })?;
-
-                if selected_prepared {
-                    self.emit(EventType::ToolCallOutcomeAcknowledged, json!({
-                        "node":node_id,"taskRef":task_ref,"callContext":call_context,
-                        "intentSeq":intent_seq,"resultSeq":retained_result_seq,
-                        "contextSha256":preparation_context.raw()
-                            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?.sha256,
-                    })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
-                    self.selected_call_pending = false;
-                    if is_mutation
-                        && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
-                    {
-                        self.mutation_outcome = crate::state::MutationOutcome::Returned;
-                    }
-                }
-
-                self.check_deadline(node_id)?;
-
-                // The result, including a mutation's intent linkage, is
-                // durable before honoring a cancellation during the call.
-                // This typed outcome bypasses authored onError.
-                if self.control_cancelled() {
-                    return Ok(TaskLoopOutcome::Cancelled);
-                }
 
                 if matches!(
                     task.completion,
@@ -2379,6 +2050,496 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             tool_calls_made,
             artifacts,
         }))
+    }
+
+    fn resolve_tool_arguments(
+        &self,
+        task: &TaskDef,
+        frame_vars: &Value,
+    ) -> Result<BoundToolArguments, TaskFailure> {
+        let mut bound_arguments = BTreeMap::new();
+        if let Some(bindings) = &task.tool_arguments {
+            let input = if bindings.values().any(|rule| !rule.from_input.is_empty()) {
+                match serde_json::from_str::<Value>(&self.user_input) {
+                    Ok(Value::Object(input)) => Some(input),
+                    _ => {
+                        return Err(TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            "fromInput requires user_input to be a JSON object",
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+            for (tool, rule) in bindings {
+                let mut values = BTreeMap::new();
+                for (argument, path) in &rule.from_vars {
+                    let value = template::lookup(path, frame_vars).ok_or_else(|| {
+                        TaskFailure::new(
+                            ErrorClass::VerificationFailed,
+                            format!("tool argument source '{path}' is not bound"),
+                        )
+                    })?;
+                    values.insert(argument.clone(), (value.clone(), "fromVars"));
+                }
+                for (argument, key) in &rule.from_input {
+                    let value =
+                        input
+                            .as_ref()
+                            .and_then(|input| input.get(key))
+                            .ok_or_else(|| {
+                                TaskFailure::new(
+                                    ErrorClass::VerificationFailed,
+                                    format!("fromInput source '{key}' is not bound"),
+                                )
+                            })?;
+                    values.insert(argument.clone(), (value.clone(), "fromInput"));
+                }
+                for (argument, value) in &rule.fixed {
+                    values.insert(argument.clone(), (value.clone(), "fixed"));
+                }
+                bound_arguments.insert(tool.clone(), values);
+            }
+        }
+        Ok(bound_arguments)
+    }
+
+    fn run_task_attempt(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        task: &TaskDef,
+        fp: &FramePlan,
+    ) -> Result<TaskLoopOutcome, TaskFailure> {
+        match task.execution {
+            TaskExecution::Model => self.run_task_loop(node_id, node, task, fp),
+            TaskExecution::Tool => {
+                let vars = self
+                    .state
+                    .stack
+                    .last()
+                    .map(|frame| frame.vars.clone())
+                    .unwrap_or(Value::Null);
+                let bindings = self.resolve_tool_arguments(task, &vars)?;
+                let (server, tool) = task.tools[0]
+                    .split_once('.')
+                    .expect("validated direct tool");
+                let mut call = trollm_mcp::ToolCall {
+                    server: server.into(),
+                    tool: tool.into(),
+                    args: json!({}),
+                };
+                let mut artifacts = BTreeMap::new();
+                match self.dispatch_tool_call(
+                    ToolDispatchInputs {
+                        node_id,
+                        node,
+                        task,
+                        fp,
+                        bound_arguments: &bindings,
+                        origin: trollm_mcp::preparation::CallOrigin::Tool,
+                        diagnostic: None,
+                    },
+                    &mut call,
+                    &mut artifacts,
+                )? {
+                    ToolDispatchOutcome::Cancelled => Ok(TaskLoopOutcome::Cancelled),
+                    ToolDispatchOutcome::Returned(_) => {
+                        Ok(TaskLoopOutcome::Completed(TaskOutcome {
+                            route: None,
+                            prose: String::new(),
+                            tool_calls_made: 1,
+                            artifacts,
+                        }))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Common checked execution boundary for model and authored requests.
+    fn dispatch_tool_call(
+        &mut self,
+        input: ToolDispatchInputs<'_>,
+        call: &mut trollm_mcp::ToolCall,
+        artifacts: &mut BTreeMap<String, PathBuf>,
+    ) -> Result<ToolDispatchOutcome, TaskFailure> {
+        let ToolDispatchInputs {
+            node_id,
+            node,
+            task,
+            fp,
+            bound_arguments,
+            origin,
+            diagnostic,
+        } = input;
+        let task_ref = node.task_ref.clone().unwrap_or_default();
+        let direct = origin.model_identity().is_none();
+        let model_proposal = call.clone();
+        let fqn = format!("{}.{}", call.server, call.tool);
+        if !task.tools.iter().any(|t| t == &fqn) {
+            // Post-hoc validation failure (§5.1): the model called a
+            // tool outside its allowlist. Counted as tool-call-parse
+            // (see OPEN QUESTIONS in the implementation report).
+            if let Some((req, resp)) = diagnostic {
+                self.save_model_failure_diagnostic(node_id, node, task, fp, req, Some(resp));
+            }
+            return Err(TaskFailure::new(
+                ErrorClass::ToolCallParse,
+                format!("tool '{fqn}' not in allowlist of task '{task_ref}'"),
+            ));
+        }
+
+        if let Some(bindings) = bound_arguments.get(&fqn) {
+            let args = call.args.as_object_mut().ok_or_else(|| {
+                TaskFailure::new(ErrorClass::ToolCallParse, "tool args must be an object")
+            })?;
+            for (name, (value, source)) in bindings {
+                match args.get(name) {
+                    Some(provided) if provided != value => {
+                        if let Some((req, resp)) = diagnostic {
+                            self.save_model_failure_diagnostic(
+                                node_id,
+                                node,
+                                task,
+                                fp,
+                                req,
+                                Some(resp),
+                            );
+                        }
+                        return Err(TaskFailure::new(
+                            ErrorClass::ToolCallParse,
+                            format!("tool '{fqn}' argument '{name}' conflicts with {source}"),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        args.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
+        if direct {
+            self.gateway
+                .validate_direct_call(call)
+                .map_err(|error| TaskFailure::new(ErrorClass::McpError, error.to_string()))?;
+        }
+
+        // Recheck the actual dispatch policy; plan/gateway composition
+        // must never allow an unjournaled declared mutation.
+        let journaled = task
+            .mutations
+            .as_ref()
+            .is_some_and(|m| m.idempotency == Idempotency::IntentLog);
+        if (self.gateway.tool_class(&call.server, &call.tool)
+            == trollm_mcp::policy::ToolClass::Mutation
+            || self
+                .plan
+                .mcp
+                .policies
+                .get(&fqn)
+                .and_then(|p| p.get("class"))
+                .and_then(|c| c.as_str())
+                == Some("mutation"))
+            && !journaled
+        {
+            return Err(TaskFailure::new(
+                ErrorClass::McpError,
+                format!("mutation '{fqn}' requires intent-log before dispatch"),
+            ));
+        }
+        self.check_deadline(node_id)?;
+        self.gateway
+            .set_deadline(Instant::now().checked_add(self.remaining_duration()));
+        let call_context = self.next_call_context();
+        self.gateway.set_call_context(Some(call_context.clone()));
+        let preparation_context = trollm_mcp::preparation::PreparationContext {
+            run_id: self.state.run_id.clone(),
+            node: node_id.to_owned(),
+            task_ref: task_ref.clone(),
+            origin,
+            frames: self
+                .state
+                .stack
+                .iter()
+                .map(|frame| trollm_mcp::preparation::FramePosition {
+                    plan: frame.plan.clone(),
+                    node: frame.node.clone(),
+                })
+                .collect(),
+            cursors: self
+                .state
+                .cursors()
+                .map(|(node, cursor)| trollm_mcp::preparation::CursorPosition {
+                    node: node.clone(),
+                    snapshot_ref: cursor.snapshot_ref.clone(),
+                    index: cursor.index as u64,
+                    phase: match cursor.phase {
+                        crate::state::ForeachPhase::Next => "next",
+                        crate::state::ForeachPhase::InBody => "inBody",
+                        crate::state::ForeachPhase::InBetween => "inBetween",
+                    }
+                    .into(),
+                })
+                .collect(),
+            call_context: call_context.clone(),
+            argument_bindings: bound_arguments
+                .get(&fqn)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|(name, (value, source))| {
+                            let rule = task
+                                .tool_arguments
+                                .as_ref()
+                                .and_then(|rules| rules.get(&fqn));
+                            let path = match *source {
+                                "fromVars" => rule.and_then(|r| r.from_vars.get(name)).cloned(),
+                                "fromInput" => rule.and_then(|r| r.from_input.get(name)).cloned(),
+                                _ => None,
+                            };
+                            trollm_mcp::preparation::BoundArgument {
+                                name: name.clone(),
+                                source: (*source).into(),
+                                path,
+                                value: value.clone(),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let mut selected_prepared = false;
+        let requested_call = call.clone();
+        let preparation_started = Instant::now();
+        if let Some(prepared) = self
+            .gateway
+            .prepare_call(call, &preparation_context)
+            .map_err(|e| TaskFailure::new(ErrorClass::McpError, format!("preparation: {e:#}")))?
+        {
+            // Preparation may already have issued a remote guard. Track
+            // it before any local validation, cancellation or journal
+            // failure can enter an authored retry or suffix.
+            self.selected_call_pending = true;
+            if direct {
+                return Err(TaskFailure::new(
+                    ErrorClass::McpError,
+                    "direct tool execution does not support selected preparation",
+                ));
+            }
+            prepared.validate(call, &preparation_context).map_err(|e| {
+                TaskFailure::new(ErrorClass::ToolCallParse, format!("preparation: {e:#}"))
+            })?;
+            self.check_deadline(node_id)?;
+            if self.control_cancelled() {
+                return Ok(ToolDispatchOutcome::Cancelled);
+            }
+            self.emit(
+                EventType::ToolCallPrepared,
+                json!({
+                    "node":node_id,"taskRef":task_ref,"callContext":call_context,
+                    "modelProposal":model_proposal,"requestedCall":requested_call,
+                    "resolvedCall":prepared.call,"evidence":prepared.evidence,
+                    "nativeContext":preparation_context.raw()
+                        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?,
+                    "preparationMs":preparation_started.elapsed().as_millis() as u64,
+                }),
+            )
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+            *call = prepared.call;
+            selected_prepared = true;
+        }
+        self.gateway.validate_call(call).map_err(|e| {
+            if let Some((req, resp)) = diagnostic {
+                self.save_model_failure_diagnostic(node_id, node, task, fp, req, Some(resp));
+            }
+            TaskFailure::new(ErrorClass::ToolCallParse, format!("{fqn}: {e:#}"))
+        })?;
+
+        self.check_deadline(node_id)?;
+
+        if self.control_cancelled() {
+            return Ok(ToolDispatchOutcome::Cancelled);
+        }
+
+        // Mutation journaling (§6): intent BEFORE the call for tasks
+        // with mutations.idempotency = intent-log.
+        let intent_seq = if task
+            .mutations
+            .as_ref()
+            .map(|m| m.idempotency == Idempotency::IntentLog)
+            .unwrap_or(false)
+        {
+            let args_sha256 = hash_json(&call.args)
+                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+            Some(
+                self.emit(
+                    EventType::ToolCallIntent,
+                    json!({
+                        "node": node_id, "taskRef": task_ref,
+                        "server": call.server, "tool": call.tool,
+                        "args": call.args, "argsSha256": args_sha256,
+                        "callContext":call_context,
+                    }),
+                )
+                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        if selected_prepared && intent_seq.is_none() {
+            return Err(TaskFailure::new(
+                ErrorClass::ArtifactIo,
+                "selected effect requires retained native intent",
+            ));
+        }
+
+        let is_mutation = self.gateway.tool_class(&call.server, &call.tool)
+            == trollm_mcp::policy::ToolClass::Mutation
+            || self
+                .plan
+                .mcp
+                .policies
+                .get(&fqn)
+                .and_then(|p| p.get("class"))
+                .and_then(Value::as_str)
+                == Some("mutation");
+        let previous_mutation_outcome = self.mutation_outcome;
+        if is_mutation {
+            self.mutation_outcome = crate::state::MutationOutcome::Unknown;
+        }
+        self.gateway
+            .after_retained_intent(call, &preparation_context, intent_seq)
+            .map_err(|error| {
+                TaskFailure::new(
+                    ErrorClass::ArtifactIo,
+                    format!("retained intent association: {error:#}"),
+                )
+            })?;
+        self.selected_call_pending |= selected_prepared;
+        let t0 = Instant::now();
+        let result = match self
+            .gateway
+            .call_with_result_artifact(call, task.result_artifact.as_deref())
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let failure = TaskFailure::new(ErrorClass::McpError, format!("{fqn}: {error}"));
+                self.emit(
+                    EventType::Error,
+                    json!({
+                        "phase":"tool_call","node":node_id,"callContext":call_context,
+                        "class":failure.class.as_str(),"detail":failure.detail,"plan":fp.id,
+                        "ms":t0.elapsed().as_millis() as u64,"failed":true,
+                    }),
+                )
+                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                self.tool_failure_observed = true;
+                // A late failed mutation can already have taken effect.
+                // Retain its original uncertainty before a run deadline
+                // finalizes the run, including respond_partial limits.
+                if self.remaining_duration().is_zero() {
+                    self.record_task_failure(node_id, &failure);
+                    self.check_deadline(node_id)?;
+                }
+                return Err(failure);
+            }
+        };
+        if is_mutation
+            && !selected_prepared
+            && previous_mutation_outcome != crate::state::MutationOutcome::Unknown
+        {
+            self.mutation_outcome = crate::state::MutationOutcome::Returned;
+        }
+        let call_ms = t0.elapsed().as_millis() as u64;
+
+        let gateway_result_bytes = crate::json_size::compact_json_bytes(&result.content_for_model)
+            .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+        let tool_context = (!matches!(
+            task.completion,
+            TaskCompletion::ToolResult | TaskCompletion::ToolOrRoute
+        ))
+        .then(|| {
+            // Display serializes the borrowed Value directly into the
+            // continuation string, without cloning the result tree.
+            format!(
+                "\n<tool_result>{{\"result\":{},\"server\":{},\"tool\":{}}}</tool_result>\n",
+                result.content_for_model,
+                json!(call.server),
+                json!(call.tool),
+            )
+        });
+        let retained_result_seq = self.emit(
+            EventType::ToolCallResult,
+            json!({
+                "taskRef": task_ref, "callContext":call_context,
+                "resultArtifact": task.result_artifact,
+                "argsHash": trollm_mcp::CacheStore::hash_args(&call.args, None, None),
+                "gatewayResultCompactJsonUtf8Bytes": gateway_result_bytes,
+                "toolResultContextCandidateUtf8Bytes": tool_context.as_ref().map_or(0, String::len),
+                "artifacts": result.artifacts,
+                "intentSeq": intent_seq, "node": node_id,
+                "server": call.server, "tool": call.tool,
+                "provenance": format!("{:?}", result.provenance), "ms": call_ms,
+            }),
+        )
+        .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+
+        for art in &result.artifacts {
+            if let Ok(bytes) = std::fs::read(art) {
+                let sha = hex_sha256(&bytes);
+                self.emit(
+                    EventType::ArtifactWritten,
+                    json!({ "path": art, "bytes": bytes.len(), "sha256": sha }),
+                )
+                .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo, e.to_string()))?;
+                self.account_artifact_bytes(bytes.len() as u64, fp)?;
+                if let Some(name) = artifacts::logical_name(art) {
+                    artifacts.insert(name, art.clone());
+                }
+            }
+        }
+
+        self.gateway
+            .after_retained_result(
+                call,
+                &preparation_context,
+                &result,
+                intent_seq,
+                retained_result_seq,
+            )
+            .map_err(|e| {
+                TaskFailure::new(
+                    ErrorClass::ArtifactIo,
+                    format!("retained result acknowledgement: {e:#}"),
+                )
+            })?;
+
+        if selected_prepared {
+            self.emit(EventType::ToolCallOutcomeAcknowledged, json!({
+                "node":node_id,"taskRef":task_ref,"callContext":call_context,
+                "intentSeq":intent_seq,"resultSeq":retained_result_seq,
+                "contextSha256":preparation_context.raw()
+                    .map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?.sha256,
+            })).map_err(|e| TaskFailure::new(ErrorClass::ArtifactIo,e.to_string()))?;
+            self.selected_call_pending = false;
+            if is_mutation && previous_mutation_outcome != crate::state::MutationOutcome::Unknown {
+                self.mutation_outcome = crate::state::MutationOutcome::Returned;
+            }
+        }
+
+        self.check_deadline(node_id)?;
+
+        // The result, including a mutation's intent linkage, is
+        // durable before honoring a cancellation during the call.
+        // This typed outcome bypasses authored onError.
+        if self.control_cancelled() {
+            return Ok(ToolDispatchOutcome::Cancelled);
+        }
+        Ok(ToolDispatchOutcome::Returned(tool_context))
     }
 
     /// Best effort, private evidence only: a diagnostic must never replace the model failure.
@@ -2520,8 +2681,8 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     }
 
     /// Frame-scoped run budgets (§4.4: "own counter scope"; counters persist
-    /// across pause, never reset). Checked before each generation.
-    fn check_generation_budget(
+    /// across pause, never reset). Checked before each generation or direct attempt.
+    fn check_step_budget(
         &mut self,
         node_id: &str,
         task: &TaskDef,
@@ -2535,7 +2696,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .unwrap_or((0, 0));
         let hit = if steps >= fp.limits.max_steps {
             Some(("maxSteps", steps as u64, fp.limits.max_steps as u64))
-        } else if task.model == CANONICAL_REASONER_SLOT
+        } else if task.model_slot() == Some(CANONICAL_REASONER_SLOT)
             && reasoner_calls >= fp.limits.max_reasoner_calls
         {
             Some((
@@ -2732,7 +2893,10 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             self.verified_binding_sizes = None;
             return Ok(());
         }
-        if task.completion == TaskCompletion::ToolOrRoute || task.result_artifact.is_some() {
+        if task.execution == TaskExecution::Tool
+            || task.completion == TaskCompletion::ToolOrRoute
+            || task.result_artifact.is_some()
+        {
             let mut required = contract.require_artifact_complete.clone();
             for (name, output) in &contract.outputs {
                 if matches!(&node.outputs, Some(NodeOutputs::Task(outputs)) if outputs.contains_key(name))
@@ -2763,7 +2927,7 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             {
                 return Err(TaskFailure::new(
                     ErrorClass::VerificationFailed,
-                    format!("tool-or-route success requires current-call artifact '{missing}'"),
+                    format!("tool success requires current-call artifact '{missing}'"),
                 ));
             }
         }
@@ -3794,8 +3958,7 @@ mod recovery_regressions {
                 self.preparations += 1;
                 assert!(!context.run_id.is_empty());
                 assert!(matches!(context.node.as_str(), "work" | "retry"));
-                assert_eq!(context.model_slot, "coder");
-                assert_eq!(context.model_call_ordinal, 1);
+                assert_eq!(context.origin.model_identity(), Some(("coder", 1)));
                 assert_eq!(context.frames.len(), 1);
                 assert!(!EventLog::read_all(&self.log)?
                     .iter()
