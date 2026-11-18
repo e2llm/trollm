@@ -19,7 +19,8 @@ background when you need it.
 
 For a fully specified ordinary operation that needs no model decision, see
 [direct tool execution](DIRECT-TOOL-EXECUTION.md) and its zero-model calculation
-example. This source capability is newer than the published 1.0.1 APK.
+example. Direct execution is available in 1.1.0 and later; the earlier 1.0.1 APK
+predates it. The packaged Check a total version 2 uses it for comparison.
 
 ## Reading tracks
 

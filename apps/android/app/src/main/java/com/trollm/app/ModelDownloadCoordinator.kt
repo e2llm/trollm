@@ -32,6 +32,7 @@ class ModelDownloadCoordinator private constructor(context: Context) {
         val total: Long = 0,
         val downloading: Boolean = false,
         val message: String? = null,
+        val transferPhase: ModelTransferPhase? = null,
     )
 
     private data class Transfer(val status: Int, val bytes: Long, val reason: Int)
@@ -211,10 +212,19 @@ class ModelDownloadCoordinator private constructor(context: Context) {
                         val policy = if (preferences.contains("metered.${model.sha256}"))
                             ModelDownloadPolicy(preferences.getBoolean("metered.${model.sha256}", false)) else null
                         states[slot] = State(downloaded = transfer.bytes, total = model.sizeBytes, downloading = true,
+                            transferPhase = when (transfer.status) {
+                                DownloadManager.STATUS_PENDING -> ModelTransferPhase.QUEUED
+                                DownloadManager.STATUS_PAUSED -> when (transfer.reason) {
+                                    DownloadManager.PAUSED_WAITING_FOR_NETWORK, DownloadManager.PAUSED_QUEUED_FOR_WIFI ->
+                                        ModelTransferPhase.WAITING_FOR_NETWORK
+                                    else -> ModelTransferPhase.PAUSED
+                                }
+                                else -> ModelTransferPhase.TRANSFERRING
+                            },
                             message = when {
-                                root.usableSpace < SPACE_HEADROOM || (model.sizeBytes - transfer.bytes).coerceAtLeast(0) > root.usableSpace - SPACE_HEADROOM -> "Low free space for the remaining download."
+                                root.usableSpace < MODEL_SPACE_HEADROOM || (model.sizeBytes - transfer.bytes).coerceAtLeast(0) > root.usableSpace - MODEL_SPACE_HEADROOM -> "Low free space for the remaining download."
                                 policy == null -> "Existing download has no recorded network policy. Cancel and retry to apply this screen's network choice."
-                                transfer.status == DownloadManager.STATUS_PENDING -> "Queued by Android. ${policy.waitingMessage()}"
+                                transfer.status == DownloadManager.STATUS_PENDING -> policy.description
                                 transfer.status == DownloadManager.STATUS_PAUSED -> when (transfer.reason) {
                                     DownloadManager.PAUSED_WAITING_FOR_NETWORK -> policy.waitingMessage()
                                     DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "Waiting for Wi-Fi or another unmetered network."
@@ -264,7 +274,7 @@ class ModelDownloadCoordinator private constructor(context: Context) {
                 // Only our incomplete target is disposable, never legacy/final weights.
                 ready(!partial.exists() || partial.delete(), "Could not remove an incomplete download.")
                 val available = directory.usableSpace
-                ready(available >= SPACE_HEADROOM && model.sizeBytes <= available - SPACE_HEADROOM, "Not enough space: the model size plus 256 MiB free is required.")
+                ready(available >= MODEL_SPACE_HEADROOM && model.sizeBytes <= available - MODEL_SPACE_HEADROOM, "Not enough space: the model size plus 256 MiB free is required.")
                 val request = DownloadManager.Request(Uri.parse(model.url))
                     .setAllowedOverMetered(policy.allowMetered)
                     .setAllowedOverRoaming(policy.allowRoaming)
@@ -304,7 +314,6 @@ class ModelDownloadCoordinator private constructor(context: Context) {
     }
 
     companion object {
-        private const val SPACE_HEADROOM = 256L * 1024 * 1024
         @Volatile private var instance: ModelDownloadCoordinator? = null
         fun get(context: Context): ModelDownloadCoordinator = instance ?: synchronized(this) {
             instance ?: ModelDownloadCoordinator(context).also { instance = it }

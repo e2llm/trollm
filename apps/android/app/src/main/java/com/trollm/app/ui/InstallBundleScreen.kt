@@ -5,12 +5,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,15 +27,22 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.trollm.app.BundleInput
 import com.trollm.app.StatusTone
+import com.trollm.app.catchingOperation
+import com.trollm.app.installedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.trollm_uniffi.FlowInfo
 import uniffi.trollm_uniffi.InstallResult
 import uniffi.trollm_uniffi.TrollmRuntime
 
 /** Bounded file import; integrity verification does not establish author identity. */
 @Composable
-fun InstallBundleScreen(runtime: TrollmRuntime, onDone: () -> Unit) {
+fun InstallBundleScreen(
+    runtime: TrollmRuntime,
+    onDone: () -> Unit,
+    onOpen: ((FlowInfo) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var installed by remember { mutableStateOf<InstallResult?>(null) }
@@ -49,7 +58,7 @@ fun InstallBundleScreen(runtime: TrollmRuntime, onDone: () -> Unit) {
         failure = null
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                runCatching {
+                catchingOperation {
                     val bytes = context.contentResolver.openInputStream(uri)?.use { BundleInput.read(it) }
                         ?: error("could not read selected file")
                     runtime.installFlowBundle(bytes)
@@ -62,45 +71,67 @@ fun InstallBundleScreen(runtime: TrollmRuntime, onDone: () -> Unit) {
     }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ScreenHeader(
-            title = "Install flow",
-            onBack = onDone,
-            subtitle = "Choose a flow bundle saved on your device.",
-        )
-        ContentCard {
-            SectionHeading("Flow bundle")
-            Text("Select a .tar bundle. Its files and flow definition are checked before installation.", style = MaterialTheme.typography.bodyMedium)
-            Text("Only install flows from authors you trust. Flows can use granted service access to read, send or change data.", style = MaterialTheme.typography.bodyMedium)
+        ScreenHeader(title = "Import flow file", onBack = onDone)
+        val result = installed
+        if (result == null) {
+            Text(
+                "Choose a .tar flow bundle. The app checks its files and flow definition before installing it.",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                "Only import flows from authors you trust. Flows can use granted service access to read, send or change data.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
             Button(
                 onClick = { picker.launch(arrayOf("*/*")) },
                 enabled = !busy,
+                modifier = Modifier.heightIn(min = 48.dp),
                 shape = MaterialTheme.shapes.medium,
-            ) { Text(if (busy) "Installing…" else "Choose file") }
-        }
-        if (busy) {
-            StatusPanel("Verifying bundle…", tone = StatusTone.INFO,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-        }
-        failure?.let {
-            StatusPanel("Install rejected", it, StatusTone.ERROR,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-        }
-        installed?.let { result ->
+            ) { Text("Choose file") }
+            if (busy) {
+                StatusPanel(
+                    "Verifying bundle…",
+                    tone = StatusTone.INFO,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            failure?.let {
+                StatusPanel(
+                    "Import rejected",
+                    it,
+                    StatusTone.ERROR,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+        } else {
             StatusPanel(
                 title = "Flow installed",
                 message = "${result.flowId} · Version ${result.flowVersion}\n${result.filesVerified} files verified against the bundle manifest.",
                 tone = StatusTone.SUCCESS,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
-            ContentCard {
-                SectionHeading("Author verification")
-                Text("Author identity is not verified. File checksums confirm integrity against the manifest; they do not verify who created the bundle.", style = MaterialTheme.typography.bodyMedium)
-                Text("Signature status: ${result.signatureStatus}", style = MaterialTheme.typography.bodySmall)
-                TechnicalDetails("Flow SHA-256: ${result.flowSha256}")
+            if (onOpen != null) {
+                Button(
+                    onClick = { onOpen(result.installedFlow()) },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) { Text("Open this flow") }
             }
+            Text(
+                "File checksums confirm integrity against the manifest. Author identity is unverified.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TechnicalDetails(
+                "Signature status: ${result.signatureStatus}\nFlow SHA-256: ${result.flowSha256}\n" +
+                    "Installation SHA-256: ${result.installationSha256}",
+            )
+            TextButton(
+                onClick = { picker.launch(arrayOf("*/*")) },
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) { Text("Choose another file") }
         }
     }
 }

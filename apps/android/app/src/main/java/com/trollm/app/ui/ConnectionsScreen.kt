@@ -23,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -45,12 +46,18 @@ import kotlinx.coroutines.withContext
 
 /** Browser OAuth and manual Bearer setup; saved secrets never enter UI state. */
 @Composable
-fun ConnectionsScreen(onBack: () -> Unit) {
+fun ConnectionsScreen(
+    onBack: () -> Unit,
+    initialServer: String? = null,
+    initialEndpoint: String? = null,
+) {
     val context = LocalContext.current.applicationContext
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope()
-    var server by remember { mutableStateOf("e2llm") }
-    var endpoint by remember { mutableStateOf("https://mcp.e2llm.com/mcp") }
+    var server by rememberSaveable(initialServer) { mutableStateOf(initialServer ?: "e2llm") }
+    var endpoint by rememberSaveable(initialEndpoint) {
+        mutableStateOf(initialEndpoint ?: "https://mcp.e2llm.com/mcp")
+    }
     var token by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf<Boolean?>(null) }
     var savedForEndpoint by remember { mutableStateOf(false) }

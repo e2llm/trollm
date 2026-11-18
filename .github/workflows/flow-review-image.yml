@@ -14,6 +14,10 @@ name: Flow review image
       - rust-toolchain.toml
       - LICENSE
       - THIRD_PARTY_NOTICES.md
+      - licenses/upstream/**
+      - scripts/make_flow_review_notices.py
+      - scripts/android/make_apk_notices.py
+      - scripts/test_flow_review_notices.py
   workflow_dispatch:
 
 # No pull-request trigger or package credentials in the build job. Only this
@@ -76,6 +80,7 @@ jobs:
           cargo fmt -p trollm-flow-review -- --check
           cargo clippy --locked -p trollm-flow-review --all-targets -- -D warnings
           cargo test --locked -p trollm-flow-review
+          python3 -m unittest discover -s scripts -p test_flow_review_notices.py
       - name: Build the image with its own fresh browser audit evidence
         run: |
           mkdir -p dist/flow-review
@@ -99,6 +104,9 @@ jobs:
           trap 'docker rm -f "$container_id" >/dev/null; rm -rf "$image_web"' EXIT
           docker cp "$container_id:/app/web/." "$image_web"
           npm --prefix apps/flow-review/web run audit:image -- "$image_web"
+          mkdir -p dist/flow-review/notices
+          docker cp "$container_id:/app/notices/." dist/flow-review/notices
+          python3 scripts/make_flow_review_notices.py verify dist/flow-review/notices
           cp apps/flow-review/web/scripts/audit-exceptions.json dist/flow-review/audit-exceptions.json
           docker rm "$container_id" >/dev/null
           rm -rf "$image_web"
@@ -132,7 +140,8 @@ jobs:
             --input /work/image.tar --scanners vuln,secret --severity HIGH,CRITICAL \
             --exit-code 1 --no-progress --format json --output /work/image-scan.json
           cd dist/flow-review
-          sha256sum image.tar image.digest image-config.json image-scan.json audit-exceptions.json > SHA256SUMS
+          sha256sum image.tar image.digest image-config.json image-scan.json audit-exceptions.json \
+            notices/THIRD_PARTY_NOTICES.txt notices/third-party-manifest.json > SHA256SUMS
       - name: Retain the verified bytes for publication and retries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -171,6 +180,10 @@ jobs:
           docker image inspect "localhost/trollm-flow-review:$GITHUB_SHA" > "$verification_dir/config.json"
           docker cp "$verification_container:/app/web/audit-prebuild.json" "$verification_dir/audit-prebuild.json"
           docker cp "$verification_container:/app/web/bundle-inventory.json" "$verification_dir/bundle-inventory.json"
+          mkdir -p "$verification_dir/notices"
+          docker cp "$verification_container:/app/notices/." "$verification_dir/notices"
+          cmp notices/THIRD_PARTY_NOTICES.txt "$verification_dir/notices/THIRD_PARTY_NOTICES.txt"
+          cmp notices/third-party-manifest.json "$verification_dir/notices/third-party-manifest.json"
           python3 - "$verification_dir" <<'PY'
           from datetime import datetime, timedelta, timezone
           import hashlib, json, os, re, sys

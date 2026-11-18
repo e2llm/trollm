@@ -223,7 +223,7 @@ class StarterBundles(unittest.TestCase):
                               ("flow-setup.v1.schema.json", setup)):
             Draft202012Validator(json.loads((fixture.REPO / "schemas" / schema).read_text())).validate(value)
         self.assertEqual((plan["id"], registry["id"], plan["version"], registry["version"]),
-                         ("check-total", "check-total", 1, 1))
+                         ("check-total", "check-total", 2, 2))
         self.assertEqual(plan["setup"]["sha256"], hashlib.sha256(files["setup.json"]).hexdigest())
         self.assertEqual(setup["title"], "Check a total")
         self.assertEqual(setup["connections"], {})
@@ -239,15 +239,18 @@ class StarterBundles(unittest.TestCase):
         tasks = registry["tasks"]
         self.assertEqual(tasks["sum-cart"]["toolArguments"],
                          {"local.calculate": {"fixed": {"operation": "add"}}})
-        self.assertEqual(tasks["compare-budget"]["toolArguments"], {"local.calculate": {
-            "fromVars": {"left": "sum.outputs.calculation.result"},
+        comparison = tasks["compare-budget"]
+        self.assertEqual(comparison["execution"], "tool")
+        self.assertTrue({"model", "prompt", "loop"}.isdisjoint(comparison))
+        self.assertEqual(comparison["toolArguments"], {"local.calculate": {
+            "modelFields": [], "fromVars": {"left": "sum.outputs.calculation.result"},
             "fromInput": {"right": "budget"}, "fixed": {"operation": "compare"}}})
         for name in ("sum-cart", "compare-budget"):
             self.assertEqual(tasks[name]["tools"], ["local.calculate"])
             self.assertEqual(tasks[name]["completion"], "tool-result")
             self.assertEqual(tasks[name]["outputContract"]["requireArtifactComplete"], ["calculation"])
-            self.assertIn('<tool_call>{"server":"local","tool":"calculate","args":',
-                          files[tasks[name]["prompt"]].decode())
+        self.assertIn('<tool_call>{"server":"local","tool":"calculate","args":',
+                      files[tasks["sum-cart"]["prompt"]].decode())
         for name, slot in (("advise-cart", "reasoner"), ("report-cart", "coder")):
             self.assertEqual(tasks[name]["tools"], [])
             self.assertEqual(tasks[name]["model"], slot)

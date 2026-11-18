@@ -631,6 +631,21 @@ impl TrollmRuntime {
             .map_err(|e| TrollmError::Bundle(format!("serializing flow setup: {e}")))
     }
 
+    /// Read verified model declarations for an installed flow, including unused
+    /// slots and slots in referenced child flows. No execution is started.
+    pub fn flow_has_declared_model_slots(
+        &self,
+        flow_sha256: String,
+        source_installation_sha256: Option<String>,
+    ) -> Result<bool, TrollmError> {
+        bundle::flow_has_declared_model_slots(
+            &self.base,
+            &flow_sha256,
+            source_installation_sha256.as_deref(),
+        )
+        .map_err(TrollmError::bundle)
+    }
+
     /// UI admission hint: keep one native inference run active by default.
     /// Core callers may still explicitly use concurrent runs.
     pub fn has_active_run(&self) -> bool {

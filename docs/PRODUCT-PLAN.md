@@ -1,7 +1,7 @@
 # Product direction and current scope
 
-Status reviewed on **2026-11-16**. trollm 1.0.1 is an experimental Android app
-with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
+Status reviewed on **2026-11-18**. trollm 1.1.0 is an experimental Android app
+with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
 and an [installation guide](INSTALL-ANDROID.md). Contributors can also inspect
 and test the runtime and self-host the flow review companion. The
 [two recorded v342 phone runs](../examples/run-342/README.md) are examples worth
@@ -15,7 +15,8 @@ while inference runs on the phone. Android 13/API 33+, S21-class hardware or new
 and signed sideloaded APKs are the initial target; Google Play is outside this
 scope. Remote tools require their services and network access.
 
-The coder invokes explicitly granted tools or writes prose. The tool-free
+The coder chooses explicitly granted tools or writes prose. An explicitly
+authored direct task invokes one fully bound ordinary tool call. The tool-free
 reasoner gives advice. The runtime executes the authored graph, validates tool
 calls and saved outputs, and enforces budgets and recovery. It does not infer a
 branch from words in a model answer. [Anatomy of a flow](ANATOMY-OF-A-FLOW.md)
@@ -27,14 +28,15 @@ walks through a small current-format example.
 | --- | --- |
 | Flow control | Fixed transitions, coder-selected authored exits, per-step prompt supplements and generation limits; [adaptive flows](ADAPTIVE-FLOWS.md). |
 | Repeated work | Prepared worklists, invocation-owned iteration, reusable child returns and declared child-outcome exits; [reliability contracts](FLOW-RELIABILITY.md) and [collection contracts](amazon-generalization/README.md). |
-| Local operations | Nine coder-invoked tools for arithmetic, assertions, worklists, totals, decimal extraction and original-record filtering/selection/ordering; [tool contracts](BUILTIN-TOOLS.md). Structural membership and exact arithmetic do not prove semantic suitability. |
+| Local operations | Nine isolated tools for arithmetic, assertions, worklists, totals, decimal extraction and original-record filtering/selection/ordering; [tool contracts](BUILTIN-TOOLS.md). A coder can choose a call, or an authored [direct task](DIRECT-TOOL-EXECUTION.md) can supply its complete arguments. Structural membership and exact arithmetic do not prove semantic suitability. |
 | Evidence and boundaries | Typed bindings, bounded field views, model-owned argument fields, task-specific native result destinations, mutation journals, and timing/size observations; [result artifacts](TASK-RESULT-ARTIFACTS.md) and [measurement boundaries](amazon-generalization/PERFORMANCE.md). |
 | Authoring and diagnosis | Current-format examples, model-specific prompt guidance and a read-only frozen-observation replay bundle helper; [Flow prompting](FLOW-PROMPTING.md) and [replay guidance](FLOW-RELIABILITY.md#replay-one-observation-before-repeating-the-mission). |
-| Android | Bundle installation, pinned sequential model downloads, per-flow settings, browser OAuth and manual Bearer connections, encrypted credentials, foreground execution and persistent run history. |
+| Android | A local starter or saved run leads the library; input and prerequisites share a flow journey, with retained Start handoff, typed progress and report-first results. Bundle installation, pinned model downloads, per-flow settings, browser OAuth/manual Bearer, encrypted credentials, foreground execution and run history remain available. |
 | Human review | A separate self-hosted [flow review companion](../apps/flow-review/README.md): desktop graph and inspector, business phases, source details, anchored feedback and revision comparisons. Mapped packages are read-only; uploads are transient. |
 
 The app bundles **Summarize text**, **Browse and summarize** and **Check a total**.
-The last uses local arithmetic without an MCP connection. Starter setup pins
+The last uses local arithmetic without an MCP connection; version 2 compares
+the saved sum and budget directly, without model inference for that step. Starter setup pins
 text-only Qwen3.5-0.8B Q4_K_M for the coder and, where needed, Gemma 4 E2B IT
 Q4_K_M for the reasoner, with non-thinking templates and 4096-token contexts.
 Specialised experimental flows are not implied to be shipped starters.
@@ -53,7 +55,7 @@ browser/container acceptance.
 
 ## Evidence and remaining acceptance
 
-Current release metadata is **1.0.1 / Android code 71**. Source-only
+Current release metadata is **1.1.0 / Android code 72**. Source-only
 refreshes carry a source commit identity; they do not allocate a new APK version
 or establish acceptance of different APK bytes. See [versioning](VERSIONING.md).
 
@@ -125,8 +127,11 @@ also need [third-party notices](../THIRD_PARTY_NOTICES.md).
 
 ## Design boundaries
 
-Keep procedure in the graph and computation in isolated coder-invoked tools.
-Preserve original evidence; model prose remains advisory. Do not add site-specific
-executor branches, model-free tool nodes or a flow expression language. Observe
+Keep procedure in the graph and computation in isolated tools. Model tasks ask
+the coder to choose a call; explicitly authored direct tasks invoke one fully
+bound ordinary call through the same checked dispatch and journal. Selected-guard
+calls retain their model path. Preserve original evidence; model prose remains
+advisory. Do not add site-specific executor branches, extra graph node kinds or a
+flow expression language. Observe
 before retrying uncertain writes. Consequential contract changes need maintainer
 review; ordinary contributions can use the existing format and tests today.

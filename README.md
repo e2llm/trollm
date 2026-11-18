@@ -5,7 +5,7 @@ phone. Summarize a passage, or give it two item prices and a budget to check
 with the phone's calculator. Choose a supplied flow, enter your input and follow
 its progress.
 
-[Download the 1.0.1 APK](https://github.com/e2llm/trollm/releases/download/v1.0.1/app-release.apk)
+[Download the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk)
 for **Android 13/API 33+** and follow the
 [installation guide](docs/INSTALL-ANDROID.md). No Rust or llama.cpp build is
 needed to try the app. Models are downloaded separately; **Summarize text** and
@@ -28,10 +28,11 @@ or reuse the runtime as a foundation for your own applications.
 ## One flow in practice
 
 The supplied **Check a total** starter selects two amounts from text, calls the
-phone's calculator, compares the saved sum with the supplied budget, then passes
+phone's calculator, directly compares the saved sum with the supplied budget, then passes
 the original input and both results through the reasoner and into a final report.
 It needs configured model files but no MCP connection. The calculator performs exact
-arithmetic; the model still has to select the intended amounts.
+arithmetic; the model still has to select the intended amounts. The version 2
+comparison step uses the bound values without another model call.
 
 [Learn trollm through this flow](docs/LEARN-TROLLM.md) to see the complete
 input → model/tool work → artifact binding → result journey. It explains why a
@@ -54,8 +55,12 @@ runtime, Android, reliability or security work. Before contributing, read
 
 ## Current evidence and limits
 
-Current release metadata is **1.0.1 / Android code 71**; see
+Current release metadata is **1.1.0 / Android code 72**; see
 [versioning](docs/VERSIONING.md) for source, bundle and APK identities.
+The library leads with a local starter or a saved active/interrupted run. Input,
+model requirements and connection setup share a flow journey, and completed runs
+lead with their report. [Direct tool execution](docs/DIRECT-TOOL-EXECUTION.md)
+keeps fully bound ordinary calls within the same checked dispatch and journal.
 
 [Two recorded v342 runs](examples/run-342/README.md) show an Amazon cart workflow
 on Samsung A04e and S21 phones, using local Qwen 0.8B and 2B models. Both completed
@@ -64,7 +69,7 @@ tokens despite execution lasting about 4h20m and 1h41m. The directory contains
 the exact flow, model pins, results, measurements and already-sanitized historical
 logs. These are selected examples worth examining further, not a reliability
 measurement. They used an earlier APK, whose identity is recorded separately
-from the 1.0.1 release.
+from the 1.1.0 release.
 
 The runtime now supports prepared worklists, reusable child returns,
 invocation-owned iteration and authored exits on child outcomes. Built-in tools
@@ -88,7 +93,7 @@ main build. The earlier emulator download attempt had a validated-network
 connectivity failure; that is a historical test limitation, not a current claim
 that downloads fail on every device. Emulator checks do not establish phone
 performance or arbitrary-page accuracy. Experimental flows and other APKs require
-their own checks. The downloadable 1.0.1 APK remains experimental; the historical
+their own checks. The downloadable 1.1.0 APK remains experimental; the historical
 records describe their exact tested builds and inputs.
 
 

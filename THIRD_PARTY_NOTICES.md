@@ -20,6 +20,7 @@ actual license, copyright and any NOTICE files from the exact package when
 preparing a distribution. License identifiers were checked against the cached,
 locked Cargo package manifests.
 The generated APK notice file includes the resolved transitive Rust graph,
+standard-library copyright and license bundle from the installed Rust toolchain,
 Android POM declarations and embedded notices, native source notices and the
 NDK notice files. This table is a shorter direct-dependency guide.
 
@@ -124,6 +125,7 @@ select newer compatible transitive versions.
 | AndroidX Core KTX | 1.16.0 | [AndroidX source and licensing](https://android.googlesource.com/platform/frameworks/support/) |
 | AndroidX Activity Compose | 1.10.1 | AndroidX, Apache-2.0 |
 | AndroidX Lifecycle Runtime Compose | 2.8.7 | AndroidX, Apache-2.0 |
+| AndroidX Lifecycle ViewModel SavedState | 2.8.7 | AndroidX, Apache-2.0 |
 | AndroidX Security Crypto | 1.1.0-alpha07 | AndroidX, Apache-2.0; inspect its resolved cryptography dependencies too |
 | Compose UI, Material 3 and UI Tooling Preview | BOM 2025.04.01 | AndroidX, Apache-2.0; [official BOM mapping](https://developer.android.com/develop/ui/compose/bom/bom-mapping) |
 | Compose UI Tooling | BOM 2025.04.01; debug only | AndroidX, Apache-2.0; include when distributing a debug APK |
@@ -249,7 +251,8 @@ of the finished APK. It is used alongside the separate notice collection below.
 The build's `exportAndroidNotices` task reads the resolved Maven POM licenses
 and embedded AAR/JAR notices. [The notice collector](scripts/android/make_apk_notices.py)
 combines those with exact Rust package texts, pinned supplemental upstream
-licenses, vendored native notices and the installed NDK notices. The generated
+licenses, the installed Rust toolchain’s standard-library copyright and license
+bundle, vendored native notices and the installed NDK notices. The generated
 `THIRD_PARTY_NOTICES.txt` and `third-party-manifest.json` are packaged as APK assets
 and supplied beside the release. APK validation checks that the packaged notice
 bytes match the distributed text and its manifest digest.

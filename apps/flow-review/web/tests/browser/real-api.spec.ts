@@ -70,12 +70,14 @@ test("real API mounted starter, graph, feedback, prompt revision and tar inspect
   await expect(page.locator(".react-flow")).toBeVisible();
   await page.getByRole("button", { name: "Fit graph", exact: true }).click();
   await expect(page.locator(".react-flow__edge")).toHaveCount(4);
-  await expect(
-    page.locator(".react-flow__node").filter({ hasText: "model: coder" }),
-  ).toHaveCount(3);
-  await expect(
-    page.locator(".react-flow__node").filter({ hasText: "model: reasoner" }),
-  ).toHaveCount(1);
+  const nodes = page.locator(".react-flow__node");
+  await expect(nodes.filter({ hasText: "model: coder" })).toHaveCount(2);
+  await expect(nodes.filter({ hasText: "model: reasoner" })).toHaveCount(1);
+  const directNodes = nodes.filter({ hasText: "task · Direct tool" });
+  await expect(directNodes).toHaveCount(1);
+  await expect(directNodes.locator(".flow-card-label")).toHaveText(
+    "compare task · Direct tool compare-budget",
+  );
   await page.getByRole("tab", { name: /Feedback/ }).click();
   await page
     .getByLabel("Comment", { exact: true })

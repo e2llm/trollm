@@ -5,8 +5,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +27,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +40,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -44,7 +56,13 @@ import com.trollm.app.modelByteSize
 import com.trollm.app.modelDownloadFraction
 import com.trollm.app.modelDownloadPercent
 import com.trollm.app.modelDownloadTotal
+import com.trollm.app.BundledStarter
 import com.trollm.app.FlowSetup
+import com.trollm.app.ModelTransferPhase
+import com.trollm.app.SecretsStore
+import com.trollm.app.SelectedAuthMode
+import com.trollm.app.catchingOperation
+import com.trollm.app.modelNextFileFreeSpace
 import com.trollm.app.flowSetupOverrideStore
 import com.trollm.app.modelDisplayLabel
 import com.trollm.app.ModelPreparationException
@@ -57,62 +75,85 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.trollm_uniffi.TrollmRuntime
+import uniffi.trollm_uniffi.FlowInfo
 
-/** Preparation does not start inference or access connection credentials. */
+/** Inspect saved configuration and transfer files only after an explicit download choice. */
 @Composable
-fun FlowSetupScreen(
-    runtime: TrollmRuntime,
-    flowSha: String,
-    onReady: (configurationJson: String) -> Unit,
-    onBack: () -> Unit,
-    sourceInstallation: String? = null,
+internal fun FlowSetupScreen(
+    pinned: FlowSetup,
+    flow: FlowInfo,
+    sourceInstallation: String?,
+    starter: BundledStarter?,
+    starting: Boolean,
+    onStart: (configurationJson: String) -> Unit,
+    onBack: (() -> Unit)?,
+    onOpenConnection: (String, String) -> Unit,
+    inputs: @Composable ColumnScope.() -> Unit,
 ) {
+    val flowSha = sourceInstallation ?: flow.sha256
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleState by lifecycle.currentStateFlow.collectAsState()
     val coordinator by remember(context.applicationContext) { lazy { ModelDownloadCoordinator.get(context) } }
     val scope = rememberCoroutineScope()
     val overrideStore = remember(context.applicationContext) { flowSetupOverrideStore(context) }
-    var defaults by remember(flowSha) { mutableStateOf<FlowSetup?>(null) }
     var settingsError by remember(flowSha) { mutableStateOf<String?>(null) }
-    var settingsValid by remember(flowSha) { mutableStateOf(false) }
     var settingsRevision by remember(flowSha) { mutableStateOf(0) }
     var inspecting by remember(flowSha) { mutableStateOf(false) }
     var setup by remember(flowSha) { mutableStateOf<FlowSetup?>(null) }
     var states by remember(flowSha) { mutableStateOf<Map<String, ModelDownloadCoordinator.State>>(emptyMap()) }
+    var inspectionError by remember(flowSha) { mutableStateOf<String?>(null) }
     var error by remember(flowSha) { mutableStateOf<String?>(null) }
     var checking by remember(flowSha) { mutableStateOf<String?>(null) }
     var preparing by remember(flowSha) { mutableStateOf(false) }
     var pendingSlots by remember(flowSha) { mutableStateOf<List<String>>(emptyList()) }
     var batchSlot by remember(flowSha) { mutableStateOf<String?>(null) }
-    var allowMetered by remember(flowSha) { mutableStateOf(false) }
+    var allowMetered by rememberSaveable(flowSha) { mutableStateOf(false) }
+    var advanced by rememberSaveable(flowSha) { mutableStateOf(false) }
     var busy by remember(flowSha) { mutableStateOf(false) }
     var cancelTarget by remember(flowSha) { mutableStateOf<Pair<String, ModelRequirement>?>(null) }
     var refresh by remember(flowSha) { mutableStateOf(0) }
+    val inputScroll = rememberScrollState()
 
-    LaunchedEffect(runtime, flowSha) {
-        try {
-            val json = withContext(Dispatchers.IO) { if (sourceInstallation == null) runtime.flowSetup(flowSha) else runtime.sourceBundleSetup(sourceInstallation) }
-            val pinned = json?.let { FlowSetup.parse(it) }
-            defaults = pinned
-            if (pinned != null) {
-                try {
-                    setup = withContext(Dispatchers.IO) { overrideStore.load(flowSha, pinned) }
-                    settingsValid = true
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    setup = pinned
-                    settingsError = "Saved advanced settings are invalid. Save corrected settings or restore defaults."
-                }
-            }
-            if (json == null) error = "This flow has no model setup defaults. Existing model configuration is unchanged."
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            error = "Could not load this flow's setup."
+    val closeAdvanced = { advanced = false }
+    BackHandler(enabled = advanced && !starting, onBack = closeAdvanced)
+
+    LaunchedEffect(flowSha, pinned) {
+        catchingOperation {
+            withContext(Dispatchers.IO) { overrideStore.load(flowSha, pinned) }
+        }.onSuccess {
+            setup = it
+        }.onFailure {
+            setup = pinned
+            settingsError = "Saved advanced settings are invalid. Save corrected settings or restore defaults."
         }
     }
+
+    val connections = setup?.connections.orEmpty()
+    var savedConnections by remember(connections) { mutableStateOf<Map<String, SavedSignIn>>(emptyMap()) }
+    var signInCheck by remember(flowSha) { mutableStateOf(0) }
+    LaunchedEffect(connections, lifecycle, signInCheck) {
+        if (connections.isEmpty()) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            savedConnections = emptyMap()
+            savedConnections = withContext(Dispatchers.IO) {
+                connections.mapValues { (name, connection) ->
+                    catchingOperation {
+                        val secrets = SecretsStore(context.applicationContext)
+                        val saved = when (secrets.selectedAuthMode(name)) {
+                            SelectedAuthMode.BEARER -> secrets.token(name, connection.url) != null
+                            SelectedAuthMode.OAUTH -> secrets.oauthGrants.pin(name, connection.url) != null
+                            else -> false
+                        }
+                        if (saved) SavedSignIn.SAVED else SavedSignIn.MISSING
+                    }.getOrDefault(SavedSignIn.UNREADABLE)
+                }
+            }
+        }
+    }
+
+    val connectionBlocker = connections.entries.firstOrNull { savedConnections[it.key] != SavedSignIn.SAVED }
+        ?.takeIf { starter == BundledStarter.BROWSER_SUMMARY }
 
     DisposableEffect(context, flowSha) {
         val receiver = object : BroadcastReceiver() {
@@ -132,7 +173,7 @@ fun FlowSetupScreen(
             states = emptyMap()
             checking = null
             inspecting = false
-            error = null
+            inspectionError = null
             return@LaunchedEffect
         }
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -144,24 +185,29 @@ fun FlowSetupScreen(
                         withContext(Dispatchers.Main) { checking = slot }
                     }
                     checking = null
-                    error = null
+                    inspectionError = null
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: ModelPreparationException) {
                     checking = null
-                    error = failure.message
+                    inspectionError = failure.message
                 } catch (_: Exception) {
                     checking = null
-                    error = "Could not inspect model storage."
+                    inspectionError = "Could not inspect model storage."
                 } finally { inspecting = false }
                 delay(1500)
             }
         }
     }
 
-    LaunchedEffect(preparing, pendingSlots, states, setup, busy) {
+    LaunchedEffect(preparing, pendingSlots, states, setup, busy, lifecycleState, inspectionError, connectionBlocker) {
         val descriptor = setup ?: return@LaunchedEffect
-        if (!preparing || busy || !settingsValid || states.size != descriptor.models.size) return@LaunchedEffect
+        if (!preparing || busy || settingsError != null || inspectionError != null ||
+            !lifecycleState.isAtLeast(Lifecycle.State.STARTED) || states.keys != descriptor.models.keys) return@LaunchedEffect
+        if (connectionBlocker != null) {
+            preparing = false
+            return@LaunchedEffect
+        }
         if (states.values.any { it.downloading }) return@LaunchedEffect
         // A failed transfer stops the explicit batch rather than silently retrying.
         if (batchSlot?.let { states[it]?.path == null } == true) {
@@ -180,13 +226,13 @@ fun FlowSetupScreen(
         batchSlot = next
         pendingSlots = pendingSlots.dropWhile { it != next }.drop(1)
         val policy = ModelDownloadPolicy(allowMetered)
-        val selectedModel = model.copy(label = defaults?.let { descriptor.modelDisplayLabel(next, it) } ?: model.label)
+        val selectedModel = model.copy(label = descriptor.modelDisplayLabel(next, pinned))
         // Screen ownership survives effect restarts; leaving the screen may
         // cancel admission, while Android retains any already-enqueued request.
         scope.launch {
             try {
                 coordinator.download(selectedModel, policy)
-                states = states + (next to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
+                states = states + (next to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes, transferPhase = ModelTransferPhase.QUEUED))
                 refresh += 1
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -200,118 +246,73 @@ fun FlowSetupScreen(
         }
     }
 
+    val effective = setup
+    val inspected = effective != null && states.keys == effective.models.keys && inspectionError == null
+    val remaining = effective?.let { descriptor ->
+        remainingModelDownloads(descriptor.models, states.filterValues { it.path != null }.keys)
+    }.orEmpty()
+    val allSlotsReady = inspected && states.values.all { it.path != null }
+    val activeTransfer = states.entries.firstOrNull { it.value.downloading }
+    val downloadsIdle = inspected && !starting && !busy && !preparing && !inspecting && checking == null && activeTransfer == null
+    val stockBrowser = starter == BundledStarter.BROWSER_SUMMARY
+    val hasOverrides = effective != null && (connections.isNotEmpty() || effective.models.isNotEmpty() || settingsError != null)
+    val openAdvanced = { advanced = true }
+    val queueDownloads: (List<String>) -> Unit = { slots ->
+        pendingSlots = slots
+        batchSlot = null
+        preparing = true
+        error = null
+    }
+
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        Modifier.fillMaxSize().verticalScroll(if (advanced) rememberScrollState() else inputScroll).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(if (advanced) 16.dp else 24.dp),
     ) {
-        val hasModels = setup?.models?.isNotEmpty() == true
-        ScreenHeader(if (hasModels) "Prepare models" else "Flow setup", onBack, setup?.title)
-        setup?.description?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        if (hasModels) Text("Download the models this flow uses. They stay saved on your device.")
-        else if (setup != null) Text("This flow does not use a model.")
-        val downloadsIdle = !busy && !preparing && !inspecting && checking == null && states.values.none { it.downloading }
-        if (hasModels) ContentCard {
-            SectionHeading(if (allowMetered) "Metered downloads allowed" else "Unmetered network only")
-            Text("Downloads continue in the background. Keep this screen open to start the next model in a batch.", style = MaterialTheme.typography.bodyMedium)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = allowMetered, onCheckedChange = { allowMetered = it }, enabled = downloadsIdle)
-                Text("Allow metered data for downloads from this screen", style = MaterialTheme.typography.bodyMedium)
-            }
-            Text(ModelDownloadPolicy(allowMetered).description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("Additional free space is needed to finish setup.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        val remaining = setup?.let { descriptor ->
-            remainingModelDownloads(descriptor.models, states.filterValues { it.path != null }.keys)
-        }.orEmpty()
-        if (hasModels) SectionHeading("Models", "${states.values.count { it.path != null }} of ${setup?.models?.size ?: 0} ready")
-        setup?.models?.forEach { (slot, model) ->
-            val state = states[slot]
-            val label = defaults?.let { pinned -> setup?.modelDisplayLabel(slot, pinned) } ?: slot
-            val verifying = checking == slot
-            ContentCard {
-                Text(label, style = MaterialTheme.typography.titleMedium)
-                StatusBadge(
-                    when {
-                        verifying -> "Verifying"
-                        state?.path != null -> "Ready"
-                        state?.downloading == true -> "Downloading"
-                        state?.message != null -> "Needs attention"
-                        else -> "Not downloaded"
-                    },
-                    when {
-                        verifying -> StatusTone.INFO
-                        state?.path != null -> StatusTone.SUCCESS
-                        state?.message != null && !state.downloading -> StatusTone.WARNING
-                        else -> StatusTone.NEUTRAL
-                    },
+        if (advanced && effective != null) {
+            ScreenHeader("Setup details", onBack = closeAdvanced.takeUnless { starting }, subtitle = pinned.title)
+            SelectionContainer {
+                Text(
+                    "Flow ID · ${flow.id}\nVersion · ${flow.version}\nFlow SHA-256 · ${flow.sha256}",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
                 )
-                Text(modelByteSize(model.sizeBytes), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            effective.models.forEach { (slot, model) ->
+                val state = states[slot]
+                SectionHeading(effective.modelDisplayLabel(slot, pinned))
+                Text(modelByteSize(model.sizeBytes), style = MaterialTheme.typography.bodyMedium)
                 when {
-                    verifying -> {
-                        Text("Checking the downloaded file before use.", style = MaterialTheme.typography.bodyMedium)
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
-                    state?.path != null -> Unit
+                    checking == slot -> Text("Verifying file")
+                    state?.path != null -> Text("Verified and saved")
                     state?.downloading == true -> {
-                        val fraction = modelDownloadFraction(state.downloaded, state.total)
-                        val percent = modelDownloadPercent(state.downloaded, state.total)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            percent?.let { Text("$it%", style = MaterialTheme.typography.titleSmall) }
-                            Text(
-                                if (state.total > 0) "${modelByteSize(state.downloaded)} / ${modelByteSize(state.total)}"
-                                else "${modelByteSize(state.downloaded)} downloaded",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
-                        if (fraction == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
-                        state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        TextButton(colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error), enabled = !busy && checking == null, onClick = { cancelTarget = slot to model }) { Text("Cancel download") }
+                        ModelTransfer(state)
+                        CancelDownloadButton(enabled = !busy && checking == null) { cancelTarget = slot to model }
                     }
+                    !inspected -> Text("Checking saved files")
                     else -> {
                         state?.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-                        Button(shape = MaterialTheme.shapes.medium, enabled = settingsValid && downloadsIdle, onClick = {
-                            scope.launch {
-                                busy = true
-                                try {
-                                    coordinator.download(model.copy(label = label), ModelDownloadPolicy(allowMetered))
-                                    states = states + (slot to ModelDownloadCoordinator.State(downloading = true, total = model.sizeBytes))
-                                    refresh += 1
-                                }
-                                catch (cancelled: CancellationException) { throw cancelled }
-                                catch (failure: ModelPreparationException) { error = failure.message ?: "Could not start download." }
-                                catch (_: Exception) { error = "Could not start download." }
-                                finally { busy = false }
-                            }
-                        }) { Text(if (state?.message != null) "Retry download" else "Download model") }
+                        OutlinedButton(
+                            onClick = { queueDownloads(listOf(slot)) },
+                            enabled = downloadsIdle && settingsError == null && connectionBlocker == null,
+                        ) { Text(if (state?.message != null) "Retry download" else "Download model") }
                     }
                 }
             }
-        }
-        if (remaining.isNotEmpty()) {
-            Text("${remaining.size} remaining models · ${modelByteSize(modelDownloadTotal(remaining.values.map { it.sizeBytes }))}", style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = settingsValid && downloadsIdle && states.keys == setup?.models?.keys, onClick = {
-                pendingSlots = remaining.keys.toList()
-                batchSlot = null
-                preparing = true
-                error = null
-            }) { Text("Download remaining models") }
-        }
-        setup?.connections?.takeIf { it.isNotEmpty() }?.let { connections ->
-            ContentCard {
-                SectionHeading("Connections")
-                connections.forEach { (name, connection) -> Text("$name · ${connection.auth}", style = MaterialTheme.typography.bodyMedium) }
+            connections.forEach { (name, connection) ->
+                if (savedConnections[name] == SavedSignIn.UNREADABLE) {
+                    Text("$name · Could not read saved sign-in", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    TextButton(enabled = !starting, onClick = { onOpenConnection(name, connection.url) }) {
+                        Text("Set up $name connection")
+                    }
+                }
             }
-        }
-        val pinned = defaults
-        val effective = setup
-        if (pinned != null && effective != null && (effective.models.isNotEmpty() || effective.connections.isNotEmpty() || settingsError != null)) {
-            FlowSetupAdvancedSettings(
+            if (hasOverrides) FlowSetupAdvancedSettings(
                 defaults = pinned,
                 effective = effective,
                 resetKey = settingsRevision,
-                enabled = !busy && !inspecting && checking == null && !preparing &&
-                    states.keys == effective.models.keys && states.values.none { it.downloading },
+                enabled = !starting && !busy && !inspecting && checking == null && !preparing &&
+                    activeTransfer == null && (inspected || inspectionError != null),
                 onSave = { updated ->
                     busy = true
                     scope.launch {
@@ -320,7 +321,6 @@ fun FlowSetupScreen(
                             preparing = false
                             states = emptyMap()
                             setup = updated
-                            settingsValid = true
                             settingsRevision += 1
                             settingsError = null
                             refresh += 1
@@ -337,7 +337,6 @@ fun FlowSetupScreen(
                             preparing = false
                             states = emptyMap()
                             setup = pinned
-                            settingsValid = true
                             settingsRevision += 1
                             settingsError = null
                             refresh += 1
@@ -347,15 +346,139 @@ fun FlowSetupScreen(
                     }
                 },
             )
+        } else {
+            ScreenHeader(pinned.title, onBack = onBack, subtitle = pinned.description.takeIf { starter == null })
+            inputs()
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeading("Before you run")
+                if (stockBrowser) {
+                    Text(
+                        "Have your E2LLM browser connected and its name or ID ready. Browser availability is checked during the run.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                connections.forEach { (name, connection) ->
+                    val serviceName = if (stockBrowser) "E2LLM" else name
+                    val saved = savedConnections[name]
+                    if (connectionBlocker?.key != name) {
+                        Text(when (saved) {
+                            SavedSignIn.SAVED -> "$serviceName · Sign-in saved"
+                            SavedSignIn.MISSING -> "$serviceName · ${signInMethod(connection.auth)} setup available"
+                            SavedSignIn.UNREADABLE -> "$serviceName · Could not read saved sign-in"
+                            null -> "$serviceName · Checking saved sign-in"
+                        }, style = MaterialTheme.typography.bodyMedium)
+                        if (saved == SavedSignIn.MISSING) TextButton(enabled = !starting, onClick = { onOpenConnection(name, connection.url) }) {
+                            Text("Set up $name connection")
+                        }
+                    }
+                }
+                when {
+                    settingsError != null -> {
+                        StatusPanel("Check advanced settings", settingsError, StatusTone.ERROR)
+                        Button(onClick = openAdvanced, enabled = !starting, modifier = Modifier.fillMaxWidth()) { Text("Review setup details") }
+                    }
+                    checking != null -> StatusPanel(
+                        "Verifying model file", "Checking the file before use.", StatusTone.INFO,
+                        Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    activeTransfer != null -> {
+                        val (slot, state) = activeTransfer
+                        val model = effective?.models?.get(slot)
+                        ModelTransfer(state)
+                        if (model != null) CancelDownloadButton(enabled = !busy && checking == null) {
+                            cancelTarget = slot to model
+                        }
+                    }
+                    connectionBlocker != null -> {
+                        val (name, connection) = connectionBlocker
+                        val serviceName = if (stockBrowser) "E2LLM" else name
+                        val liveStatus = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                        when (savedConnections[name]) {
+                            null -> StatusPanel("Checking saved sign-in", tone = StatusTone.INFO, modifier = liveStatus)
+                            SavedSignIn.UNREADABLE -> {
+                                StatusPanel("Could not read saved sign-in for $serviceName",
+                                    tone = StatusTone.ERROR, modifier = liveStatus)
+                                Button(
+                                    onClick = { signInCheck++ },
+                                    enabled = !starting,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Check saved sign-in again") }
+                            }
+                            SavedSignIn.MISSING -> {
+                                StatusPanel("Sign in to $serviceName", signInMethod(connection.auth),
+                                    StatusTone.WARNING, liveStatus)
+                                Button(
+                                    onClick = { onOpenConnection(name, connection.url) },
+                                    enabled = !starting,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Set up $serviceName connection") }
+                            }
+                            SavedSignIn.SAVED -> Unit
+                        }
+                    }
+                    inspectionError != null -> StatusPanel(
+                        "Model files could not be checked", inspectionError, StatusTone.ERROR,
+                        Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    !inspected || remaining.isEmpty() && !allSlotsReady -> StatusPanel("Checking saved files", tone = StatusTone.INFO,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    remaining.isNotEmpty() -> {
+                        val total = modelByteSize(modelDownloadTotal(remaining.values.map { it.sizeBytes }))
+                        val freeSpace = modelByteSize(modelNextFileFreeSpace(remaining.values.first().sizeBytes))
+                        val failedTransfer = remaining.keys.firstNotNullOfOrNull { states[it]?.message }
+                        StatusPanel(
+                            title = if (preparing || busy) "Queuing model download" else if (remaining.size == 1) "Model download needed" else "Model downloads needed",
+                            message = "$total to download. The next file needs $freeSpace free, including 256 MiB headroom.",
+                            tone = StatusTone.WARNING,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                        failedTransfer?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                                value = allowMetered, enabled = downloadsIdle, role = Role.Checkbox,
+                                onValueChange = { allowMetered = it },
+                            ),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Checkbox(checked = allowMetered, onCheckedChange = null, enabled = downloadsIdle)
+                            Text("Allow metered data", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Text(ModelDownloadPolicy(allowMetered).description, style = MaterialTheme.typography.bodySmall)
+                        if (remaining.size > 1) Text(
+                            "Keep this screen open to queue the next model. A queued transfer can continue after you leave.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Button(
+                            onClick = { queueDownloads(remaining.keys.toList()) },
+                            enabled = downloadsIdle,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(when {
+                            remaining.size > 1 -> "Download remaining models · $total"
+                            failedTransfer != null -> "Retry download · $total"
+                            else -> "Download model · $total"
+                        }) }
+                    }
+                    effective != null -> {
+                        StatusPanel(
+                            if (effective.models.isEmpty()) "No model files required" else "Models verified and saved",
+                            tone = StatusTone.SUCCESS,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                        Button(
+                            onClick = { onStart(effective.configuration(states.mapValues { requireNotNull(it.value.path) })) },
+                            enabled = downloadsIdle,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(if (starting) "Starting…" else "Start run") }
+                    }
+                }
+                if (effective != null && settingsError == null) {
+                    TextButton(onClick = openAdvanced, enabled = !starting) { Text("Setup details") }
+                }
+            }
         }
-        settingsError?.let { StatusPanel("Check advanced settings", it, StatusTone.ERROR) }
-        error?.let { StatusPanel(if (hasModels) "Model preparation" else "Flow setup", it, StatusTone.ERROR) }
-        val descriptor = setup
-        val ready = settingsValid && descriptor != null && states.keys == descriptor.models.keys && states.values.all { it.path != null }
-        Button(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth(), enabled = ready && !busy && !inspecting && checking == null, onClick = {
-            descriptor?.let { onReady(it.configuration(states.mapValues { entry -> requireNotNull(entry.value.path) })) }
-        }) { Text("Continue") }
-        if (!ready) Text(if (hasModels) "Finish downloading and verifying all models to continue." else "Finish configuring this flow to continue.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (advanced) settingsError?.let { StatusPanel("Check advanced settings", it, StatusTone.ERROR) }
+        error?.let { StatusPanel("Model preparation", it, StatusTone.ERROR) }
     }
 
     cancelTarget?.let { (slot, model) ->
@@ -395,3 +518,45 @@ fun FlowSetupScreen(
         )
     }
 }
+
+
+private fun transferTitle(phase: ModelTransferPhase?): String = when (phase) {
+    ModelTransferPhase.QUEUED -> "Download queued"
+    ModelTransferPhase.WAITING_FOR_NETWORK -> "Waiting for network"
+    ModelTransferPhase.PAUSED -> "Download paused"
+    ModelTransferPhase.TRANSFERRING -> "Downloading model"
+    null -> "Queuing model download"
+}
+
+@Composable
+private fun ModelTransfer(state: ModelDownloadCoordinator.State) {
+    StatusPanel(transferTitle(state.transferPhase), tone = StatusTone.INFO,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+    state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+    if (state.transferPhase != ModelTransferPhase.TRANSFERRING) return
+    val fraction = modelDownloadFraction(state.downloaded, state.total)
+    if (fraction == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    else {
+        LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+        val percent = requireNotNull(modelDownloadPercent(state.downloaded, state.total))
+        Text(
+            "${modelByteSize(state.downloaded)} of ${modelByteSize(state.total)} · $percent%",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun CancelDownloadButton(enabled: Boolean, onClick: () -> Unit) {
+    TextButton(
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        enabled = enabled,
+        onClick = onClick,
+    ) { Text("Cancel download") }
+}
+
+
+private fun signInMethod(auth: String): String =
+    if (auth == "oauth") "OAuth sign-in" else "Manual Bearer token"
+
+private enum class SavedSignIn { SAVED, MISSING, UNREADABLE }

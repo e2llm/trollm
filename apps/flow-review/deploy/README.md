@@ -38,6 +38,17 @@ uses official distroless Debian 13 with GNU libraries, the Rust server and built
 browser assets; it contains no shell or external health-check utility. Both the
 image healthcheck and pod liveness probe execute the server with `--healthcheck`.
 
+The image includes the Rust server's dependency texts at
+`/app/notices/THIRD_PARTY_NOTICES.txt` and a SHA-256 inventory at
+`/app/notices/third-party-manifest.json`. The locked Linux/amd64 release build
+provides the package list. The inventory includes build dependencies and
+procedural macros, exact upstream supplements, nested texts for bundled code,
+and the installed Rust toolchain's standard-library copyright and license
+bundle. The browser dependency notices are at `/app/web/third-party-notices.txt`.
+Use `podman cp` or `docker cp` to retrieve these files from a created container.
+The public image workflow verifies the extracted Rust notice text against its
+manifest and retains both exact files with the verified image archive.
+
 Podman 4.9 ignores `emptyDir.medium: Memory` and creates a disk-backed anonymous
 volume. [Podman 5.0 added the memory-medium branch](https://github.com/podman-container-tools/podman/blob/v5.0.0/pkg/specgen/generate/kube/volume.go#L266).
 The launcher and smoke query JSON version metadata before execution with a

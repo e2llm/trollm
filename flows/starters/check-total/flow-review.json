@@ -8,7 +8,7 @@
     {
       "id": "arithmetic",
       "title": "Calculate and compare",
-      "description": "The coder selects two amounts and calls the local calculator. A second task compares that saved sum with the user's budget using runtime-bound arguments.",
+      "description": "The coder selects two amounts and calls the local calculator. The runtime calls the calculator directly to compare the saved sum with the user's budget.",
       "nodes": [
         {"flow": "check-total", "node": "sum"},
         {"flow": "check-total", "node": "compare"}

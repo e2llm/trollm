@@ -135,4 +135,45 @@ class RunPresentationTest {
         assertFalse(interrupted.canCancel)
     }
 
+    @Test fun activityVisibleOnlyForAnActiveRunningWorker() {
+        val verifying = presentRun(RunPhaseApi.Running, true, RunActivityApi.VerifyingModel("coder"))
+        val loading = presentRun(RunPhaseApi.Running, true, RunActivityApi.LoadingModel("reasoner"))
+        val generating = presentRun(RunPhaseApi.Running, true, RunActivityApi.Generating("coder"))
+        assertEquals("Verifying model file", verifying.activityLabel)
+        assertEquals("Loading model on this phone", loading.activityLabel)
+        assertEquals("Generating on this phone", generating.activityLabel)
+        assertEquals("reasoner", loading.activityDetail)
+        assertNull(presentRun(RunPhaseApi.Running, false, RunActivityApi.Starting).activityLabel)
+        assertNull(presentRun(RunPhaseApi.Succeeded, true, RunActivityApi.Starting).activityLabel)
+        assertTrue(presentRun(RunPhaseApi.Succeeded, true, null).keepPolling)
+    }
+
+    @Test fun runCommandsWaitForObservedAcknowledgment() {
+        val running = RunPhaseApi.Running
+        val paused = RunPhaseApi.Paused("saved")
+        val cancelled = RunPhaseApi.Failed("cancelled")
+        assertFalse(RunCommand.PAUSE.acknowledged(running, true, 7uL, 8uL))
+        assertTrue(RunCommand.PAUSE.acknowledged(paused, true, 7uL, 8uL))
+        assertFalse(RunCommand.CANCEL.acknowledged(cancelled, true, 7uL, 8uL))
+        assertTrue(RunCommand.CANCEL.acknowledged(cancelled, false, 7uL, 8uL))
+        assertFalse(RunCommand.RESUME.acknowledged(paused, true, 7uL, 7uL))
+        assertTrue(RunCommand.RESUME.acknowledged(running, true, 7uL, 7uL))
+        assertTrue(RunCommand.RESUME.acknowledged(paused, true, 7uL, 8uL))
+    }
+
+    @Test fun restoredResumeRequestClearsWhenTheWorkerWasLost() {
+        for (phase in listOf(RunPhaseApi.Running, RunPhaseApi.Paused("saved"))) {
+            assertTrue(RunCommand.RESUME.acknowledged(phase, false, 7uL, 7uL))
+            val restored = presentRun(phase, false, null)
+            assertEquals("Interrupted", restored.label)
+            assertTrue(restored.canResume)
+        }
+    }
+
+    @Test fun failureRecoveryUsesVerifiedStarterIdentity() {
+        assertNull(runFailureRecovery(BundledStarter.TEXT_SUMMARY))
+        assertNull(runFailureRecovery(BundledStarter.CHECK_TOTAL))
+        assertTrue(runFailureRecovery(BundledStarter.BROWSER_SUMMARY)!!.contains("opened a tab"))
+        assertTrue(runFailureRecovery(null)!!.startsWith("If this flow can change"))
+    }
 }

@@ -95,7 +95,9 @@ cargo test --locked -p trollm-core --test direct_tool_execution --no-default-fea
 
 The [direct execution contract](../docs/DIRECT-TOOL-EXECUTION.md) explains step
 accounting, mutation recovery and the selected-call exclusion. This is a source
-example, not an installable bundle; the published 1.0.1 APK predates this mode.
+example, not an installable bundle; use an APK with direct execution support
+(1.1.0 or later). The packaged Check a total version 2 demonstrates the direct
+comparison in an installable starter.
 
 ## Prose calculation
 

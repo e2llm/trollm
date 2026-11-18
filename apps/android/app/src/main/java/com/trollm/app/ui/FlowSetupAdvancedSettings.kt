@@ -3,7 +3,6 @@ package com.trollm.app.ui
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -27,12 +26,9 @@ fun FlowSetupAdvancedSettings(
     onSave: (FlowSetup) -> Unit,
     onRestore: () -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
     var models by remember(effective, resetKey) { mutableStateOf(effective.models.mapValues { (_, model) -> ModelOverrideDraft.from(model) }) }
     var connections by remember(effective, resetKey) { mutableStateOf(effective.connections.mapValues { (_, connection) -> connection.url }) }
     var error by remember(effective, resetKey) { mutableStateOf<String?>(null) }
-    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide advanced settings" else "Advanced settings") }
-    if (!expanded) return
     ContentCard {
         SectionHeading("Advanced settings")
         Text(if (effective.models.isEmpty()) "Connection endpoints. Changes are validated before saving." else "Model identities, context and sampling settings. Changes are validated before saving.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

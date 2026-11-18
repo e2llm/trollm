@@ -33,3 +33,12 @@ fun modelDownloadTotal(sizes: Iterable<Long>): Long = sizes.fold(0L) { total, si
     val positive = size.coerceAtLeast(0)
     if (positive > Long.MAX_VALUE - total) Long.MAX_VALUE else total + positive
 }
+
+
+internal const val MODEL_SPACE_HEADROOM = 256L * 1024 * 1024
+
+/** Display the next file's admission threshold separately from the total transfer. */
+internal fun modelNextFileFreeSpace(size: Long): Long =
+    modelDownloadTotal(listOf(size, MODEL_SPACE_HEADROOM))
+
+enum class ModelTransferPhase { QUEUED, WAITING_FOR_NETWORK, PAUSED, TRANSFERRING }

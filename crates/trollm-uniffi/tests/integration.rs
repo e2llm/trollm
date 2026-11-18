@@ -276,6 +276,149 @@ fn install_bundle_without_source_baseline_preserves_raw_identity() {
 }
 
 #[test]
+fn flow_has_declared_model_slots_without_setup() {
+    let base = temp_base("model-slot-metadata");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let direct = include_str!("../../../flows/examples/direct-calculation.flow.yaml");
+    let registry = include_bytes!("../../../flows/tasks/direct-calculation.tasks.yaml");
+    for (models, expected) in [("{}", false), ("{coder: {ctx: 2048}}", true)] {
+        let flow = direct.replace("models: {}", &format!("models: {models}"));
+        let files = [
+            ("direct-calculation.flow.yaml", flow.as_bytes()),
+            ("direct-calculation.tasks.yaml", registry.as_slice()),
+        ];
+        let manifest = manifest(
+            "direct-calculation.flow.yaml",
+            "direct-calculation.tasks.yaml",
+            &files,
+        );
+        let mut all = vec![("manifest.json", manifest.as_slice())];
+        all.extend(files);
+        let installed = rt.install_flow_bundle(build_tar(&all)).unwrap();
+        assert!(rt
+            .flow_setup(installed.flow_sha256.clone())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            rt.flow_has_declared_model_slots(installed.flow_sha256, None)
+                .unwrap(),
+            expected,
+        );
+    }
+    let modeled = rt.install_flow_bundle(good_bundle()).unwrap();
+    assert!(rt
+        .flow_has_declared_model_slots(modeled.flow_sha256, None)
+        .unwrap());
+    assert!(!rt.has_active_run());
+    assert!(std::fs::read_dir(base.join("trollm/runs"))
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn flow_has_declared_model_slots_follows_verified_children_and_source_identity() {
+    let base = temp_base("model-slot-children");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let root = br#"
+schemaVersion: ledger.execution-plan.v1
+id: collect
+version: 1
+limits: {maxSteps: 10, maxReasonerCalls: 0, maxTokensTotal: 10, timeoutS: 30, artifactMaxMb: 1}
+onLimit: abort
+models: {}
+entryStep: each
+nodes:
+  each:
+    kind: foreach
+    items: {from: items}
+    itemKey: id
+    bindAs: item
+    enumeration: snapshot
+    ordering: source
+    body: {flowRef: item}
+    between: {flowRef: separator}
+    outputs: {results: {collect: body.outputs, indexBy: itemKey}}
+    onEmpty: done
+    onComplete: done
+  done: {kind: end, outcome: succeeded}
+"#;
+    let child = |id, declares_model| {
+        let models = if declares_model {
+            "{coder: {ctx: 2048}}"
+        } else {
+            "{}"
+        };
+        format!(
+            r#"
+schemaVersion: ledger.execution-plan.v1
+id: {id}
+version: 1
+limits: {{maxSteps: 1, maxReasonerCalls: 0, maxTokensTotal: 10, timeoutS: 30, artifactMaxMb: 1}}
+onLimit: abort
+models: {models}
+entryStep: done
+nodes:
+  done: {{kind: end, outcome: succeeded}}
+"#
+        )
+    };
+    for (body_model, between_model) in [(false, false), (true, false), (false, true)] {
+        let item = child("item", body_model);
+        let separator = child("separator", between_model);
+        let files = [
+            ("collect.flow.yaml", root.as_slice()),
+            ("item.flow.yaml", item.as_bytes()),
+            ("separator.flow.yaml", separator.as_bytes()),
+            ("hello.tasks.yaml", GOOD_REGISTRY.as_bytes()),
+            ("prompts/greet.md", GOOD_PROMPT.as_bytes()),
+        ];
+        let manifest = manifest("collect.flow.yaml", "hello.tasks.yaml", &files);
+        let mut all = vec![("manifest.json", manifest.as_slice())];
+        all.extend(files);
+        let archive = build_tar(&all);
+        let installed = rt.install_source_bundle(archive.clone()).unwrap();
+        let root = installed.flow_sha256;
+        let source = Some(installed.installation_sha256);
+        assert_eq!(
+            rt.flow_has_declared_model_slots(root.clone(), source.clone())
+                .unwrap(),
+            body_model || between_model,
+        );
+        let child_pin = sha256_hex(item.as_bytes());
+        assert!(rt
+            .flow_has_declared_model_slots(child_pin.clone(), source.clone())
+            .is_err());
+        assert!(rt
+            .flow_has_declared_model_slots("../collect".into(), source)
+            .is_err());
+        assert!(rt
+            .flow_has_declared_model_slots(root.clone(), Some("../revision".into()))
+            .is_err());
+        if body_model {
+            let normal = rt.install_flow_bundle(archive).unwrap();
+            assert!(rt
+                .flow_has_declared_model_slots(root.clone(), None)
+                .unwrap());
+            assert!(rt
+                .list_flows()
+                .unwrap()
+                .iter()
+                .any(|listed| listed.sha256 == child_pin));
+            assert!(rt.flow_has_declared_model_slots(child_pin, None).is_err());
+            std::fs::write(
+                Path::new(&normal.bundle_dir).join("item.flow.yaml"),
+                b"modified",
+            )
+            .unwrap();
+            assert!(rt.flow_has_declared_model_slots(root, None).is_err());
+        }
+    }
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn direct_only_bundle_installs_and_runs_without_prompts_weights_or_model_backend() {
     use std::time::{Duration, Instant};
     use trollm_uniffi::RunPhaseApi;

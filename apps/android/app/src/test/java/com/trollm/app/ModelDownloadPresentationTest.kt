@@ -42,4 +42,12 @@ class ModelDownloadPresentationTest {
         assertEquals(300L, modelDownloadTotal(listOf(100, 200, -1)))
         assertEquals(Long.MAX_VALUE, modelDownloadTotal(listOf(Long.MAX_VALUE, 1)))
     }
+    @Test fun nextFileFreeSpaceUsesAdmissionHeadroomAndSaturates() {
+        val summary = 532_517_120L
+        val secondModel = 3_106_738_272L
+        assertEquals("3.64 GB", modelByteSize(modelDownloadTotal(listOf(summary, secondModel))))
+        assertEquals("801 MB", modelByteSize(modelNextFileFreeSpace(summary)))
+        assertEquals("3.38 GB", modelByteSize(modelNextFileFreeSpace(secondModel)))
+        assertEquals(Long.MAX_VALUE, modelNextFileFreeSpace(Long.MAX_VALUE))
+    }
 }

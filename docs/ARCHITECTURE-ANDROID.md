@@ -10,8 +10,8 @@ The later [direct tool execution contract](DIRECT-TOOL-EXECUTION.md) adds an
 explicit `execution: tool` registry mode within the existing `task` node kind.
 It invokes one fully bound ordinary tool through the same checked dispatch path,
 without a model or prompt. Default model tasks retain their existing behavior.
-Selected-guard calls are excluded from direct execution. This source capability
-is newer than the published 1.0.1 APK.
+Selected-guard calls are excluded from direct execution. It is available in
+1.1.0 and later; the earlier 1.0.1 APK predates it.
 
 Normative document. Implementation agents: **implement exactly this**. If a consequential
 decision is missing or contradictory here, STOP and report the question — do not assume.
