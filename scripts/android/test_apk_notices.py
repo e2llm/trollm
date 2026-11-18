@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from make_apk_notices import collect, combine_metadata, runtime_packages
+from make_apk_notices import collect, combine_metadata, runtime_packages, rust_toolchain_notices
 
 
 class ApkNoticesTest(unittest.TestCase):
@@ -33,6 +33,30 @@ class ApkNoticesTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in runtime_packages(combined)],
                          ['fixture-dev', 'fixture-runtime'])
 
+    def write_sysroot_notices(self, sysroot):
+        copyright_file = sysroot / 'share/doc/rust/COPYRIGHT-library.html'
+        terms = copyright_file.parent / 'licenses'
+        terms.mkdir(parents=True)
+        copyright_file.write_bytes(b'<p>Exact standard-library attribution.</p>\n')
+        for name in ('Apache-2.0', 'MIT', 'LLVM-exception'):
+            (terms / (name + '.txt')).write_text(name + ' terms fixture\n')
+        return copyright_file, terms
+
+    def test_missing_or_empty_toolchain_notices_fail(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sysroot = Path(folder)
+            copyright_file, terms = self.write_sysroot_notices(sysroot)
+            copyright_file.unlink()
+            with self.assertRaisesRegex(ValueError, 'standard-library copyright or license texts unavailable'):
+                list(rust_toolchain_notices(sysroot))
+            copyright_file.write_text('Copyright notice')
+            (terms / 'LLVM-exception.txt').write_text(' ')
+            with self.assertRaisesRegex(ValueError, 'empty Rust toolchain notice'):
+                list(rust_toolchain_notices(sysroot))
+            (terms / 'LLVM-exception.txt').unlink()
+            with self.assertRaisesRegex(ValueError, 'standard-library copyright or license texts unavailable'):
+                list(rust_toolchain_notices(sysroot))
+
     def test_notices_preserve_exact_license_and_record_matching_digest(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -53,16 +77,24 @@ class ApkNoticesTest(unittest.TestCase):
                 'licenses': [{'name': 'Apache-2.0', 'url': 'https://example.org/license'}],
                 'notices': []}]}
             output = root / 'output'
-            collect(root, self.metadata(package), android, ndk, output)
+            sysroot = root / 'private rust toolchain'
+            copyright_file, _ = self.write_sysroot_notices(sysroot)
+            collect(root, self.metadata(package), android, ndk, output, sysroot)
             text = (output / 'THIRD_PARTY_NOTICES.txt').read_bytes()
             manifest = json.loads((output / 'third-party-manifest.json').read_text())
             self.assertIn(original, text)
+            self.assertIn(copyright_file.read_bytes(), text)
+            notice = next(x for x in manifest['files'] if x['name'].endswith('/COPYRIGHT-library.html'))
+            self.assertEqual(notice['source'], 'Installed Rust toolchain: share/doc/rust/COPYRIGHT-library.html')
+            self.assertEqual(notice['sha256'], hashlib.sha256(copyright_file.read_bytes()).hexdigest())
+            self.assertNotIn(str(sysroot), json.dumps(manifest))
+            self.assertNotIn(str(sysroot).encode(), text)
             self.assertEqual(manifest['noticesSha256'], hashlib.sha256(text).hexdigest())
             self.assertTrue(any(x['sha256'] == hashlib.sha256(original).hexdigest()
                                 for x in manifest['files']))
             (package / 'LICENSE').unlink()
             with self.assertRaisesRegex(ValueError, 'missing Rust license text'):
-                collect(root, self.metadata(package), android, ndk, output)
+                collect(root, self.metadata(package), android, ndk, output, sysroot)
 
 
 if __name__ == '__main__':

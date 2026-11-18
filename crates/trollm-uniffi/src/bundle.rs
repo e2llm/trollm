@@ -392,6 +392,29 @@ pub(crate) fn installed_flow_setup(
     base: &Path,
     flow_sha256: &str,
 ) -> Result<Option<crate::setup::FlowSetup>> {
+    let (_, setup) = inspect_installed_flow(base, flow_sha256, None)?;
+    Ok(setup)
+}
+
+/// Returns whether the verified root or any of its referenced flows declares a slot.
+pub(crate) fn flow_has_declared_model_slots(
+    base: &Path,
+    flow_sha256: &str,
+    source_installation_sha256: Option<&str>,
+) -> Result<bool> {
+    fn has_slots(plan: &ExecutionPlan) -> bool {
+        !plan.models.is_empty() || plan.subflows.values().any(has_slots)
+    }
+
+    let (plan, _) = inspect_installed_flow(base, flow_sha256, source_installation_sha256)?;
+    Ok(has_slots(&plan))
+}
+
+fn inspect_installed_flow(
+    base: &Path,
+    flow_sha256: &str,
+    source_installation_sha256: Option<&str>,
+) -> Result<(ExecutionPlan, Option<crate::setup::FlowSetup>)> {
     if flow_sha256.len() != 64
         || !flow_sha256
             .bytes()
@@ -399,7 +422,10 @@ pub(crate) fn installed_flow_setup(
     {
         bail!("flow sha256 must be 64 lowercase hexadecimal characters");
     }
-    let dir = base.join("bundles").join(flow_sha256);
+    let dir = match source_installation_sha256 {
+        Some(installation) => revision_dir(base, installation)?,
+        None => base.join("bundles").join(flow_sha256),
+    };
     let manifest_bytes = fs::read(dir.join(MANIFEST_NAME)).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             TrollmError::NotFound(format!("reading installed manifest: {error}"))
@@ -408,19 +434,12 @@ pub(crate) fn installed_flow_setup(
         }
     })?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
-    let (plan, _) = validate_materialized_bundle(&dir, &manifest)
+    let (plan, _, setup) = inspect_materialized_bundle(&dir, &manifest)
         .map_err(|error| TrollmError::Bundle(format!("{error:#}")))?;
     if plan.sha256 != flow_sha256 {
         bail!("installed root flow does not match its content address");
     }
-    // The first pass checked every manifest member; reconstruct the canonical
-    // membership map for the shared descriptor loader, which rechecks its pin.
-    let verified = manifest
-        .files
-        .iter()
-        .map(|file| Ok((dir.join(&file.path).canonicalize()?, file.sha256.clone())))
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    crate::setup::load_flow_setup(&plan, &dir, &verified)
+    Ok((plan, setup))
 }
 
 fn outcome(

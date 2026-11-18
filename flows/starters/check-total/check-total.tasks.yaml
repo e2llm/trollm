@@ -1,6 +1,6 @@
 schemaVersion: ledger.task-registry.v1
 id: check-total
-version: 1
+version: 2
 tasks:
   sum-cart:
     model: coder
@@ -16,13 +16,12 @@ tasks:
         calculation: { fromArtifact: calculation, format: json, type: object }
       requireArtifactComplete: [calculation]
   compare-budget:
-    model: coder
-    prompt: prompts/compare.md
+    execution: tool
     tools: [local.calculate]
     completion: tool-result
-    loop: { maxSteps: 1 }
     toolArguments:
       local.calculate:
+        modelFields: []
         fromVars: { left: sum.outputs.calculation.result }
         fromInput: { right: budget }
         fixed: { operation: compare }

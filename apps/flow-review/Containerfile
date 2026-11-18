@@ -15,14 +15,26 @@ RUN npm run audit:prebuild && npm run build && npm run audit:final
 FROM ${RUST_IMAGE} AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY scripts/make_flow_review_notices.py scripts/
+COPY scripts/android/make_apk_notices.py scripts/android/
+COPY licenses/upstream/ licenses/upstream/
 COPY crates/ crates/
 COPY schemas/ schemas/
 COPY flows/starters/browser-summary/setup.json flows/starters/browser-summary/setup.json
 COPY apps/flow-review/server/ apps/flow-review/server/
+RUN if ! command -v python3 >/dev/null; then \
+      export http_proxy="${http_proxy:-${HTTP_PROXY:-}}" https_proxy="${https_proxy:-${HTTPS_PROXY:-}}"; \
+      apt-get update && apt-get install -y --no-install-recommends python3 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 # Use the toolchain already installed in the pinned builder. Building does not
 # need the optional lint components requested by the repository toolchain file.
-RUN CARGO_BUILD_JOBS=2 rustup run 1.90.0 cargo build --locked --release -p trollm-flow-review \
-    && readelf -d target/release/trollm-flow-review > /out-dependencies.txt \
+RUN CARGO_BUILD_JOBS=2 rustup run 1.90.0 cargo build --locked --release \
+    --target x86_64-unknown-linux-gnu -p trollm-flow-review --bin trollm-flow-review \
+    --message-format=json-render-diagnostics > /cargo-build.jsonl \
+    && python3 scripts/make_flow_review_notices.py collect --build-messages /cargo-build.jsonl \
+        --sysroot "$(rustup run 1.90.0 rustc --print sysroot)" /out/notices \
+    && readelf -d target/x86_64-unknown-linux-gnu/release/trollm-flow-review > /out-dependencies.txt \
     && ! grep NEEDED /out-dependencies.txt | grep -Ev '\[(libgcc_s\.so\.1|libm\.so\.6|libc\.so\.6|ld-linux-x86-64\.so\.2)\]' \
     && mkdir -p /out/packages
 
@@ -42,8 +54,9 @@ COPY --from=compiler-runtime /usr/share/doc/gcc-14-base/ /usr/share/doc/gcc-14-b
 COPY --from=compiler-runtime /usr/share/doc/libgcc-s1 /usr/share/doc/libgcc-s1
 WORKDIR /app
 COPY --from=server /out/packages/ /packages/
-COPY --from=server /src/target/release/trollm-flow-review /app/trollm-flow-review
+COPY --from=server /src/target/x86_64-unknown-linux-gnu/release/trollm-flow-review /app/trollm-flow-review
 COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+COPY --from=server /out/notices/ /app/notices/
 COPY --from=web /src/apps/flow-review/web/dist/ /app/web/
 USER 10001:10001
 ENV FLOW_REVIEW_BIND=0.0.0.0:8080 \

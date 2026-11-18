@@ -1,7 +1,7 @@
 # Install trollm on Android
 
-Download [the 1.0.1 APK](https://github.com/e2llm/trollm/releases/download/v1.0.1/app-release.apk)
-from [GitHub Releases](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
+Download [the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk)
+from [GitHub Releases](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
 and open `app-release.apk` on an Android 13/API 33 or newer device. Allow your
 browser or file manager to install that APK when Android asks. The release
 includes a SHA-256 checksum, build identity and third-party notices alongside
@@ -43,19 +43,24 @@ checks continuity with this release identity.
 ## First run
 
 1. Open trollm and choose **Summarize text** or **Check a total**.
-2. Open the flow's preparation screen and download its required models. Leave
-   enough device storage for the displayed files and wait for verification.
+2. Enter the flow's input, or choose its editable example. Download the required
+   model files shown on the same screen. Leave enough device storage for the
+   displayed files and headroom, and wait for verification.
    Downloads use an unmetered network by default; the screen offers a metered
    network choice. Model preparation starts after an explicit Start or Resume.
-3. Supply the flow's input and tap **Start**. Check a total expects exactly two
+3. Tap **Start run** when the prerequisites are ready. Check a total expects exactly two
    item amounts in the text plus a separate budget, for example “Two items cost
    39.99 and 40.10” and budget `80`.
-4. Follow progress and read the result. The calculator evaluates the selected
-   amounts exactly; selecting the intended amounts remains model work.
+4. Follow progress and read or copy the final report. The calculator evaluates
+   the selected amounts exactly; selecting the intended amounts remains model
+   work. The starter's budget comparison is an ordinary direct tool call.
 
 These two starters need no browser or MCP account once their model files are
 available. Local inference speed and available memory depend on the phone and
 selected models. **Technical details** exposes the recorded events and identities.
+Use **Manage flows** in the library for **Import flow file**, **Connections** and
+**Moray source**. Returning from connection setup keeps the current flow draft;
+opening a saved run observes it. **Resume saved run** is an explicit action.
 
 ## Browser workflows
 
@@ -65,10 +70,13 @@ a connected browser, which may run on another computer. Configure the browser
 service and sign in through the connection setup before starting the flow.
 Local inference does not make remote browser tools work offline.
 
-Use **Install bundle** to import the v342 `.tar` file. Its source, model pins,
+Use **Manage flows → Import flow file** to import the v342 `.tar` file. Its source, model pins,
 mission description and historical run evidence are in
 [the example directory](../examples/run-342/README.md). Installing the app does
 not install model weights or establish an E2LLM account/session.
+Historical run instructions use the earlier **Install bundle** label for this
+picker; in 1.1.0 it is **Manage flows → Import flow file**. The archived evidence
+and its checksums remain unchanged.
 
 ## Updates and diagnostics
 

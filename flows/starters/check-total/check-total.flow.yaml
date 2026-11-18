@@ -1,6 +1,6 @@
 schemaVersion: ledger.execution-plan.v1
 id: check-total
-version: 1
+version: 2
 setup:
   path: setup.json
   sha256: "51b3aabbc78d875fd067fda0c446e59af86e48521c39980debbc1f591fa340f4"

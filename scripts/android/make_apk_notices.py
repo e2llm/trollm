@@ -3,10 +3,13 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tomllib
+
+RUST_STDLIB_LICENSES = {'Apache-2.0.txt', 'MIT.txt', 'LLVM-exception.txt'}
 
 
 def runtime_packages(metadata):
@@ -44,7 +47,22 @@ def license_files(directory):
                   and p.name.upper().startswith(prefixes))
 
 
-def collect(root, metadata, android, ndk, output):
+def rust_toolchain_notices(sysroot):
+    """Read the installed standard-library copyright and accompanying license texts."""
+    stdlib = sysroot / 'share/doc/rust'
+    copyright_file = stdlib / 'COPYRIGHT-library.html'
+    terms = sorted(p for p in (stdlib / 'licenses').glob('*.txt') if p.is_file())
+    if not copyright_file.is_file() or not RUST_STDLIB_LICENSES <= {p.name for p in terms}:
+        raise ValueError('Rust toolchain standard-library copyright or license texts unavailable')
+    for path in [copyright_file, *terms]:
+        source = path.relative_to(sysroot).as_posix()
+        data = path.read_bytes()
+        if not data.strip():
+            raise ValueError('empty Rust toolchain notice: ' + source)
+        yield source, data
+
+
+def collect(root, metadata, android, ndk, output, rust_sysroot):
     entries, sections = [], []
 
     def add(label, data, source):
@@ -84,6 +102,8 @@ def collect(root, metadata, android, ndk, output):
             add(label + ' / ' + relative, path.read_bytes(), source + relative)
         if fallback:
             sections.append('See the pinned supplemental upstream workspace license above.\n')
+    for source, data in rust_toolchain_notices(rust_sysroot):
+        add('Rust toolchain / ' + source, data, 'Installed Rust toolchain: ' + source)
     for path in license_files(root / 'crates/trollm-mcp/vendor/rpa-kernel-clock'):
         add('Moray kernel clock / ' + path.name, path.read_bytes(), 'Apache-2.0 grant; matching source directory')
     if not android.get('components'):
@@ -113,9 +133,10 @@ def collect(root, metadata, android, ndk, output):
     version = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']['version']
     header = (
         f'trollm {version} — third-party notices\n\n'
-        'Collected from the resolved Rust runtime dependency graph, resolved Android\n'
-        'runtime POMs and embedded artifact notices, vendored native source, and the\n'
-        'installed NDK. Native inventories include notices for bundled optional\n'
+        'Collected from the resolved Rust runtime dependency graph, the installed Rust\n'
+        'toolchain standard-library notice bundle, resolved Android runtime POMs and\n'
+        'embedded artifact notices, vendored native source, and the installed NDK.\n'
+        'Native inventories include notices for bundled optional\n'
         'backends; listing a component does not imply every feature was linked.\n'
         'Model weights are separate downloads and are not distributed in this APK.\n'
         'UniFFI covered source is available at the exact upstream revision recorded\n'
@@ -140,6 +161,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--backend', choices=('stub', 'llama'), required=True)
     parser.add_argument('--cargo-metadata', type=Path)
+    parser.add_argument('--rust-sysroot', type=Path, help='override the selected rustc sysroot')
     parser.add_argument('--delivery-output', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -151,7 +173,9 @@ def main():
             '--filter-platform', target, '--features', 'trollm-uniffi/' + args.backend,
         ], cwd=root)) for target in (
             'aarch64-linux-android', 'armv7-linux-androideabi', 'x86_64-linux-android')])
-    collect(root, metadata, json.loads(args.android_inventory.read_text()), args.ndk, args.output)
+    rust_sysroot = args.rust_sysroot or Path(subprocess.check_output(
+        [os.environ.get('RUSTC') or 'rustc', '--print', 'sysroot'], cwd=root, text=True).strip())
+    collect(root, metadata, json.loads(args.android_inventory.read_text()), args.ndk, args.output, rust_sysroot)
     if args.delivery_output:
         args.delivery_output.mkdir(parents=True, exist_ok=True)
         for name in ('THIRD_PARTY_NOTICES.txt', 'third-party-manifest.json'):

@@ -390,13 +390,13 @@ browser starter's checksum-pinned coder and reasoner models. No MCP connection,
 token or browser is required; prepare both models before the first run.
 
 The sum task fixes `operation: add` and lets the coder select the two operands.
-The comparison task binds `operation: compare`, the saved sum via `fromVars`,
-and `right` via `fromInput: budget`. The model requests the comparison with
-`args: {}`. Both exact payloads and the original input reach the tool-free
-reasoner and final coder; the coder also receives the reasoner's advice.
+The [direct comparison task](DIRECT-TOOL-EXECUTION.md) fixes `operation: compare`,
+binds the saved sum via `fromVars` and reads the budget via `fromInput`.
+Both exact payloads and the original input reach the tool-free reasoner and
+final coder. The coder also receives the reasoner's advice.
 No calculation or model prose authorizes an external action.
 
-The prompts explicitly teach the `<tool_call>` envelope. The runtime constrains
+The sum prompt explicitly teaches the `<tool_call>` envelope. The runtime constrains
 and validates calls but does not insert a tool catalog or tool-use instructions
 into an authored prompt. Include the envelope and argument meaning when writing
 other local-tool flows. Missing or invalid operands fail the task rather than

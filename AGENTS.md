@@ -34,8 +34,8 @@ The existing [starter](flows/starters/check-total/) accepts text such as
 
 1. A coder selects the amounts and calls the phone's `local.calculate` tool to
    add them. The result contains `80.09`.
-2. Another coder task calls the calculator to compare the saved sum with the
-   supplied budget. Runtime argument bindings supply those exact values.
+2. An authored direct tool task calls the calculator to compare the saved sum
+   with the supplied budget. Runtime argument bindings supply those exact values.
 3. The tool-free reasoner receives the original text and both actual calculator
    results, then gives advice in prose.
 4. A coder receives that evidence and advice and writes the final report.
@@ -69,7 +69,8 @@ An explicit [`execution: tool` task](docs/DIRECT-TOOL-EXECUTION.md) invokes one
 ordinary local/MCP tool without model inference when every argument is fixed or
 bound. It has no model or prompt. It uses the same checked dispatch and mutation
 journal; selected-guard calls remain model tasks in this first implementation.
-This source capability requires a new APK; published 1.0.1 predates it.
+Direct execution is available in 1.1.0 and later. The earlier 1.0.1 APK
+predates it; importing a newer flow cannot add the capability to that APK.
 
 For a readable label instead of an opaque ID, see the small
 [record-lookup example](flows/examples/record-lookup.flow.yaml) and its

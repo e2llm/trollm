@@ -154,7 +154,6 @@ fn current_argument_contracts_and_artifact_views_survive_inspection() {
         "flows/starters/check-total/check-total.tasks.yaml",
         "flows/starters/check-total/setup.json",
         "flows/starters/check-total/prompts/sum.md",
-        "flows/starters/check-total/prompts/compare.md",
         "flows/starters/check-total/prompts/advise.md",
         "flows/starters/check-total/prompts/report.md",
     ]);
@@ -173,14 +172,18 @@ fn current_argument_contracts_and_artifact_views_survive_inspection() {
     .unwrap();
     registry["tasks"]["sum-cart"]["toolArguments"]["local.calculate"]["modelFields"] =
         serde_json::json!(["left", "right"]);
-    registry["tasks"]["compare-budget"]["toolArguments"]["local.calculate"]["modelFields"] =
-        serde_json::json!([]);
     registry["tasks"]["sum-cart"]["outputContract"]["outputs"]["compact"] = serde_json::json!({"fromArtifact":"calculation", "format":"json", "type":"object",
             "view":{"fields":{"operation":true,"result":true},"maxBytes":256}});
     files[1].content = registry.to_string();
     let result = review(files.clone());
     assert!(result.valid, "{:?}", result.diagnostics);
     let inspected = result.registry.as_ref().unwrap();
+    let comparison = &inspected["tasks"]["compare-budget"];
+    assert_eq!(comparison["execution"], "tool");
+    assert_eq!(
+        comparison["toolArguments"]["local.calculate"]["modelFields"],
+        serde_json::json!([])
+    );
     assert_eq!(
         inspected["tasks"]["sum-cart"]["toolArguments"]["local.calculate"]["modelFields"],
         serde_json::json!(["left", "right"])

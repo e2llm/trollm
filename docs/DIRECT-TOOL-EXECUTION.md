@@ -1,9 +1,10 @@
 # Direct execution of fully bound tool calls
 
-Status: ordinary direct calls implemented in this source, 2026-11-17.
-This capability is newer than the published 1.0.1 APK: use an APK built from
-source containing it. Older readers reject the new field. Historical v342
-bundles and logs remain unchanged.
+Status: ordinary direct calls are included in 1.1.0 and later. The earlier
+1.0.1 APK predates this capability; older readers reject the new field.
+Historical v342 bundles and logs remain unchanged. The packaged Check a total
+version 2 uses direct execution for its fully bound budget comparison, while
+amount selection, advice and reporting retain their model tasks.
 
 ## Why this is worth doing
 

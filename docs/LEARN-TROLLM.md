@@ -12,7 +12,7 @@ that remain. Local inference can avoid a cloud model call, but a remote tool or
 browser still needs its service and network connection.
 
 The current app is experimental. The [installation guide](INSTALL-ANDROID.md)
-describes the downloadable 1.0.1 APK. This page walks through the source and does
+describes the downloadable 1.1.0 APK. This page walks through the source and does
 not claim fresh device observations. The [project overview](../README.md#current-evidence-and-limits)
 records the actual release and evidence limits.
 
@@ -38,9 +38,9 @@ One successful check does not establish all the others.
 
 | Role | Work in this example | Boundary |
 | --- | --- | --- |
-| Coder | Select the two amounts, invoke granted tools, and later write the report | The name means the tool-capable model role; it does not mean that this task writes or executes arbitrary code |
+| Coder | Select the two amounts, call the calculator to add them, and later write the report | The name means the tool-capable model role; it does not mean that this task writes or executes arbitrary code |
 | Reasoner | Read the original request and calculator results, then give advice | It has no tools; its prose is advice for a later model task, not an executable branch command |
-| Runtime / executor | Run the graph, bind data, validate calls and outputs, record progress and enforce limits | It does not infer the intended amounts or interpret “looks good” as a successful business check |
+| Runtime / executor | Run the graph, bind data, call the calculator directly for comparison, and verify and record results | It does not infer the intended amounts or interpret “looks good” as a successful business check |
 
 The coder also performs judgment. The reasoner is useful for a separate advisory
 question, not a compulsory supervisor for every call. A flow can use one or both
@@ -67,7 +67,7 @@ linked prompts specify what happens at each node:
 | Node | Model work | Data supplied or preserved by the runtime |
 | --- | --- | --- |
 | `sum` | The coder selects two amounts from the input text and calls `local.calculate` | The operation is fixed to `add`; the returned calculation becomes `sum.outputs.calculation` |
-| `compare` | The coder invokes the calculator with an empty model-owned argument object | The operation is fixed to `compare`; its left operand is the saved sum and its right operand is the separate budget input |
+| `compare` | None | The runtime calls the calculator directly with `compare`, the saved sum and the separate budget input |
 | `advise` | The tool-free reasoner assesses the selected amounts and explains the comparison | It receives the original input and both actual calculator payloads, not only another model's summary |
 | `report` | A tool-free coder task writes the final explanation | It receives the original input, both calculations and the reasoner's advice |
 
@@ -104,7 +104,7 @@ such exits; prose alone does not create them.
 | Source | Responsibility |
 | --- | --- |
 | Plan `.flow.yaml` | Nodes, transitions, task references, model slots, tool policies and run-wide limits |
-| Registry `.tasks.yaml` | Reusable task definitions: model role, prompt, grants, argument bindings, generation bounds, completion mode and output contracts |
+| Registry `.tasks.yaml` | Reusable task definitions with execution mode, grants, bindings, completion and output contracts. Model tasks also specify a model, prompt and generation bounds. |
 | Prompt Markdown | The immediate job, decisive evidence, uncertainty instructions and permitted call or route choices |
 | Optional setup descriptor | Android input fields, pinned model files/settings and connection defaults; credentials are separate |
 | Bundle manifest | The exact files and hashes admitted together for installation |

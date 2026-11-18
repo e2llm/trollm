@@ -37,19 +37,50 @@ def matching_node(root, text, package=PACKAGE, description=False):
 
 def matching_control(root, text, package=PACKAGE, description=False):
     """A label is actionable only on an enabled clickable node or ancestor."""
+    return next(controls(root, lambda label: label == text, package, description), None)
+
+
+def first_control(root, labels, *, description=None):
+    named = matching_control(root, description, description=True) if description is not None else None
+    if named is not None:
+        return named
+    return next((node for label in labels if (node := matching_control(root, label)) is not None), None)
+
+
+def controls(root, matches, package=PACKAGE, description=False):
     parents = {child: parent for parent in root.iter() for child in parent}
     packages = (package,) if isinstance(package, str) else package
     attribute = "content-desc" if description else "text"
+    seen = set()
     for node in root.iter("node"):
-        if node.get("package") not in packages or node.get(attribute) != text or node.get("enabled") != "true":
+        if (node.get("package") not in packages or not matches(node.get(attribute, ""))
+                or node.get("enabled") != "true"):
             continue
         current = node
         while current is not None:
-            if (current.get("package") in packages and current.get("enabled") == "true"
-                    and current.get("clickable") == "true"):
-                return current
+            if current.get("enabled") == "false":
+                break
+            if current.get("package") in packages and current.get("clickable") == "true":
+                if current.get("enabled") == "true" and current not in seen:
+                    seen.add(current)
+                    yield current
+                break
             current = parents.get(current)
-    return None
+
+
+def text_lines(root):
+    return {line for node in root.iter("node") if node.get("package") == PACKAGE
+            for line in node.get("text", "").splitlines()}
+
+
+def wait_ui(capture, predicate, label):
+    # A bounded number of captures; each subprocess has its own deadline.
+    for _ in range(4):
+        found = predicate(capture())
+        if found is not None and found is not False:
+            return found
+        time.sleep(0.5)
+    raise FlowSmokeError(f"Smoke-test UI did not reach {label}")
 
 
 def scroll_find(adb, capture, predicate):
@@ -60,9 +91,7 @@ def scroll_find(adb, capture, predicate):
         return found
     for direction in ("down", "up"):
         for _ in range(MAX_FLOW_LIST_SWIPES):
-            scrollers = [node for node in root.iter("node") if node.get("package") == PACKAGE
-                         and node.get("enabled") == "true" and node.get("scrollable") == "true"]
-            if not scrollers:
+            if not app_scrollers(root):
                 return None
             previous = ET.tostring(root)
             swipe_list(adb, root, direction=direction)
@@ -98,10 +127,16 @@ def flow_node(root, flow_id, sha256):
     return matches[0] if matches else None
 
 
-def swipe_list(adb, root, *, direction="up"):
+def app_scrollers(root):
     scrollers = [node for node in root.iter("node")
                  if node.get("package") == PACKAGE and node.get("enabled") == "true"
                  and node.get("scrollable") == "true"]
+    nested = {descendant for node in scrollers for descendant in node.iter("node") if descendant is not node}
+    return [node for node in scrollers if node not in nested]
+
+
+def swipe_list(adb, root, *, direction="up"):
+    scrollers = app_scrollers(root)
     if len(scrollers) != 1:
         raise FlowSmokeError("App list has no unique enabled scroller")
     scroller = scrollers[0]
@@ -116,10 +151,9 @@ def swipe_list(adb, root, *, direction="up"):
     adb("shell", "input", "swipe", x, str(start_y), x, str(end_y), "350")
 
 
-def open_list_card(adb, capture, find_card, label, *, disclose=False):
+def open_list_card(adb, capture, root, find_card, label, *, disclose=False):
     """Search from the current list position with fresh UI/bounds at every step."""
     for attempt in range(MAX_FLOW_LIST_SWIPES + 1):
-        root = capture()
         for disclosure in range(MAX_DETAILS_PER_PAGE + 1):
             node = find_card(root)
             if node is not None:
@@ -135,41 +169,109 @@ def open_list_card(adb, capture, find_card, label, *, disclose=False):
         if attempt == MAX_FLOW_LIST_SWIPES:
             raise FlowSmokeError(f"{label} identity not found after {MAX_FLOW_LIST_SWIPES} list swipes")
         swipe_list(adb, root)
+        root = capture()
+
+
+def dialog_scope(root, dismiss, marker):
+    """Locate the nearest branch containing the dialog's dismiss control and text."""
+    parents = {child: parent for parent in root.iter() for child in parent}
+    candidates = set()
+    for control in controls(root, lambda label: label == dismiss):
+        branch = parents.get(control)
+        while branch is not None:
+            # A dump can include the library window behind the dialog.
+            if any(node.get("content-desc", "").startswith("Details for ")
+                   or node.get("content-desc") == "Manage flows" for node in branch.iter("node")):
+                break
+            if any(marker(line) for line in text_lines(branch)):
+                candidates.add(branch)
+                break
+            branch = parents.get(branch)
+    if len(candidates) > 1:
+        raise FlowSmokeError("Smoke-test dialog is ambiguous")
+    return next(iter(candidates), None)
+
+
+def open_library_details(adb, capture, root, title, expected, action):
+    def shown_details(label):
+        return label == f"Details for {title}" if title is not None else label.startswith("Details for ")
+
+    def library(root):
+        if matching_control(root, "Manage flows", description=True) is None:
+            return None
+        if {"Loading flows…", "Loading run history…"} & text_lines(root):
+            return None
+        return root
+
+    def details_dialog(root):
+        return dialog_scope(root, "Done", lambda line: line.startswith(("Flow SHA-256: ", "Run ID: ")))
+
+    def open_on_page(root):
+        for index in range(MAX_DETAILS_PER_PAGE + 1):
+            details = list(controls(root, shown_details, description=True))
+            if index >= len(details):
+                return root
+            if index == MAX_DETAILS_PER_PAGE:
+                raise FlowSmokeError("Too many library details controls on one smoke-test page")
+            adb("shell", "input", "tap", *center(details[index]))
+            dialog = wait_ui(capture, details_dialog, "library identity details")
+            if expected in text_lines(dialog):
+                buttons = list(controls(dialog, lambda label: label == action))
+                if len(buttons) != 1:
+                    raise FlowSmokeError("Verified library identity has no unique enabled action")
+                adb("shell", "input", "tap", *center(buttons[0]))
+                return None
+            done = matching_control(dialog, "Done")
+            adb("shell", "input", "tap", *center(done))
+            root = wait_ui(capture, library, "flow library")
+        raise FlowSmokeError("Library details search exhausted")
+
+    if library(root) is None:
+        root = wait_ui(capture, library, "flow library")
+    root = open_on_page(root)
+    for direction in ("down", "up"):
+        for _ in range(MAX_FLOW_LIST_SWIPES):
+            if root is None:
+                return
+            if not app_scrollers(root):
+                break
+            previous = ET.tostring(root)
+            swipe_list(adb, root, direction=direction)
+            root = wait_ui(capture, library, "flow library")
+            if ET.tostring(root) == previous:
+                break
+            root = open_on_page(root)
+    if root is not None:
+        raise FlowSmokeError("Expected full library identity was not found in bounded list swipes")
 
 
 def open_fixture_card(adb, capture, flow_id, sha256):
-    """New cards identify a candidate by name/version; verify its full SHA before Start."""
-    card = open_list_card(adb, capture, lambda root: flow_node(root, flow_id, sha256), "Fixture")
-    if any("Version 1" in child.get("text", "").splitlines() for child in card.iter("node")):
-        verify_identity(adb, capture, f"Bundle SHA-256: {sha256}")
+    root = capture()
+    if matching_control(root, "Manage flows", description=True) is not None:
+        open_library_details(adb, capture, root, flow_id, f"Flow SHA-256: {sha256}", "Open flow")
+        return True
+    open_list_card(adb, capture, root, lambda root: flow_node(root, flow_id, sha256), "Fixture")
+    return False
 
 
-def verify_identity(adb, capture, expected, legacy=None):
-    def identity(root):
-        return next((node for node in root.iter("node") if node.get("package") == PACKAGE
-                     and (expected in node.get("text", "").splitlines()
-                          or (legacy is not None and node.get("text") == legacy))), None)
-
-    # Identity is read after opening the disclosure. No Start/Resume action is
-    # permitted merely because a title, date or partial run UUID matched.
+def verify_identity(adb, capture, *expected):
+    # New disclosures keep their label when opened. Toggle only once, and use
+    # freshly observed controls after the full identity has appeared.
+    opened = False
     for page in range(MAX_FLOW_LIST_SWIPES + 1):
         root = capture()
-        for disclosure in range(MAX_DETAILS_PER_PAGE + 1):
-            if identity(root) is not None:
-                # Close the inspected disclosure while its control is observed.
-                # Run events may add a nested scroller; later navigation should
-                # retain the single outer screen scroller whenever possible.
-                hide = matching_control(root, "Hide technical details")
-                if hide is not None:
-                    adb("shell", "input", "tap", *center(hide))
-                return
-            details = matching_control(root, "Technical details")
-            if details is None:
-                break
-            if disclosure == MAX_DETAILS_PER_PAGE:
-                raise FlowSmokeError("Expected identity not found in bounded disclosures")
+        details = matching_control(root, "Technical details")
+        if not opened and details is not None and not text_lines(root).intersection(expected):
             adb("shell", "input", "tap", *center(details))
             root = capture()
+            opened = True
+        if text_lines(root).intersection(expected):
+            hide = matching_control(root, "Hide technical details")
+            if hide is None and opened:
+                hide = matching_control(root, "Technical details")
+            if hide is not None:
+                adb("shell", "input", "tap", *center(hide))
+            return
         if page == MAX_FLOW_LIST_SWIPES:
             break
         try:
@@ -190,10 +292,14 @@ def history_node(root, run_id):
     return matches[0] if matches else None
 
 
-def open_history_card(adb, capture, run_id):
+def open_history_card(adb, capture, run_id, title=None):
     if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", run_id) is None:
         raise FlowSmokeError("History target has an invalid run identity")
-    open_list_card(adb, capture, lambda root: history_node(root, run_id), "Run", disclose=True)
+    root = capture()
+    if matching_control(root, "Manage flows", description=True) is not None:
+        open_library_details(adb, capture, root, title, f"Run ID: {run_id}", "View run")
+        return
+    open_list_card(adb, capture, root, lambda root: history_node(root, run_id), "Run", disclose=True)
 
 
 def exercise_flow(adb):
@@ -213,14 +319,7 @@ def exercise_flow(adb):
                 time.sleep(0.5)
 
     def wait_for(predicate, label):
-        # A bounded number of captures; each subprocess has its own deadline.
-        for _ in range(4):
-            root = capture()
-            found = predicate(root)
-            if found is not None and found is not False:
-                return found
-            time.sleep(0.5)
-        raise FlowSmokeError(f"Smoke-test UI did not reach {label}")
+        return wait_ui(capture, predicate, label)
 
     def wait_visible(predicate, label):
         try:
@@ -244,13 +343,46 @@ def exercise_flow(adb):
                          and (node.get("text") == expected if exact else expected in node.get("text", ""))), None)
         return wait_visible(find, "expected result")
 
+    def wait_run_state(title, message, legacy):
+        def matches(root):
+            lines = text_lines(root)
+            return legacy in lines or {title, message} <= lines
+        wait_visible(matches, "expected run state")
+
+    def wait_paused():
+        wait_run_state("Paused", fixture.PAUSE_REASON, f"Paused: {fixture.PAUSE_REASON}")
+
+    def go_up():
+        node = wait_visible(lambda root: first_control(root, ("‹ Back", "Back"), description="Navigate up"),
+                            "navigate up")
+        adb("shell", "input", "tap", *center(node))
+
+    def manage_flows(root):
+        return matching_control(root, "Manage flows", description=True)
+
+    def verify_run(run_id):
+        verify_identity(adb, capture, f"Run ID · {run_id}", f"Run ID: {run_id}", run_id)
+
+    def confirm_cancel(root):
+        dialog = dialog_scope(root, "Keep run", lambda line: line == "Cancel this run?")
+        if dialog is None:
+            return None
+        buttons = list(controls(dialog, lambda label: label == "Cancel run"))
+        if len(buttons) > 1:
+            raise FlowSmokeError("Run cancellation confirmation is ambiguous")
+        return buttons[0] if buttons else None
+
     def install(local_name, expected):
         # A unique filename avoids selecting an unrelated/stale Downloads item.
         remote_name = f"trollm-smoke-{uuid.uuid4().hex}.tar"
         remote = f"/sdcard/Download/{remote_name}"
         remote_paths.append(remote)
         adb("push", str(fixture.OUTPUT_DIR / local_name), remote)
-        tap(("Install flow", "Install bundle"))
+        if manage_flows(capture()) is not None:
+            tap("Manage flows", description=True)
+            tap("Import flow file")
+        else:
+            tap(("Install flow", "Install bundle"))
         tap("Choose file")
         root = capture()
         # The system document picker may open Recent or a previously used folder.
@@ -260,14 +392,11 @@ def exercise_flow(adb):
         tap(remote_name, DOCUMENTS)
         if expected.startswith("Installed: "):
             flow_id = expected.removeprefix("Installed: ")
-            wait_visible(lambda root: next((node for node in root.iter("node")
-                     if node.get("package") == PACKAGE and
-                     (node.get("text", "").splitlines()[0:1] in
-                      ([expected], [f"{expected} v1"], [f"{flow_id} · Version 1"]))), None),
-                     "installed fixture identity")
+            install_labels = {expected, f"{expected} v1", f"{flow_id} · Version 1"}
+            wait_visible(lambda root: bool(text_lines(root) & install_labels), "installed fixture identity")
         else:
             wait_text(expected)
-        tap(("‹ Back", "Back"))
+        go_up()
 
     def private_entries(subdir):
         return set(adb("shell", "run-as", PACKAGE, "ls", f"files/trollm/{subdir}").splitlines())
@@ -275,15 +404,15 @@ def exercise_flow(adb):
     def open_fixture(paused=False):
         flow_id = fixture.PAUSED_FLOW_ID if paused else fixture.FLOW_ID
         digest = hashlib.sha256(fixture.fixture_files(paused=paused)[f"{flow_id}.flow.yaml"]).hexdigest()
-        open_fixture_card(adb, capture, flow_id, digest)
+        if not open_fixture_card(adb, capture, flow_id, digest):
+            verify_identity(adb, capture, f"Bundle SHA-256: {digest}", f"Flow SHA-256 · {digest}")
 
     try:
         # A previous run may have restored the run/install screen.
         def home(root):
-            return next((node for label in ("Install flow", "Install bundle")
-                         if (node := matching_control(root, label)) is not None), None)
+            return first_control(root, ("Install flow", "Install bundle"), description="Manage flows")
         if scroll_find(adb, capture, home) is None:
-            tap(("‹ Back", "Back"))
+            go_up()
         before_flows = private_entries("flows")
         install(f"{fixture.FLOW_ID}-bad-hash.tar", "sha256 mismatch")
         if private_entries("flows") != before_flows:
@@ -306,28 +435,28 @@ def exercise_flow(adb):
         if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", run_id) is None:
             raise FlowSmokeError("Created smoke run has an invalid identity")
         print("PASS: installed fixture completed through JNI with expected final report")
-        tap(("‹ Back", "Back"))
+        go_up()
 
         # Search freshly after Back: installed flows may precede the history.
-        open_history_card(adb, capture, run_id)
-        verify_identity(adb, capture, f"Run ID: {run_id}", legacy=run_id)
+        open_history_card(adb, capture, run_id, fixture.FLOW_ID)
+        verify_run(run_id)
         wait_text(fixture.EXPECTED_REPORT)
         checks.append("history-reopen")
         adb("shell", "am", "force-stop", PACKAGE)
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
-        verify_identity(adb, capture, f"Run ID: {run_id}", legacy=run_id)
+        verify_run(run_id)
         wait_text(fixture.EXPECTED_REPORT)
         wait_visible(lambda root: next((found for label in ("Completed", "Succeeded")
                          if (found := matching_node(root, label)) is not None), None), "completed run")
         checks.append("completed-run-cold-recovery")
         print("PASS: run history and completed-run recovery after process death")
 
-        tap(("‹ Back", "Back"))
+        go_up()
         install("android-smoke-paused.tar", "Installed: android-smoke-paused")
         open_fixture(paused=True)
         before_runs = private_entries("runs")
         tap("Start run")
-        wait_text("Paused: needs-attention", exact=True)
+        wait_paused()
         new_runs = private_entries("runs") - before_runs
         if len(new_runs) != 1:
             raise FlowSmokeError("Expected exactly one new paused smoke run")
@@ -354,12 +483,14 @@ def exercise_flow(adb):
 
         adb("shell", "input", "keyevent", "KEYCODE_HOME")
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
-        wait_text("Paused: needs-attention", exact=True)
+        wait_paused()
         adb("shell", "am", "force-stop", PACKAGE)
         adb("shell", "am", "start", "-W", "--activity-clear-top", "-n", f"{PACKAGE}/.MainActivity", timeout=30)
-        verify_identity(adb, capture, f"Run ID: {paused_id}", legacy=paused_id)
-        wait_text("Interrupted — tap Resume to restore saved progress. Models load when needed.", exact=True)
-        wait_visible(lambda root: matching_control(root, "Resume"), "enabled explicit Resume")
+        verify_run(paused_id)
+        wait_run_state("Interrupted", "Restore progress using the saved run.",
+                       "Interrupted — tap Resume to restore saved progress. Models load when needed.")
+        resume = ("Resume saved run", "Resume")
+        wait_visible(lambda root: first_control(root, resume), "enabled explicit Resume")
         cold = events()
         if cold != initial:
             raise FlowSmokeError("Cold reopen changed the journal before explicit Resume")
@@ -367,7 +498,7 @@ def exercise_flow(adb):
         checks.append("paused-run-cold-recovery")
         before_resume = cold_types.count("resumed")
         before_models = cold_types.count("model_call")
-        tap("Resume")
+        tap(resume)
 
         def resumed(_root):
             types = [event.get("type") for event in events()]
@@ -375,13 +506,28 @@ def exercise_flow(adb):
                     and types.count("model_call") == before_models + 1 and types[-1:] == ["paused"])
 
         wait_for(resumed, "resumed execution and repeated pause")
-        wait_text("Paused: needs-attention", exact=True)
+        wait_paused()
         checks.append("resume-reruns-task")
-        tap(("Cancel run", "Cancel"))
-        state = wait_for(lambda root: next((label for label in ("Cancelled", "Cancel this run?")
-                         if matching_node(root, label) is not None), None), "cancellation or confirmation")
-        if state == "Cancel this run?":
+        def cancel_control(root):
+            menu = matching_control(root, "Run actions", description=True)
+            if menu is not None:
+                return menu, True
+            direct = first_control(root, ("Cancel run", "Cancel"))
+            return (direct, False) if direct is not None else None
+
+        node, through_menu = wait_visible(cancel_control, "cancel action")
+        adb("shell", "input", "tap", *center(node))
+        if through_menu:
             tap("Cancel run")
+        def cancellation(root):
+            confirmation = confirm_cancel(root)
+            if confirmation is not None:
+                return confirmation
+            return matching_node(root, "Cancelled") if not through_menu else None
+
+        confirmed = wait_for(cancellation, "enabled confirmation or cancellation")
+        if confirmed.get("text") != "Cancelled":
+            adb("shell", "input", "tap", *center(confirmed))
         wait_text("Cancelled", exact=True)
         terminal = events()
         if not terminal or terminal[-1].get("type") != "run_ended" or terminal[-1].get("outcome") != "cancelled":

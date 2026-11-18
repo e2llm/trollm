@@ -1,8 +1,8 @@
 # trollm Android development
 
-The Kotlin/Compose app uses the Rust runtime through UniFFI. This is a developer
-prototype targeting Android 13/API 33+, with S21-class hardware or newer as the
-phone target. [Version 1.0.1](https://github.com/e2llm/trollm/releases/tag/v1.0.1)
+The Kotlin/Compose app uses the Rust runtime through UniFFI. This is an experimental
+app targeting Android 13/API 33+, with S21-class hardware or newer as the
+phone target. [Version 1.1.0](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
 provides a native APK; see the [installation guide](../../docs/INSTALL-ANDROID.md).
 
 The included app has flow installation, run history, foreground run ownership
@@ -11,8 +11,9 @@ OAuth client with grant-bound refresh; manual Bearer setup remains supported.
 Tokens and OAuth state use Keystore-backed encrypted storage by MCP server name.
 The source includes advanced per-flow overrides and bundled **Summarize text**,
 **Browse and summarize** and **Check a total** starters, installed idempotently
-before flow listing. Flows appear above retained history, using their setup
-titles when available.
+before flow listing. The library features a saved active/interrupted run or the
+verified bundled Summarize text starter, with other flows and retained history
+in rows. Versions and complete identities remain in each item's details.
 Ordinary download transfer/recovery and actual OAuth refresh still need device
 acceptance; this is not a ready consumer journey.
 
@@ -30,13 +31,20 @@ Cancelling a download asks for
 confirmation before discarding that model's partial transfer and stopping the
 remaining batch queue. Ready models stay saved.
 
-The existing screens share a light/dark Material theme, following the device
-setting. Flow cards include their setup description; run states have labelled
-badges, and the final report has a selectable card with an explicit copy action.
-Hashes and run IDs remain accessible through **Technical details**. Server setup
-separates browser sign-in from manual tokens, and installation keeps its author
-verification warning visible. This is presentation work; it does not change
-navigation, runtime contracts or the device acceptance scope below.
+The screens share a light/dark Material theme with compact Up/title headers.
+**Manage flows** groups import, connection and Moray actions. Input, download
+requirements and connection prerequisites share a flow screen; visiting a
+connection keeps that flow's draft and exact identity. Explicit Start hands off
+through a retained owner, so rotation reattaches to its result. A restored
+unconfirmed Start directs the user to run history instead of resubmitting it.
+Typed worker activity and the last recorded step have separate labels. Observation
+failure clears stale live controls, and pending lifecycle commands await fresh
+worker evidence. Final reports and copying precede diagnostics and Moray actions.
+Technical events retain the reader's position with **Jump to latest**. Server
+setup keeps browser sign-in separate from manual tokens; token text is still
+cleared on leave/background. Import keeps its author-verification warning and
+offers to open the exact installed revision. Device acceptance remains scoped
+to the observations below.
 
 The browser starter asks for a browser name/ID, a page URL and an optional
 question. Runtime argument checks keep calls on that browser and bind the open
@@ -48,13 +56,14 @@ exact artifact and has no tools. Empty, truncated or oversized results fail.
 The **Check a total** starter asks for text describing exactly two item amounts
 and a separate budget, entered as a decimal without currency signs. Qwen selects
 the two operands for the built-in calculator; the runtime binds the saved sum
-and your budget for comparison. Gemma receives the original input and both exact
+and your budget for a direct comparison, with no model invocation for that step.
+Gemma receives the original input and both exact
 results, then Qwen produces a final report. It needs no MCP connection or sign-in
 and reuses the browser starter's pinned models. It performs no browser or purchase
 actions. Arithmetic is exact for the selected operands; selection and advice are
 model work. Its scripted tests do not establish native-device acceptance.
 
-Current release metadata is **1.0.1 / Android code 71**. Source includes prepared-list
+Current release metadata is **1.1.0 / Android code 72**. Source includes prepared-list
 tools, explicit child returns, bounded observations and correlated timing.
 Host checks use scripted dependencies. The [recorded v342 runs](../../examples/run-342/README.md)
 used an earlier APK and remain separate observations.
@@ -82,8 +91,9 @@ and service/wake-lock cleanup. Earlier scoped checks covered signed updates,
 controls, recovery and page guards on their respective builds.
 
 Actual OAuth refresh, ordinary download transfer/recovery, Doze-specific behavior
-and physical-phone acceptance remain open. Downloads are blocked by Android
-validated-network connectivity. Emulator results do not establish phone
+and physical-phone acceptance remain open. The earlier emulator download attempt
+was blocked by Android's validated-network connectivity check; it does not
+establish a current outage. Emulator results do not establish phone
 performance or arbitrary-page accuracy. See [versioning](../../docs/VERSIONING.md)
 for the identity of each release.
 
@@ -144,12 +154,18 @@ dependencies and invoking an external Kotlin formatter are unnecessary.
 ## UI presentation
 
 `ui/TrollmTheme.kt` owns colours, typography, shapes and system/keyboard insets.
-`ui/UiComponents.kt` provides the shared headers, cards and labelled status
-surfaces. Use these in the existing screens without moving runtime ownership
-into UI components. Run colours come from typed phase/worker state in
+`ui/UiComponents.kt` provides the shared headers, menus, disclosures and labelled
+status surfaces. `AppNavigation.kt` retains the active destination through a
+connection visit. `RunStartViewModel.kt` owns the explicit start request and its
+genuine UUID until navigation acknowledges it; saved state contains only its key
+and a returned ID, never credentials or a fabricated run. It creates no request
+when a screen opens. Run colours come from typed phase/worker state in
 `RunPresentation.kt` and `RunHistoryEntries.kt`, never from model prose.
 `ModelDownloadPresentation.kt` formats byte counts and progress without changing
-download or readiness decisions. JVM tests cover these presentation decisions;
+download or readiness decisions. Android's queued and network-waiting states are
+distinct, and unreadable credential storage does not become a missing sign-in.
+The read-only bridge verifies the installed root and referenced children before
+showing **No model files required** for a setup-free flow. JVM tests cover presentation decisions;
 rendering, large-font layout and TalkBack still require checks on the built app.
 
 ## Local prerequisites
@@ -260,7 +276,7 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 Keep signing files and credentials out of source control, logs and reports.
 
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`1.0.1` (code `71`), read from the root Cargo manifest through
+`1.1.0` (code `72`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. The generated notices are included in the
 APK and copied beside it after assembly, which recreates the APK output directory.
 The collector follows bounded parent-POM chains for
@@ -275,7 +291,7 @@ third-party flows or sharing local logs.
 
 ## Manual runtime setup
 
-“Install bundle” opens the Android file picker. A flow bundle is an uncompressed
+**Manage flows → Import flow file** opens the Android file picker. A flow bundle is an uncompressed
 ustar archive with a `trollm.flow-bundle.v1` manifest, file paths and SHA-256
 hashes. Parsing and hashes protect integrity relative to that manifest; they do
 not establish publisher identity. A general author-facing packing command is
