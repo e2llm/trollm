@@ -3,6 +3,7 @@
 import argparse
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import socket
@@ -39,9 +40,42 @@ def parse_mountinfo(text):
     for line in text.splitlines():
         before, after = line.split(' - ', 1)
         fields, filesystem = before.split(), after.split()
-        mounts.append({'root': unescape(fields[3]), 'point': unescape(fields[4]),
+        mounts.append({'id': int(fields[0]), 'parent_id': int(fields[1]),
+                       'root': unescape(fields[3]), 'point': unescape(fields[4]),
                        'options': set(fields[5].split(',')), 'type': filesystem[0]})
     return mounts
+
+
+def fdinfo_mount_id(text):
+    entries = [line.split()[1:] for line in text.splitlines() if line.startswith('mnt_id:')]
+    assert len(entries) == 1 and len(entries[0]) == 1 and entries[0][0].isdigit(), \
+        'fdinfo does not identify exactly one kernel mount'
+    return int(entries[0][0])
+
+
+def path_mount_id(process, point):
+    """Resolve the mount actually reached through the container's filesystem view."""
+    fd = os.open(process / 'root' / point.lstrip('/'), os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return fdinfo_mount_id(Path(f'/proc/self/fdinfo/{fd}').read_text())
+    finally:
+        os.close(fd)
+
+
+def check_visible_mount(mounts, point, mount_id):
+    # mountinfo can contain hidden mounts stacked at the same path. Neither
+    # entry order nor a maximum ID establishes which mount path lookup reaches.
+    entries = [mount for mount in mounts if mount['point'] == point]
+    visible = [mount for mount in entries if mount['id'] == mount_id]
+    assert len(visible) == 1, (f'visible mount at {point} unresolved: kernel ID {mount_id}, '
+                               f'{len(entries)} entries, IDs {[mount["id"] for mount in entries]}')
+    mount = visible[0]
+    if point == '/tmp':
+        assert mount['type'] == 'tmpfs' and 'rw' in mount['options'], \
+            'visible /tmp mount must be writable tmpfs'
+    else:
+        assert 'ro' in mount['options'], f'{point} is not actually read-only'
+    return mount
 
 
 def cgroup_directory(membership, mounts):
@@ -67,13 +101,7 @@ def inspect_runtime_process(pid):
         host_mounts = parse_mountinfo(Path('/proc/self/mountinfo').read_text())
         assert mapped_uid(status, uid_map) == 10001, 'effective container UID must be 10001'
         for point in ('/', '/packages', '/tmp'):
-            entries = [mount for mount in mounts if mount['point'] == point]
-            assert len(entries) == 1, f'expected one visible mount at {point}'
-            mount = entries[0]
-            if point == '/tmp':
-                assert mount['type'] == 'tmpfs' and 'rw' in mount['options']
-            else:
-                assert 'ro' in mount['options'], f'{point} is not actually read-only'
+            check_visible_mount(mounts, point, path_mount_id(process, point))
         group = cgroup_directory(membership, host_mounts)
         memory = (group / 'memory.max').read_text().strip()
         cpu = (group / 'cpu.max').read_text().split()
@@ -81,7 +109,7 @@ def inspect_runtime_process(pid):
         assert len(cpu) == 2 and cpu[0] != 'max'
         assert 0 < int(cpu[0]) / int(cpu[1]) <= 2, 'actual CPU quota must be at most two cores'
     except (PermissionError, FileNotFoundError) as error:
-        raise RuntimeError('Smoke requires /proc and cgroup access on the local Linux Podman '
+        raise RuntimeError('Smoke requires /proc (including the container root paths) and cgroup access on the local Linux Podman '
                            'runtime host; remote clients or insufficient rootless process '
                            'permissions cannot establish acceptance') from error
 
