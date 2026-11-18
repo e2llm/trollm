@@ -1,0 +1,15 @@
+{
+  "schema": "trollm.web-audit-exception.v1",
+  "advisory": "GHSA-fc5q-39xc-vjpf",
+  "advisoryUrl": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+  "package": "picomatch",
+  "version": "4.0.7",
+  "severity": "high",
+  "expiresAt": "2026-11-24T00:00:00Z",
+  "lockfileSha256": "7070eafefedc72065b039f169455c950cdfe695c783aa4c5154a960ac1de40e7",
+  "paths": [
+    "node_modules/tinyglobby/node_modules/picomatch",
+    "node_modules/vite/node_modules/picomatch",
+    "node_modules/vitest/node_modules/picomatch"
+  ]
+}

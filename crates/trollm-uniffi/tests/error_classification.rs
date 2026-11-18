@@ -98,9 +98,17 @@ fn missing_installed_flow_setup_is_not_found() {
 #[test]
 fn unavailable_runtime_keeps_its_category_in_a_bundle_named_path() {
     let base = TestDir::new("bundle-manifest-weights-sha256");
-    let error = base
-        .runtime()
-        .start_run("0".repeat(64), "hello".into())
+    let runtime = base.runtime();
+    // Backend requirements follow the verified flow: direct-only flows can
+    // execute without inference, while this real model flow still cannot.
+    let flow = runtime
+        .install_flow_bundle(
+            include_bytes!("../../../apps/android/app/src/main/assets/flows/text-summary.tar")
+                .to_vec(),
+        )
+        .unwrap();
+    let error = runtime
+        .start_run(flow.flow_sha256, "hello".into())
         .unwrap_err();
     assert!(
         matches!(&error, TrollmError::ModelUnavailable(_)),
@@ -109,7 +117,6 @@ fn unavailable_runtime_keeps_its_category_in_a_bundle_named_path() {
     assert!(error.to_string().contains("no model runtime"));
 }
 
-#[cfg(any(feature = "stub", feature = "llama"))]
 #[test]
 fn missing_installed_flow_at_run_start_is_not_found() {
     let base = TestDir::new("bundle-manifest-weights-sha256");

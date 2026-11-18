@@ -30,13 +30,14 @@ mod enabled {
     ) -> Vec<String> {
         fn collect(plan: &ExecutionPlan, registry: &TaskRegistry, slots: &mut Vec<String>) {
             for node in plan.nodes.values() {
-                if let Some(task) = node
+                if let Some(slot) = node
                     .task_ref
                     .as_ref()
                     .and_then(|key| registry.tasks.get(key))
+                    .and_then(|task| task.model_slot())
                 {
-                    if !slots.contains(&task.model) {
-                        slots.push(task.model.clone());
+                    if !slots.iter().any(|selected| selected == slot) {
+                        slots.push(slot.to_owned());
                     }
                 }
             }

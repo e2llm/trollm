@@ -16,6 +16,7 @@ import {
   qualified,
   request,
   taskUses,
+  taskExecutionLabel,
 } from "./model";
 import "./style.css";
 const Graph = lazy(() => import("./Graph"));
@@ -660,7 +661,7 @@ export function App() {
                         <>
                           <p className="badge">
                             {String(node.kind)} ·{" "}
-                            {String(task?.model ?? "runtime control")}
+                            {taskExecutionLabel(task)}
                           </p>
                           <button
                             className="comment-node"
@@ -690,13 +691,26 @@ export function App() {
                               </button>
                             </>
                           )}
-                          <h3>Instructions · static preview</h3>
-                          <p className="hint">
-                            Runtime bindings are unresolved placeholders. This
-                            preview does not execute templates or include live
-                            observations. Runtime context is appended for nodes
-                            with supplements or routes.
-                          </p>
+                          {task?.execution === "tool" ? (
+                            <>
+                              <h3>Direct tool execution</h3>
+                              <p className="hint">
+                                Invokes the declared tool with bound arguments
+                                without model generation. Output checks and
+                                mutation journaling still apply.
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <h3>Instructions · static preview</h3>
+                              <p className="hint">
+                                Runtime bindings are unresolved placeholders. This
+                                preview does not execute templates or include live
+                                observations. Runtime context is appended for nodes
+                                with supplements or routes.
+                              </p>
+                            </>
+                          )}
                           {path && (
                             <>
                               <p>
@@ -790,8 +804,10 @@ export function App() {
                               outputContract: task?.outputContract,
                             }}
                           />
-                          <h3>Generation / task-loop limits</h3>
-                          {task ? (
+                          <h3>{task?.execution === "tool" ? "Execution limits" : "Generation / task-loop limits"}</h3>
+                          {task?.execution === "tool" ? (
+                            <p>Uses the flow's step, time and artifact limits.</p>
+                          ) : task ? (
                             <p>
                               Output ceiling:{" "}
                               {String(task?.maxOutputTokens ?? 2048)} tokens per
@@ -808,10 +824,12 @@ export function App() {
                           ) : (
                             <p>No loaded model task at this node.</p>
                           )}
-                          <Detail
-                            title="Task loop (omission means single shot)"
-                            value={task?.loop}
-                          />
+                          {task?.execution !== "tool" && (
+                            <Detail
+                              title="Task loop (omission means single shot)"
+                              value={task?.loop}
+                            />
+                          )}
                           <Detail
                             title="Mutations / journaling"
                             value={task?.mutations}
@@ -934,11 +952,11 @@ export function App() {
                               Model slots:{" "}
                               {[
                                 ...new Set(
-                                  Object.values(doc.registry?.tasks ?? {}).map(
-                                    (t) => String(t.model),
+                                  Object.values(doc.registry?.tasks ?? {}).flatMap(
+                                    (t) => t.execution !== "tool" && typeof t.model === "string" ? [t.model] : [],
                                   ),
                                 ),
-                              ].join(", ") || "None loaded"}
+                              ].join(", ") || "None"}
                             </p>
                             <p>
                               Granted tools:{" "}

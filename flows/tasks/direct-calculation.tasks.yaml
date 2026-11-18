@@ -1,0 +1,31 @@
+schemaVersion: ledger.task-registry.v1
+id: direct-calculation
+version: 1
+tasks:
+  add-inputs:
+    execution: tool
+    completion: tool-result
+    tools: [local.calculate]
+    toolArguments:
+      local.calculate:
+        modelFields: []
+        fixed: {operation: add}
+        fromInput: {left: left, right: right}
+    outputContract:
+      outputs:
+        calculation: {fromArtifact: calculation, format: json, type: object}
+      requireArtifactComplete: [calculation]
+  compare-budget:
+    execution: tool
+    completion: tool-result
+    tools: [local.calculate]
+    toolArguments:
+      local.calculate:
+        modelFields: []
+        fixed: {operation: compare}
+        fromVars: {left: sum.outputs.calculation.result}
+        fromInput: {right: budget}
+    outputContract:
+      outputs:
+        calculation: {fromArtifact: calculation, format: json, type: object}
+      requireArtifactComplete: [calculation]

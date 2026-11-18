@@ -276,6 +276,122 @@ fn install_bundle_without_source_baseline_preserves_raw_identity() {
 }
 
 #[test]
+fn direct_only_bundle_installs_and_runs_without_prompts_weights_or_model_backend() {
+    use std::time::{Duration, Instant};
+    use trollm_uniffi::RunPhaseApi;
+
+    let base = temp_base("direct-only");
+    let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();
+    let setup = br#"{"format":"trollm.flow-setup.v1","title":"Add two amounts","models":{},"connections":{}}"#;
+    let flow = format!(
+        r#"
+schemaVersion: ledger.execution-plan.v1
+id: direct-only
+version: 1
+setup: {{path: setup.json, sha256: "{}"}}
+limits: {{maxSteps: 1, maxReasonerCalls: 0, maxTokensTotal: 0, timeoutS: 30, artifactMaxMb: 1}}
+onLimit: abort
+models: {{}}
+mcp:
+  policies:
+    local.calculate: {{class: read, resultArtifact: calculation}}
+entryStep: calculate
+nodes:
+  calculate: {{kind: task, taskRef: add, onVerified: done}}
+  done: {{kind: end, outcome: succeeded}}
+"#,
+        sha256_hex(setup)
+    );
+    let registry = br#"
+schemaVersion: ledger.task-registry.v1
+tasks:
+  add:
+    execution: tool
+    completion: tool-result
+    tools: [local.calculate]
+    toolArguments:
+      local.calculate:
+        modelFields: []
+        fixed: {operation: add, left: '39.99', right: '40.10'}
+    outputContract:
+      outputs: {calculation: {fromArtifact: calculation, format: json, type: object}}
+      requireArtifactComplete: [calculation]
+"#;
+    let files: Vec<(&str, &[u8])> = vec![
+        ("direct-only.flow.yaml", flow.as_bytes()),
+        ("direct-only.tasks.yaml", registry),
+        ("setup.json", setup),
+    ];
+    let manifest = manifest("direct-only.flow.yaml", "direct-only.tasks.yaml", &files);
+    let mut all = vec![("manifest.json", manifest.as_slice())];
+    all.extend(files);
+    let installed = rt.install_flow_bundle(build_tar(&all)).unwrap();
+    assert_eq!(installed.files_verified, 3);
+    let setup: serde_json::Value = serde_json::from_str(
+        &rt.flow_setup(installed.flow_sha256.clone())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(setup["models"], serde_json::json!({}));
+
+    for configured in [false, true] {
+        let run_id = if configured {
+            rt.start_run_configured(
+                installed.flow_sha256.clone(),
+                String::new(),
+                r#"{"version":1,"models":{},"connections":{}}"#.into(),
+            )
+        } else {
+            rt.start_run(installed.flow_sha256.clone(), String::new())
+        }
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = rt.poll_status(run_id.clone()).unwrap();
+            if !matches!(status.phase, RunPhaseApi::Running) && !status.worker_active {
+                assert!(matches!(status.phase, RunPhaseApi::Succeeded), "{status:?}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "direct-only run did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let events = rt.tail_events(run_id.clone(), 0).unwrap();
+        assert!(!events.iter().any(|event| event.event_type == "model_call"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "direct_tool_step")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "tool_call_result")
+                .count(),
+            1
+        );
+        let result: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                base.join("trollm/runs")
+                    .join(run_id)
+                    .join("artifacts/calculation.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["result"], "80.09");
+    }
+    assert_eq!(
+        std::fs::read_dir(base.join("trollm/models"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn reinstall_repairs_missing_and_corrupt_discovery_pins() {
     let base = temp_base("repair-pins");
     let rt = TrollmRuntime::new(base.to_string_lossy().to_string(), None).unwrap();

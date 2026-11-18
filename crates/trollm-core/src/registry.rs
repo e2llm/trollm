@@ -33,16 +33,29 @@ pub struct TaskRegistry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskDef {
+    /// How the request is produced. Omission preserves model execution.
+    #[serde(default, skip_serializing_if = "TaskExecution::is_model")]
+    pub execution: TaskExecution,
     /// Slot name only (§5); resolved against the plan's `models` slots.
-    pub model: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::plan::deserialize_present_option"
+    )]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_timeout_s: Option<u64>,
     /// Path to the prompt template, relative to the registry file.
-    pub prompt: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::plan::deserialize_present_option"
+    )]
+    pub prompt: Option<String>,
     /// Tool allowlist, entries `<server>.<tool>`; may be empty (§5).
     #[serde(default)]
     pub tools: Vec<String>,
@@ -61,12 +74,71 @@ pub struct TaskDef {
     pub tool_arguments: Option<BTreeMap<String, TaskToolArguments>>,
     /// Coder-loop bound; omit for single-shot (§5).
     #[serde(rename = "loop")]
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<LoopSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutations: Option<Mutations>,
     #[serde(default)]
     pub output_contract: OutputContract,
+}
+
+impl Serialize for TaskDef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TaskDef::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskDef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Preserve legacy nullable generation settings for model tasks while
+        // rejecting their *presence*, including null, on authored tool tasks.
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        let execution = value
+            .get("execution")
+            .cloned()
+            .map(TaskExecution::deserialize)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        if execution == TaskExecution::Tool {
+            if value
+                .get("mutations")
+                .is_some_and(serde_yaml::Value::is_null)
+            {
+                return Err(serde::de::Error::custom(
+                    "tool execution mutations must be an object when present",
+                ));
+            }
+            for name in [
+                "model",
+                "prompt",
+                "maxOutputTokens",
+                "generationTimeoutS",
+                "loop",
+            ] {
+                if value.get(name).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "tool execution forbids {name}"
+                    )));
+                }
+            }
+        }
+        TaskDef::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskExecution {
+    #[default]
+    Model,
+    Tool,
+}
+
+impl TaskExecution {
+    fn is_model(&self) -> bool {
+        *self == Self::Model
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,9 +178,61 @@ fn identifier(value: &str) -> bool {
 }
 
 impl TaskDef {
+    pub fn model_slot(&self) -> Option<&str> {
+        (self.execution == TaskExecution::Model)
+            .then_some(self.model.as_deref())
+            .flatten()
+    }
+
+    pub fn prompt_path(&self) -> Option<&str> {
+        (self.execution == TaskExecution::Model)
+            .then_some(self.prompt.as_deref())
+            .flatten()
+    }
+
     fn validate_completion(&self) -> anyhow::Result<()> {
+        match self.execution {
+            TaskExecution::Model => {
+                anyhow::ensure!(
+                    self.model.as_ref().is_some_and(|s| !s.is_empty()),
+                    "model execution requires a model slot"
+                );
+                anyhow::ensure!(
+                    self.prompt.as_ref().is_some_and(|s| !s.is_empty()),
+                    "model execution requires a prompt"
+                );
+            }
+            TaskExecution::Tool => {
+                anyhow::ensure!(
+                    self.model.is_none() && self.prompt.is_none(),
+                    "tool execution forbids model and prompt"
+                );
+                anyhow::ensure!(
+                    self.max_output_tokens.is_none()
+                        && self.generation_timeout_s.is_none()
+                        && self.loop_spec.is_none(),
+                    "tool execution forbids generation bounds and loop"
+                );
+                anyhow::ensure!(
+                    self.completion == TaskCompletion::ToolResult
+                        && self.tools.len() == 1
+                        && !self.tools[0].starts_with("flow."),
+                    "tool execution requires tool-result completion and exactly one ordinary tool"
+                );
+                anyhow::ensure!(
+                    self.tool_arguments
+                        .as_ref()
+                        .is_some_and(|rules| rules.len() == 1
+                            && rules.get(&self.tools[0]).is_some_and(|rule| rule
+                                .model_fields
+                                .as_ref()
+                                .is_some_and(Vec::is_empty))),
+                    "tool execution requires one matching toolArguments rule with modelFields: []"
+                );
+            }
+        }
         anyhow::ensure!(
-            self.model != CANONICAL_REASONER_SLOT || self.tools.is_empty(),
+            self.model_slot() != Some(CANONICAL_REASONER_SLOT) || self.tools.is_empty(),
             "canonical reasoner model slot must not grant tools"
         );
         anyhow::ensure!(
@@ -123,9 +247,12 @@ impl TaskDef {
         );
         if let Some(name) = &self.result_artifact {
             trollm_mcp::policy::validate_task_result_artifact_name(name)?;
-            anyhow::ensure!(self.completion == TaskCompletion::ToolResult && self.tools.len() == 1
-                && self.loop_spec.as_ref().map_or(1, |spec| spec.max_steps) == 1,
-                "task resultArtifact requires single-tool, single-generation tool-result completion");
+            anyhow::ensure!(
+                self.completion == TaskCompletion::ToolResult
+                    && self.tools.len() == 1
+                    && self.loop_spec.as_ref().map_or(1, |spec| spec.max_steps) == 1,
+                "task resultArtifact requires single-tool, single-call tool-result completion"
+            );
             let (server, _) = self.tools[0]
                 .split_once('.')
                 .ok_or_else(|| anyhow::anyhow!("task resultArtifact requires server.tool"))?;
@@ -167,13 +294,13 @@ impl TaskDef {
         }
         if self.completion == TaskCompletion::FlowRoute {
             anyhow::ensure!(
-                self.model == "coder" && self.tools.iter().any(|t| t == "flow.choose"),
+                self.model_slot() == Some("coder") && self.tools.iter().any(|t| t == "flow.choose"),
                 "flow-route completion requires coder and flow.choose"
             );
         }
         if self.completion == TaskCompletion::ToolOrRoute {
             anyhow::ensure!(
-                self.model == "coder"
+                self.model_slot() == Some("coder")
                     && self.tools.iter().any(|tool| tool == "flow.choose")
                     && self.tools.iter().any(|tool| !tool.starts_with("flow.")),
                 "tool-or-route requires coder, flow.choose and an ordinary tool"
@@ -418,7 +545,10 @@ impl TaskRegistry {
     /// Load and return the raw prompt template text for a task.
     pub fn prompt_template(&self, task: &TaskDef) -> anyhow::Result<String> {
         let base = self.base_dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        let path = base.join(&task.prompt);
+        let prompt = task
+            .prompt_path()
+            .ok_or_else(|| anyhow::anyhow!("task has no model prompt"))?;
+        let path = base.join(prompt);
         std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("reading prompt {}: {e}", path.display()))
     }

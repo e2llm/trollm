@@ -1,0 +1,326 @@
+name: Flow review image
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/flow-review-image.yml
+      - apps/flow-review/**
+      - crates/**
+      - schemas/**
+      - flows/starters/browser-summary/setup.json
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+  workflow_dispatch:
+
+# No pull-request trigger or package credentials in the build job. Only this
+# repository's trusted main may publish; forks can use the portable Containerfile.
+permissions:
+  contents: read
+concurrency:
+  group: flow-review-image-main
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/e2llm/trollm-flow-review
+  CRANE_IMAGE: gcr.io/go-containerregistry/crane/debug:v0.20.3@sha256:94f61956845714bea3b788445454ae4827f49a90dcd9dac28255c4cccb6220ad
+  TRIVY_IMAGE: docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+
+jobs:
+  build:
+    if: github.repository == 'e2llm/trollm' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check host resources and prepare container smoke tools
+        run: |
+          free -h
+          df -h .
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman python3-yaml
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.22.2
+      - name: Check browser application and bounded dependency exception
+        working-directory: apps/flow-review/web
+        run: |
+          npm ci --no-audit --no-fund --fetch-retries=2 --fetch-timeout=60000
+          npm run audit:prebuild
+          npm run lint
+          npm test
+          npm run build
+          npm run audit:final
+          npx --no-install playwright install --with-deps chromium
+          npm run test:browser
+      - name: Check Rust inspection server
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy
+          cargo fmt -p trollm-flow-review -- --check
+          cargo clippy --locked -p trollm-flow-review --all-targets -- -D warnings
+          cargo test --locked -p trollm-flow-review
+      - name: Build the image with its own fresh browser audit evidence
+        run: |
+          mkdir -p dist/flow-review
+          cp apps/flow-review/.containerignore .dockerignore
+          docker build --pull --no-cache --platform linux/amd64 \
+            --file apps/flow-review/Containerfile \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --tag "localhost/trollm-flow-review:$GITHUB_SHA" .
+          docker image inspect "localhost/trollm-flow-review:$GITHUB_SHA" > dist/flow-review/image-config.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          config = json.loads(Path('dist/flow-review/image-config.json').read_text())[0]
+          assert (config['Os'], config['Architecture']) == ('linux', 'amd64')
+          labels = config['Config']['Labels']
+          assert labels['org.opencontainers.image.source'] == 'https://github.com/e2llm/trollm'
+          assert labels['org.opencontainers.image.revision'] == os.environ['GITHUB_SHA']
+          PY
+          image_web=$(mktemp -d "$RUNNER_TEMP/flow-review-web.XXXXXX")
+          container_id=$(docker create "localhost/trollm-flow-review:$GITHUB_SHA")
+          trap 'docker rm -f "$container_id" >/dev/null; rm -rf "$image_web"' EXIT
+          docker cp "$container_id:/app/web/." "$image_web"
+          npm --prefix apps/flow-review/web run audit:image -- "$image_web"
+          cp apps/flow-review/web/scripts/audit-exceptions.json dist/flow-review/audit-exceptions.json
+          docker rm "$container_id" >/dev/null
+          rm -rf "$image_web"
+          trap - EXIT
+          docker save --output dist/flow-review/image.tar "localhost/trollm-flow-review:$GITHUB_SHA"
+          docker run --rm --volume "$PWD/dist/flow-review:/work:ro" "$CRANE_IMAGE" \
+            digest --tarball /work/image.tar > dist/flow-review/image.digest
+      - name: Check the browser against the actual image API
+        run: |
+          container_id=$(docker run --detach --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --cpus 2 --tmpfs /tmp \
+            --publish 127.0.0.1:18080:8080 \
+            --volume "$PWD/flows/starters:/packages:ro" \
+            "localhost/trollm-flow-review:$GITHUB_SHA")
+          trap 'docker rm -f "$container_id" >/dev/null' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec "$container_id" /app/trollm-flow-review --healthcheck; then break; fi
+            sleep 1
+          done
+          docker exec "$container_id" /app/trollm-flow-review --healthcheck
+          FLOW_REVIEW_REAL_API_URL=http://127.0.0.1:18080 \
+          FLOW_REVIEW_BROWSER_URL=http://127.0.0.1:18080 \
+          npm --prefix apps/flow-review/web run test:browser -- --grep 'real API'
+      - name: Check the actual container with Podman
+        run: |
+          sudo podman load --input dist/flow-review/image.tar
+          sudo python3 apps/flow-review/deploy/smoke.py --image "localhost/trollm-flow-review:$GITHUB_SHA"
+      - name: Scan the exact image archive
+        run: |
+          docker run --rm --volume "$PWD/dist/flow-review:/work" "$TRIVY_IMAGE" image \
+            --input /work/image.tar --scanners vuln,secret --severity HIGH,CRITICAL \
+            --exit-code 1 --no-progress --format json --output /work/image-scan.json
+          cd dist/flow-review
+          sha256sum image.tar image.digest image-config.json image-scan.json audit-exceptions.json > SHA256SUMS
+      - name: Retain the verified bytes for publication and retries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: flow-review-image-${{ github.sha }}
+          path: dist/flow-review/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.repository == 'e2llm/trollm' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: flow-review-image-${{ github.sha }}
+          path: dist/flow-review
+      - name: Verify transferred archive
+        run: |
+          cd dist/flow-review
+          sha256sum --check SHA256SUMS
+          expected=$(cat image.digest)
+          actual=$(docker run --rm --volume "$PWD:/work:ro" "$CRANE_IMAGE" digest --tarball /work/image.tar)
+          test "$actual" = "$expected"
+          # Publication retries inspect the original checked bytes. They do not
+          # rebuild, rerun development tooling, or replace the original receipt.
+          docker load --input image.tar
+          verification_dir=$(mktemp -d "$RUNNER_TEMP/flow-review-verify.XXXXXX")
+          verification_container=$(docker create "localhost/trollm-flow-review:$GITHUB_SHA")
+          trap 'docker rm -f "$verification_container" >/dev/null; rm -rf "$verification_dir"' EXIT
+          docker image inspect "localhost/trollm-flow-review:$GITHUB_SHA" > "$verification_dir/config.json"
+          docker cp "$verification_container:/app/web/audit-prebuild.json" "$verification_dir/audit-prebuild.json"
+          docker cp "$verification_container:/app/web/bundle-inventory.json" "$verification_dir/bundle-inventory.json"
+          python3 - "$verification_dir" <<'PY'
+          from datetime import datetime, timedelta, timezone
+          import hashlib, json, os, re, sys
+          from pathlib import Path
+
+          def verify_retained_image(config, policy_bytes, receipt, inventory, revision, now):
+              def require(condition, message):
+                  if not condition:
+                      raise ValueError(message)
+              require((config['Os'], config['Architecture']) == ('linux', 'amd64'), 'Unexpected image platform')
+              labels = config['Config']['Labels']
+              require(labels['org.opencontainers.image.source'] == 'https://github.com/e2llm/trollm', 'Unexpected image source')
+              require(re.fullmatch(r'[0-9a-f]{40}', revision) is not None and
+                      labels['org.opencontainers.image.revision'] == revision, 'Image revision differs from this run')
+              policy = json.loads(policy_bytes)
+              require(policy['schema'] == 'trollm.web-audit-exception.v1' and
+                      policy['advisory'] == 'GHSA-fc5q-39xc-vjpf' and
+                      policy['package'] == 'picomatch' and policy['version'] == '4.0.7', 'Unexpected retained exception')
+              require(policy['expiresAt'] == '2026-11-24T00:00:00Z' and
+                      now < datetime.fromisoformat(policy['expiresAt'].replace('Z', '+00:00')),
+                      'Retained exception expired; publication is not permitted')
+              policy_hash = hashlib.sha256(policy_bytes).hexdigest()
+              require(receipt['schema'] == 'trollm.web-audit-prebuild.v1' and
+                      inventory['schema'] == 'trollm.web-bundle-inventory.v1', 'Unexpected retained evidence')
+              require(receipt['policySha256'] == inventory['policySha256'] == policy_hash,
+                      'Image evidence does not match the retained policy')
+              require(receipt['lockSha256'] == inventory['lockSha256'] == policy['lockfileSha256'],
+                      'Image evidence does not match the retained lock identity')
+              require(re.fullmatch(r'[0-9a-f]{32}', receipt['nonce']) is not None and
+                      inventory['prebuildNonce'] == receipt['nonce'], 'Original image nonce does not match')
+              checked = datetime.fromisoformat(receipt['checkedAt'].replace('Z', '+00:00'))
+              generated = datetime.fromisoformat(inventory['generatedAt'].replace('Z', '+00:00'))
+              # The original build interval remains bounded; current receipt age
+              # does not turn an unchanged, already validated image into a build.
+              require(checked <= generated <= now and generated - checked <= timedelta(hours=1),
+                      'Original build evidence has an invalid time interval')
+
+          if __name__ == '__main__':
+              directory = Path(sys.argv[1])
+              verify_retained_image(
+                  json.loads((directory / 'config.json').read_text())[0],
+                  Path('audit-exceptions.json').read_bytes(),
+                  json.loads((directory / 'audit-prebuild.json').read_text()),
+                  json.loads((directory / 'bundle-inventory.json').read_text()),
+                  os.environ['GITHUB_SHA'], datetime.now(timezone.utc))
+              print('Original image, source and exception evidence verified; no receipt was refreshed.')
+          PY
+      - name: Publish immutable commit tag and advance latest from current main
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          auth_dir=$(mktemp -d "$RUNNER_TEMP/flow-review-auth.XXXXXX")
+          trap 'rm -rf "$auth_dir"' EXIT
+          archive_dir="$PWD/dist/flow-review"
+          crane() {
+            docker run --rm -i --env DOCKER_CONFIG=/auth \
+              --volume "$auth_dir:/auth" --volume "$archive_dir:/work:ro" \
+              "$CRANE_IMAGE" "$@"
+          }
+          crane_write() {
+            # Login/lookup may have crossed the deadline. Authorize each write
+            # immediately before invoking it; never refresh retained evidence.
+            local remaining write_container status
+            remaining=$(python3 - "$archive_dir/audit-exceptions.json" <<'EXPIRY_PY'
+          from datetime import datetime, timezone
+          import json, math, sys
+          from pathlib import Path
+
+          def publication_seconds(policy, now):
+              if policy['expiresAt'] != '2026-11-24T00:00:00Z':
+                  raise ValueError('Unexpected publication deadline')
+              deadline = datetime.fromisoformat(policy['expiresAt'].replace('Z', '+00:00'))
+              remaining = math.floor((deadline - now).total_seconds())
+              if remaining < 1:
+                  raise ValueError('Exception expired or no full second remains; refusing registry write')
+              return remaining
+
+          if __name__ == '__main__':
+              print(publication_seconds(json.loads(Path(sys.argv[1]).read_text()), datetime.now(timezone.utc)))
+          EXPIRY_PY
+            ) || return $?
+            write_container="flow-review-write-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            if timeout --signal=TERM --kill-after=1s "${remaining}s" \
+              docker run --rm -i --name "$write_container" --env DOCKER_CONFIG=/auth \
+                --volume "$auth_dir:/auth" --volume "$archive_dir:/work:ro" \
+                "$CRANE_IMAGE" "$@"; then
+              return 0
+            else
+              status=$?
+              # Stop the container too if Docker's client timed out. A registry
+              # request already accepted remotely cannot be rolled back here.
+              docker rm -f "$write_container" >/dev/null 2>&1 || true
+              return "$status"
+            fi
+          }
+          printf '%s' "$GHCR_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          expected=$(cat "$archive_dir/image.digest")
+          # Request pull+push scope so the first package publication can obtain a
+          # registry token too. Never interpret authorization failures as absence.
+          crane auth token --push --header "$IMAGE" > "$auth_dir/push.header"
+          lookup_status=$(curl --silent --show-error \
+            --header "@$auth_dir/push.header" \
+            --header 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+            --output "$auth_dir/lookup.json" --write-out '%{http_code}' \
+            "https://ghcr.io/v2/e2llm/trollm-flow-review/manifests/$GITHUB_SHA")
+          lookup_state=$(python3 - "$lookup_status" "$expected" "$auth_dir/lookup.json" <<'PY'
+          import hashlib, json, re, sys
+          from pathlib import Path
+          status, expected, path = sys.argv[1:]
+          if not re.fullmatch(r'sha256:[0-9a-f]{64}', expected):
+              raise SystemExit('Invalid archive digest')
+          body = Path(path).read_bytes()
+          if status == '200':
+              if 'sha256:' + hashlib.sha256(body).hexdigest() != expected:
+                  raise SystemExit('Refusing to replace existing commit tag with different bytes')
+              print('present')
+          elif status == '404':
+              codes = {error.get('code') for error in json.loads(body).get('errors', [])}
+              if not codes or not codes <= {'MANIFEST_UNKNOWN', 'NAME_UNKNOWN'}:
+                  raise SystemExit('Registry did not establish that the image is missing')
+              print('missing')
+          else:
+              raise SystemExit('Registry lookup failed; refusing to publish (HTTP ' + status + ')')
+          PY
+          )
+          if test "$lookup_state" = missing; then
+            crane_write push /work/image.tar "$IMAGE:$GITHUB_SHA"
+          fi
+          test "$(crane digest "$IMAGE:$GITHUB_SHA")" = "$expected"
+          # An older run may finish after main has advanced. Its immutable image
+          # remains useful, but it must not move the latest alias backwards.
+          main_sha=$(git ls-remote https://github.com/e2llm/trollm.git refs/heads/main | cut -f1)
+          if test "$main_sha" = "$GITHUB_SHA"; then
+            crane_write tag "$IMAGE@$expected" latest
+            test "$(crane digest "$IMAGE:latest")" = "$expected"
+          else
+            echo 'Main advanced; leaving latest unchanged.'
+          fi
+          printf 'digest=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+          printf 'Published `%s:%s`\n\nPin: `%s@%s`\n' "$IMAGE" "$GITHUB_SHA" "$IMAGE" "$expected" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify anonymous public pull
+        env:
+          PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          # No credential directory or token is passed to this container.
+          public_dir=$(mktemp -d "$RUNNER_TEMP/flow-review-public.XXXXXX")
+          trap 'rm -rf "$public_dir"' EXIT
+          if ! docker run --rm --volume "$public_dir:/out" "$CRANE_IMAGE" \
+            pull "$IMAGE@$PUBLISHED_DIGEST" /out/flow-review-public.tar; then
+            echo '::error::The image was published but an anonymous pull failed. For the first publication, an organization owner must make the package public, then re-run only the failed publish job to reuse the checked archive.'
+            echo 'Package settings: https://github.com/orgs/e2llm/packages/container/trollm-flow-review/settings' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          pulled_digest=$(docker run --rm --volume "$public_dir:/out:ro" "$CRANE_IMAGE" \
+            digest --tarball /out/flow-review-public.tar)
+          test "$pulled_digest" = "$PUBLISHED_DIGEST"
+          echo 'Anonymous public pull verified. Package: https://github.com/orgs/e2llm/packages/container/package/trollm-flow-review' >> "$GITHUB_STEP_SUMMARY"

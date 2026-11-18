@@ -77,8 +77,10 @@ fn context(call: u32) -> PreparationContext {
         run_id: "controlled-run".into(),
         node: "work".into(),
         task_ref: "work".into(),
-        model_slot: "coder".into(),
-        model_call_ordinal: 1,
+        origin: trollm_mcp::preparation::CallOrigin::Model {
+            slot: "coder".into(),
+            ordinal: 1,
+        },
         frames: vec![],
         cursors: vec![],
         argument_bindings: vec![],
@@ -132,6 +134,49 @@ fn gateway(
 struct ResultGuard {
     inner: Arc<Guard>,
     refuse_postcheck: bool,
+}
+
+#[test]
+fn direct_origin_refuses_selected_preparation_before_guard_and_keeps_model_path_available() {
+    let server = MockMcpServer::start();
+    let dirs = TempDir::new("direct-selected-refusal");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let guard = Arc::new(Guard {
+        calls: AtomicUsize::new(0),
+        delay: false,
+        cancel: cancel.clone(),
+    });
+    let mut native = gateway(
+        &server,
+        "close_issue",
+        &dirs,
+        guard.clone(),
+        cancel,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let call = ToolCall {
+        server: "tracker".into(),
+        tool: "close_issue".into(),
+        args: json!({"id":9}),
+    };
+    let model = context(1);
+    let mut direct = model.clone();
+    direct.origin = trollm_mcp::preparation::CallOrigin::Tool;
+    native.set_call_context(Some(direct.call_context.clone()));
+    native.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+    assert!(native.validate_direct_call(&call).is_err());
+    assert!(native
+        .prepare_call(&call, &direct)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("direct tool execution"));
+    assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(server.count("close_issue"), 0);
+    // An unsupported mode does not acquire/fence a guard or consume its context.
+    assert!(native.prepare_call(&call, &model).unwrap().is_some());
+    assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.count("close_issue"), 0);
 }
 impl CallPreparer for ResultGuard {
     fn prepare(

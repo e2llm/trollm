@@ -333,7 +333,9 @@ pub fn inspect_materialized_bundle(
     let registry_path = verified_path(&manifest.task_registry, &root)?;
     let registry = TaskRegistry::from_yaml_file(&registry_path)?;
     for task in registry.tasks.values() {
-        verified_path(&task.prompt, registry_path.parent().unwrap())?;
+        if let Some(prompt) = task.prompt_path() {
+            verified_path(prompt, registry_path.parent().unwrap())?;
+        }
     }
     let plan = ExecutionPlan::from_yaml_file(&flow_path)?;
     fn verify_flow_tree(

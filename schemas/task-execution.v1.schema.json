@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trollm.dev/schemas/task-execution.v1.schema.json",
+  "title": "Additive task execution constraints",
+  "description": "Applies to a registry task. Admission additionally checks matching grants and binding keys, tool schemas, task/node contracts, and dispatch policies.",
+  "type": "object",
+  "properties": {
+    "execution": { "enum": ["model", "tool"], "default": "model" },
+    "model": { "type": "string", "minLength": 1 },
+    "prompt": { "type": "string", "minLength": 1 }
+  },
+  "if": {
+    "required": ["execution"],
+    "properties": { "execution": { "const": "tool" } }
+  },
+  "then": {
+    "required": ["completion", "tools", "toolArguments"],
+    "additionalProperties": false,
+    "not": {
+      "anyOf": [
+        { "required": ["model"] },
+        { "required": ["prompt"] },
+        { "required": ["maxOutputTokens"] },
+        { "required": ["generationTimeoutS"] },
+        { "required": ["loop"] }
+      ]
+    },
+    "properties": {
+      "execution": { "const": "tool" },
+      "completion": { "const": "tool-result" },
+      "resultArtifact": {},
+      "mutations": { "type": "object" },
+      "tools": {
+        "type": "array", "minItems": 1, "maxItems": 1,
+        "items": { "$ref": "#/$defs/ordinaryTool" }
+      },
+      "toolArguments": {
+        "type": "object", "minProperties": 1, "maxProperties": 1,
+        "propertyNames": { "$ref": "#/$defs/ordinaryTool" },
+        "additionalProperties": { "$ref": "#/$defs/directArguments" }
+      },
+      "outputContract": {
+        "type": "object",
+        "properties": {
+          "allowNoop": { "const": false },
+          "outputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object", "required": ["fromArtifact"],
+              "not": { "required": ["from"] },
+              "properties": { "fromArtifact": { "type": "string", "minLength": 1 } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "else": { "required": ["model", "prompt"] },
+  "$defs": {
+    "ordinaryTool": {
+      "type": "string",
+      "pattern": "^(?!flow\\.)[A-Za-z_][A-Za-z0-9_-]*\\.[A-Za-z_][A-Za-z0-9_-]*$",
+      "not": { "pattern": "[^A-Za-z0-9_.-]" }
+    },
+    "argumentName": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$",
+      "not": { "pattern": "[^A-Za-z0-9_-]" }
+    },
+    "directArguments": {
+      "type": "object", "required": ["modelFields"], "additionalProperties": false,
+      "properties": {
+        "modelFields": { "type": "array", "maxItems": 0 },
+        "fixed": {
+          "type": "object", "propertyNames": { "$ref": "#/$defs/argumentName" }
+        },
+        "fromInput": {
+          "type": "object", "propertyNames": { "$ref": "#/$defs/argumentName" },
+          "additionalProperties": { "type": "string", "$ref": "#/$defs/argumentName" }
+        },
+        "fromVars": {
+          "type": "object", "propertyNames": { "$ref": "#/$defs/argumentName" },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z_][A-Za-z0-9_-]*|[0-9]+)(?:\\.(?:[A-Za-z_][A-Za-z0-9_-]*|[0-9]+))*$",
+            "not": { "pattern": "[^A-Za-z0-9_.-]" }
+          }
+        }
+      }
+    }
+  }
+}

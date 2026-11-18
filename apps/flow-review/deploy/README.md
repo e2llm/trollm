@@ -1,7 +1,25 @@
 # Run the flow review companion
 
+The planned public image is **`ghcr.io/e2llm/trollm-flow-review`** for
+**Linux/amd64**. Public pulling has not yet been verified. Once the first
+publication and anonymous-pull check succeed, find tags and digests on the
+[GitHub package page](https://github.com/orgs/e2llm/packages/container/package/trollm-flow-review)
+or the repository's **Packages** sidebar. The image's full commit tag names the
+public GitHub source commit; `latest` follows successfully checked current-main
+builds. Pin a digest for repeatable deployment.
+
+After public availability is confirmed, substitute the digest emitted by that
+successful publication (no registry login is needed for a public package):
+
+```sh
+FLOW_REVIEW_IMAGE='ghcr.io/e2llm/trollm-flow-review@sha256:PUBLISHED_DIGEST'
+podman pull "$FLOW_REVIEW_IMAGE"
+python3 apps/flow-review/deploy/launch.py --packages /srv/trollm/packages \
+  --image "$FLOW_REVIEW_IMAGE" --port 8080
+```
+
 Use rootless Podman with cgroups v2, Python 3 and PyYAML (the repository's
-`scripts/requirements.txt` includes it). Build from the repository root:
+`scripts/requirements.txt` includes it). For a local build, run from the repository root:
 
 ```sh
 podman build --format docker --ignorefile apps/flow-review/.containerignore \

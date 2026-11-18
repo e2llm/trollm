@@ -8,7 +8,7 @@ from pathlib import Path
 import tarfile
 
 import yaml
-from bundle_paths import read_bundle_files
+from bundle_paths import archive_path, read_bundle_files, registry_prompt_paths
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE = REPO / "flows/starters/text-summary"
@@ -31,7 +31,16 @@ def build_bundle(source=SOURCE, *, starter="text-summary"):
     names = STARTERS[starter][2]
     if source == SOURCE and starter != "text-summary":
         source = STARTERS[starter][0]
-    files = read_bundle_files(source, names)
+    # Keep source bytes unchanged, but select prompt payloads from actual model
+    # tasks. Explicit direct tasks need no placeholder prompt file.
+    files = read_bundle_files(source, [name for name in names
+                                      if not archive_path(name).startswith("prompts/")])
+    registry_path = f"{starter}.tasks.yaml"
+    registry = yaml.safe_load(files[registry_path])
+    prompts = registry_prompt_paths(registry, registry_path)
+    if set(prompts) & set(files):
+        raise ValueError("Prompt path collides with a bundle source file")
+    files.update(read_bundle_files(source, prompts))
     flow = yaml.safe_load(files[f"{starter}.flow.yaml"])
     pin = flow["setup"]
     if pin["path"] != "setup.json" or pin["sha256"] != hashlib.sha256(files["setup.json"]).hexdigest():

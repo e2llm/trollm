@@ -879,9 +879,13 @@ impl InstalledCollectionPreparer {
             raw.json.len() <= 16384,
             "selected caller context exceeds wire bound"
         );
+        let (model_slot, model_call_ordinal) = context
+            .origin
+            .model_identity()
+            .context("selected preparation requires model execution")?;
         let association = serde_json::to_vec(&json!({"runId":context.run_id,"node":context.node,
             "taskRef":context.task_ref,"frames":context.frames,"cursors":context.cursors,
-            "modelSlot":context.model_slot,"modelCallOrdinal":context.model_call_ordinal,
+            "modelSlot":model_slot,"modelCallOrdinal":model_call_ordinal,
             "originalItemId":item.original_item_id,"admittedOrder":item.admitted_order}))?;
         ensure!(
             association.len() <= 16384,
@@ -1247,6 +1251,10 @@ impl CallPreparer for InstalledCollectionPreparer {
         context: &PreparationContext,
         deadline: Option<Instant>,
     ) -> Result<PreparedCall> {
+        ensure!(
+            context.origin.model_identity().is_some(),
+            "selected preparation requires model execution"
+        );
         self.current(context)?;
         let request = self.item_request(call, context)?;
         let reference = serde_json::to_value(&self.selection.selection_ref)?;
@@ -2195,8 +2203,10 @@ pub(crate) mod controls {
             run_id: "fixture-run".into(),
             node: "choose".into(),
             task_ref: "choose-task".into(),
-            model_slot: "coder".into(),
-            model_call_ordinal: 1,
+            origin: trollm_mcp::preparation::CallOrigin::Model {
+                slot: "coder".into(),
+                ordinal: 1,
+            },
             frames: vec![trollm_mcp::preparation::FramePosition {
                 plan: "fixture@sha256:abc".into(),
                 node: "choose".into(),

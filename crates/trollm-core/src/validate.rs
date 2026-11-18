@@ -542,10 +542,21 @@ fn check_plan_against_registry(
         if !exits_valid {
             problems.push(format!("plan '{}' node '{name}': flow-route requires routes without onVerified; tool-or-route requires both; other completions require onVerified without routes", plan.id));
         }
-        if !plan.models.contains_key(&task.model) {
+        if let Some(model) = task
+            .model_slot()
+            .filter(|model| !plan.models.contains_key(*model))
+        {
             problems.push(format!(
                 "plan '{}' node '{name}': task '{task_ref}' uses model slot '{}' not declared in plan.models",
-                plan.id, task.model
+                plan.id, model
+            ));
+        }
+        if task.execution == crate::registry::TaskExecution::Tool
+            && (node.routes.is_some() || node.prompt_supplement.is_some())
+        {
+            problems.push(format!(
+                "plan '{}' node '{name}': tool execution forbids routes and promptSupplement",
+                plan.id
             ));
         }
         for tool in &task.tools {
@@ -555,8 +566,10 @@ fn check_plan_against_registry(
                 ));
             }
         }
-        if let Err(e) = registry.prompt_template(task) {
-            problems.push(format!("task '{task_ref}': {e}"));
+        if task.execution == crate::registry::TaskExecution::Model {
+            if let Err(e) = registry.prompt_template(task) {
+                problems.push(format!("task '{task_ref}': {e}"));
+            }
         }
     }
 }

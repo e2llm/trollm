@@ -6,6 +6,13 @@ per-task generation limits. It supersedes the static-routing restriction below
 for opted-in tasks; legacy task/foreach/end behavior remains supported. This
 extension is implemented in source and does not add a model-free tool node.
 
+The later [direct tool execution contract](DIRECT-TOOL-EXECUTION.md) adds an
+explicit `execution: tool` registry mode within the existing `task` node kind.
+It invokes one fully bound ordinary tool through the same checked dispatch path,
+without a model or prompt. Default model tasks retain their existing behavior.
+Selected-guard calls are excluded from direct execution. This source capability
+is newer than the published 1.0.1 APK.
+
 Normative document. Implementation agents: **implement exactly this**. If a consequential
 decision is missing or contradictory here, STOP and report the question — do not assume.
 Non-consequential choices (formatting, internal helpers, which micro-library for YAML) are
@@ -612,13 +619,19 @@ Rules:
 ```
 
 Event types (closed set): `run_started`, `plan_loaded`, `node_entered`, `node_exited`,
-`model_call` (slot, tokens, ms, finishReason), `tool_call_intent`, `tool_call_result` (or `cache_hit`,
+`model_call` (slot, tokens, ms, finishReason), `direct_tool_step` (task, tool, charged attempt),
+`tool_call_intent`, `tool_call_result` (or `cache_hit`,
 `served_from_file`), `artifact_written` (path, bytes, sha256), `fetch_progress`,
 `transition` (from, to, key), `budget_exhausted`, `paused`, `resumed`, `error` (class,
 detail), `run_ended` (outcome). `seq` is monotonic per run. Tech debt: hash-chaining
 (see SECURITY doc).
 The core `cache_hit`, `served_from_file` and `fetch_progress` variants are reserved;
 the current gateway emits its own sidecar records instead.
+`direct_tool_step` is emitted before a direct attempt resolves bindings. It
+consumes one frame/run `maxSteps` unit even if validation later fails. It is
+not a model call or proof that a tool was dispatched; direct attempts consume
+no model tokens or reasoner calls. Existing model responses keep their existing
+step accounting. The attempt context joins direct steps to actual tool outcomes.
 
 Open/recovery and reads reject malformed nonblank records, invalid envelopes,
 mixed run identities and duplicate/decreasing sequence numbers. Positive

@@ -77,6 +77,76 @@ fn real_adaptive_routes() {
     assert!(result.valid, "{:?}", result.diagnostics);
     assert!(result.plans[0]["nodes"].as_object().unwrap().len() > 3);
 }
+
+#[test]
+fn direct_only_source_needs_no_prompt_or_model_and_mixed_source_keeps_prompt_checks() {
+    let flow = r#"
+schemaVersion: ledger.execution-plan.v1
+id: direct
+version: 1
+limits: {maxSteps: 1, maxReasonerCalls: 0, maxTokensTotal: 0, timeoutS: 30, artifactMaxMb: 1}
+onLimit: abort
+models: {}
+entryStep: calculate
+nodes:
+  calculate: {kind: task, taskRef: add, onVerified: done}
+  done: {kind: end, outcome: succeeded}
+"#;
+    let registry = r#"
+schemaVersion: ledger.task-registry.v1
+tasks:
+  add:
+    execution: tool
+    completion: tool-result
+    tools: [local.calculate]
+    toolArguments:
+      local.calculate:
+        modelFields: []
+        fixed: {operation: add, left: '1', right: '2'}
+"#;
+    let mut files = vec![
+        SourceFile {
+            path: "direct.flow.yaml".into(),
+            content: flow.into(),
+        },
+        SourceFile {
+            path: "direct.tasks.yaml".into(),
+            content: registry.into(),
+        },
+    ];
+    let direct = review(files.clone());
+    assert!(direct.valid, "{:?}", direct.diagnostics);
+    let task = &direct.registry.as_ref().unwrap()["tasks"]["add"];
+    assert_eq!(task["execution"], "tool");
+    assert!(task.get("model").is_none());
+    assert!(task.get("prompt").is_none());
+
+    files[0].content = flow
+        .replace("models: {}", "models: {coder: {ctx: 2048}}")
+        .replace(
+            "taskRef: add, onVerified: done",
+            "taskRef: add, onVerified: report",
+        )
+        .replace(
+            "  done:",
+            "  report: {kind: task, taskRef: report, onVerified: done}\n  done:",
+        );
+    files[1].content = format!("{registry}\n  report:\n    model: coder\n    prompt: report.md\n");
+    assert!(
+        !review(files.clone()).valid,
+        "mixed model task still needs its prompt"
+    );
+    files.push(SourceFile {
+        path: "report.md".into(),
+        content: "Report the result.".into(),
+    });
+    let mixed = review(files);
+    assert!(mixed.valid, "{:?}", mixed.diagnostics);
+    assert_eq!(
+        mixed.registry.as_ref().unwrap()["tasks"]["report"]["model"],
+        "coder"
+    );
+}
 #[test]
 fn current_argument_contracts_and_artifact_views_survive_inspection() {
     let mut files = sources(&[

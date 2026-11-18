@@ -6,11 +6,29 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bundle_paths import archive_path, read_bundle_files
+from bundle_paths import archive_path, read_bundle_files, registry_prompt_paths
 import make_starter_bundles as starter
 
 
 class BundlePaths(unittest.TestCase):
+    def test_only_model_tasks_supply_prompt_payloads(self):
+        registry = {"tasks": {
+            "direct": {"execution": "tool"},
+            "legacy": {"model": "coder", "prompt": "prompts/task.md"},
+            "model": {"execution": "model", "model": "reasoner", "prompt": "prompts/task.md"},
+        }}
+        self.assertEqual(registry_prompt_paths(registry, "tasks/registry.tasks.yaml"),
+                         ["tasks/prompts/task.md"])
+        for field, value in (("model", "coder"), ("prompt", "missing.md"),
+                             ("maxOutputTokens", None), ("generationTimeoutS", 1), ("loop", {})):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "direct tool"):
+                registry_prompt_paths({"tasks": {"direct": {"execution": "tool", field: value}}},
+                                      "registry.tasks.yaml")
+        for task in ({"model": "coder"}, {"prompt": "task.md"},
+                     {"execution": "unknown"}, {"model": "coder", "prompt": "../task.md"}):
+            with self.subTest(task=task), self.assertRaises(ValueError):
+                registry_prompt_paths({"tasks": {"bad": task}}, "registry.tasks.yaml")
+
     def test_windows_and_posix_sources_build_identical_starters(self):
         for name, (source, asset, names) in starter.STARTERS.items():
             for path_type in (PureWindowsPath, PurePosixPath):
