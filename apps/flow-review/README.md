@@ -21,6 +21,10 @@ models, Android SDK, MCP accounts or LLM API key.
 
 ## Run with Podman
 
+Use **Podman 5.0 or newer**. Earlier releases do not honor the pod's
+memory-backed transient volume; the launcher and smoke reject them before
+starting a pod. `--print` remains available without a Podman installation.
+
 The [GitHub Actions workflow](../../.github/workflows/flow-review-image.yml) is
 configured to publish Linux/amd64 images at
 `ghcr.io/e2llm/trollm-flow-review`. **Public image availability is not yet

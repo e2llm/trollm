@@ -32,7 +32,8 @@ env:
 jobs:
   build:
     if: github.repository == 'e2llm/trollm' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 carries Podman 4.9, which ignores emptyDir.medium: Memory.
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -49,6 +50,12 @@ jobs:
           df -h .
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends podman python3-yaml
+          sudo python3 - <<'PY'
+          import sys
+          sys.path.insert(0, 'apps/flow-review/deploy')
+          from launch import require_supported_podman
+          require_supported_podman()
+          PY
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22.22.2
