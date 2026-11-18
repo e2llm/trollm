@@ -18,7 +18,7 @@ python3 apps/flow-review/deploy/launch.py --packages /srv/trollm/packages \
   --image "$FLOW_REVIEW_IMAGE" --port 8080
 ```
 
-Use rootless Podman with cgroups v2, Python 3 and PyYAML (the repository's
+Use rootless **Podman 5.0 or newer** with cgroups v2, Python 3 and PyYAML (the repository's
 `scripts/requirements.txt` includes it). For a local build, run from the repository root:
 
 ```sh
@@ -37,6 +37,16 @@ The server drains active HTTP requests after SIGTERM or Ctrl-C. The runtime imag
 uses official distroless Debian 13 with GNU libraries, the Rust server and built
 browser assets; it contains no shell or external health-check utility. Both the
 image healthcheck and pod liveness probe execute the server with `--healthcheck`.
+
+Podman 4.9 ignores `emptyDir.medium: Memory` and creates a disk-backed anonymous
+volume. [Podman 5.0 added the memory-medium branch](https://github.com/podman-container-tools/podman/blob/v5.0.0/pkg/specgen/generate/kube/volume.go#L266).
+The launcher and smoke query JSON version metadata before execution with a
+20-second deadline; both Client and Server must meet the released 5.0 minimum
+when both are reported. Unsupported, unavailable or unparseable versions fail
+clearly. Prerelease/development builds of 5.0.0 are below that floor.
+`--print` does not query Podman and stays
+usable offline. Version admission does not replace the actual kernel mount and
+resource-limit checks in the smoke.
 
 One container serves the browser and API. It runs as UID/GID 10001, drops all
 capabilities, disallows privilege escalation and has a read-only root filesystem.

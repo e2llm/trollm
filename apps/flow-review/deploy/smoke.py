@@ -15,7 +15,7 @@ import time
 from urllib.request import Request, urlopen
 import uuid
 
-from launch import podman_argv, render
+from launch import podman_argv, render, require_supported_podman
 
 
 def command(*args):
@@ -70,11 +70,12 @@ def check_visible_mount(mounts, point, mount_id):
     assert len(visible) == 1, (f'visible mount at {point} unresolved: kernel ID {mount_id}, '
                                f'{len(entries)} entries, IDs {[mount["id"] for mount in entries]}')
     mount = visible[0]
+    details = f'kernel ID {mount_id}, type {mount["type"]}, options {",".join(sorted(mount["options"]))}'
     if point == '/tmp':
         assert mount['type'] == 'tmpfs' and 'rw' in mount['options'], \
-            'visible /tmp mount must be writable tmpfs'
+            f'visible /tmp mount must be writable tmpfs; {details}'
     else:
-        assert 'ro' in mount['options'], f'{point} is not actually read-only'
+        assert 'ro' in mount['options'], f'{point} is not actually read-only; {details}'
     return mount
 
 
@@ -118,6 +119,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
     args = parser.parse_args()
+    require_supported_podman()
     name = 'flow-review-smoke-' + uuid.uuid4().hex[:10]
     with tempfile.TemporaryDirectory(prefix='flow-review-smoke-') as directory:
         root = Path(directory)

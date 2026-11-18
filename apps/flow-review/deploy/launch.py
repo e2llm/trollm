@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 import subprocess
@@ -15,6 +16,44 @@ import yaml
 
 def podman_argv():
     return shlex.split(os.environ.get('PODMAN', 'podman'))
+
+
+def validate_podman_versions(report):
+    """Both the CLI and a reported remote runtime must honor memory emptyDir."""
+    if not isinstance(report, dict) or 'Client' not in report:
+        raise ValueError('Cannot verify Podman Client version')
+    versions = {}
+    for role in ('Client', 'Server') if 'Server' in report else ('Client',):
+        details = report[role]
+        version = details.get('Version') if isinstance(details, dict) else None
+        match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)([-+~][A-Za-z0-9.+~-]+)?', version or '') \
+            if isinstance(version, str) else None
+        if match is None:
+            raise ValueError(f'Cannot parse Podman {role} version')
+        base = tuple(map(int, match.group(1, 2, 3)))
+        prerelease_floor = base == (5, 0, 0) and (match.group(4) or '').startswith(('-', '~'))
+        if base < (5, 0, 0) or prerelease_floor:
+            raise ValueError(f'Podman {role} {version} is unsupported: require 5.0.0 or newer '
+                             'for memory-backed emptyDir volumes')
+        versions[role] = version
+    return versions
+
+
+def require_supported_podman():
+    try:
+        output = subprocess.check_output(podman_argv() + ['version', '--format', 'json'],
+                                         text=True, stderr=subprocess.PIPE, timeout=20)
+    except subprocess.TimeoutExpired:
+        raise SystemExit('Podman version query timed out after 20 seconds; no pod was started') from None
+    except (OSError, subprocess.CalledProcessError):
+        raise SystemExit('Cannot query Podman runtime versions; require Podman 5.0.0 or newer') from None
+    try:
+        versions = validate_podman_versions(json.loads(output))
+    except (ValueError, TypeError) as error:
+        raise SystemExit(str(error) if not isinstance(error, json.JSONDecodeError)
+                         else 'Cannot parse Podman version report') from None
+    print('Podman versions verified: ' + ', '.join(f'{role}={version}' for role, version in versions.items()))
+    return versions
 
 
 def render(packages, image, port, bind):
@@ -45,6 +84,7 @@ def main():
     if args.print_only:
         print(json.dumps(spec, indent=2))
         return
+    require_supported_podman()
     # JSON is valid Kubernetes YAML. Arguments and paths never enter a shell.
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as output:
         json.dump(spec, output)
