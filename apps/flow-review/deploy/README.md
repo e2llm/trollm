@@ -82,12 +82,22 @@ Podman to verify cleanup; no shell/helper binary is injected into the image.
 The operator must be allowed to read these host process/cgroup files. Remote
 Podman clients and hosts without those permissions are unsupported for this
 acceptance check; it fails explicitly rather than accepting configuration-only
-assertions. The unchanged smoke passed with both rootful and rootless Podman
+assertions. The earlier smoke version passed with both rootful and rootless Podman
 5.8.2 on Linux with systemd and cgroup v2. The rootless run used existing
 subordinate UID/GID ranges, user-namespace helpers and delegated CPU/memory
 controllers; it needed no additional process-inspection privileges on that host.
 Other hosts must provide those prerequisites and allow the inspection described
 above. The smoke removes its own pod after success/failure.
+
+Mount checks resolve each container root path through `/proc/<pid>/root` with an
+`O_PATH` directory descriptor, then match its kernel `mnt_id` from
+`/proc/self/fdinfo` to `/proc/<pid>/mountinfo`. This identifies the visible mount
+when a runtime stacks mounts at the same path; a hidden writable tmpfs cannot
+make a visible disk-backed `/tmp` pass. The visible root and package mounts must
+still be read-only, and `/tmp` must still be writable tmpfs. Rootless operators
+must also be able to traverse those process root paths. Insufficient access
+fails the smoke; the earlier Podman 5.8.2 results predate this mount-ID check and
+do not establish its rootless acceptance on another host.
 
 The launcher and smoke accept `PODMAN` as a command plus flags (parsed without a
 shell), for example `PODMAN="podman --root /tmp/review-storage --runroot
