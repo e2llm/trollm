@@ -1,43 +1,50 @@
 # trollm: pronounced “tro-le-lem”
 
-trollm lets you experiment with small local language models on your Android
-phone. Summarize a passage, or give it two item prices and a budget to check
-with the phone's calculator. Choose a supplied flow, enter your input and follow
-its progress.
+trollm is an experimental Android app that runs workflows with small language
+models on your phone. A workflow, or **flow**, defines the steps for a task.
+Choose a flow, supply its input, and follow the run through to its report.
+Install the APK directly to try a flow without compiling Rust or llama.cpp.
+You can adapt and reuse the open-source app and runtime.
 
-[Download the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk)
-for **Android 13/API 33+** and follow the
-[installation guide](docs/INSTALL-ANDROID.md). No Rust or llama.cpp build is
-needed to try the app. Models are downloaded separately; **Summarize text** and
-**Check a total** need no browser or MCP account once their models are available.
-The app is **experimental**.
+## Run a flow on Android
 
-A **flow** is an authored procedure: its author supplies the steps, prompts and
-allowed tools. Models interpret input, choose permitted tools and write responses.
-Ordinary code runs the steps, performs exact operations, saves evidence and enforces
-limits. A flow can use one or both model roles: a tool-capable **coder** and a
-tool-free **reasoner**. The calculator's arithmetic is exact; selecting the intended
-prices remains model work.
+1. **Install the app.** On Android 13 or later, open the APK from GitHub Releases
+   and follow Android's prompts. [Download the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk) ·
+   [Installation and verification](docs/INSTALL-ANDROID.md)
+2. **Choose or add a flow.** Start with **Summarize text** or **Check a total**
+   in the library. Both run locally after their models are downloaded. To add
+   a flow, save its `.tar` file on your phone, then tap **Manage flows → Import
+   flow file** and select it. [Download the Amazon v342 bundle (.tar)](https://raw.githubusercontent.com/e2llm/trollm/main/examples/run-342/amazon-cart-v342.tar)
+3. **Connect a browser if the flow uses E2LLM.** Open the flow's connection setup
+   in trollm and choose **Sign in with browser**. In the browser you want the flow
+   to use, install the E2LLM extension and connect it with the **same E2LLM account**.
+   That browser can be on another computer. [E2LLM browser extension setup](https://e2llm.com/start/)
+4. **Run it.** Enter the flow's input and download the required models shown on
+   its setup screen. Once they're ready, tap **Start run**, follow progress, and
+   read the report when the run finishes.
 
-For other tasks, [adapt or author flows](docs/FLOW-AUTHORING.md) using local tools
-or remote services through MCP (Model Context Protocol). Browser flows require
-a separate connected browser and service; the browser can run on another computer.
-The Android app and Rust runtime are open source: adapt the flows, change the app,
-or reuse the runtime as a foundation for your own applications.
+For the Amazon example, use the connected browser's name or ID, keep only the
+intended Amazon tab open in that browser, and follow the example's input format.
+The flow updates the cart and stops before checkout. The recorded runs used an
+earlier APK and specific model files. [Amazon v342 instructions and run evidence](examples/run-342/README.md)
 
-## One flow in practice
+## Inspect a flow on a desktop
 
-The supplied **Check a total** starter selects two amounts from text, calls the
-phone's calculator, directly compares the saved sum with the supplied budget, then passes
-the original input and both results through the reasoner and into a final report.
-It needs configured model files but no MCP connection. The calculator performs exact
-arithmetic; the model still has to select the intended amounts. The version 2
-comparison step uses the bound values without another model call.
+Download the public Linux/amd64 viewer image with Docker.
 
-[Learn trollm through this flow](docs/LEARN-TROLLM.md) to see the complete
-input → model/tool work → artifact binding → result journey. It explains why a
-successful runtime check is different from a correct semantic judgment and how
-Trollm relates to optional browser and authoring services.
+```sh
+docker pull --platform linux/amd64 \
+  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+```
+
+Then [start the viewer with Docker](apps/flow-review/deploy/README.md#start-the-viewer-with-docker).
+The container has everything needed to inspect an uploaded flow.
+[GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
+
+Open `http://127.0.0.1:8080` on the host running the viewer. Choose **Open files /
+tar** to load the same flow bundle, or **Open folder** to load flow source.
+The viewer displays the flow's steps, prompts, and tool permissions. Flow
+execution and local model inference happen in the Android app.
 
 ## Learn, author and contribute
 

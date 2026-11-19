@@ -42,6 +42,12 @@ Maintainers must first integrate it into the source tree or its export policy.
 Contributors should branch from GitHub `main`; they do not need to reproduce the
 private delivery setup or work with the other repository's history.
 
+On 2026-11-19, the automated mirror's author and committer metadata was corrected
+on public `main` after its former email address was associated with an unrelated
+GitHub account. Source contents, provenance trailers and published release tags
+and assets were preserved. If your clone predates this correction, preserve local
+work, fetch the updated `main` and base subsequent changes on its new history.
+
 ## Start with the current scope
 
 Use the [reading tracks](docs/README.md) to choose preparation for your task.

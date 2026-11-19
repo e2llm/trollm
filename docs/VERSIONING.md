@@ -49,9 +49,46 @@ invalid version values, independently versioned workspace crates and stale
 lockfile versions. APK release validation uses the same identity and checks the
 actual manifest before recording the build's version.
 
-Curated source-only updates are identified by their source commit. They do not
-require a release-version bump and do not imply a new APK or renewed device
-acceptance. Preserve the source/build identity associated with each actual APK.
+## Android release uploads
+
+For future signed Android releases, upload three files to GitHub Releases.
+
+- `app-release.apk` is the signed native Android build. It contains the full
+  third-party notice text and manifest. See [how to extract them](INSTALL-ANDROID.md#read-the-apk-notices).
+- `build-info.json` identifies the exact APK, source commit, backend, package,
+  version, Android update code, supported ABIs and signer.
+- `SHA256SUMS` covers the APK and build metadata. Generate it in the directory
+  containing the two verified files.
+
+```sh
+sha256sum app-release.apk build-info.json > SHA256SUMS
+```
+
+GitHub also provides a ZIP and a tarball of the tagged source automatically,
+so a new release can show five download entries. [GitHub release documentation](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
+
+In the release notes, record the APK build source commit and matching curated
+source tag. Summarize the checks performed on that build, including scripted
+and JVM checks, packaging and security scans where applicable. State the limits
+of device, real-model and live MCP validation. Identify any applicable
+approved [security exception](SECURITY-EXCEPTIONS.md) with its scope and expiry.
+Keep these facts in the release notes so they remain available after CI
+artifacts expire.
+
+Link to the [checksum-covered v342 example](../examples/run-342/README.md) when
+referencing that historical bundle and its evidence. Existing releases retain
+their published assets. The 1.1.0 release has eight uploaded files, including
+separate notices and the historical bundle, alongside the two source archives.
+Build validation still compares the embedded notices with generated copies,
+as described in the [third-party notice guide](../THIRD_PARTY_NOTICES.md).
+
+## Source-only updates
+
+A curated source-only update is identified by its source commit. Publish
+documentation-only changes through the source export without bumping the
+product version, allocating an Android update code or rebuilding the APK.
+Device validation stays attached to the exact APK that was checked.
+
 Flow review container builds use full source-commit tags and content digests;
 publishing one does not by itself require a Rust/Android product version bump.
 Its Rust server inherits the workspace version. The private browser package's

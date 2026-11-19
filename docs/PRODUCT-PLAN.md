@@ -1,137 +1,67 @@
-# Product direction and current scope
+# Product direction and current work
 
-Status reviewed on **2026-11-18**. trollm 1.1.0 is an experimental Android app
-with a [downloadable native APK](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
-and an [installation guide](INSTALL-ANDROID.md). Contributors can also inspect
-and test the runtime and self-host the flow review companion. The
-[two recorded v342 phone runs](../examples/run-342/README.md) are examples worth
-investigating further, not a reliability measurement.
+Reviewed on **2026-11-19**. trollm lets people run authored workflows with small
+local models on Android. A flow defines the steps and tools. The user chooses a
+flow, supplies its input, and follows the run to its report. Browser flows can
+use E2LLM with a browser on another computer. [Learn trollm](LEARN-TROLLM.md)
 
-## Intended experience
+## Available now
 
-A user installs trollm, prepares models and any connections, chooses a supplied
-flow, provides input and follows progress and results. A browser may run on a PC
-while inference runs on the phone. Android 13/API 33+, S21-class hardware or newer
-and signed sideloaded APKs are the initial target; Google Play is outside this
-scope. Remote tools require their services and network access.
+- **Android 1.1.0** (update code 72) is an experimental signed APK for Android
+  13 or later. It brings inputs, model downloads and connection setup into the
+  flow screen. Saved runs can be reopened, and completed runs lead with a
+  selectable report and a copy button. [Download and verify the APK](INSTALL-ANDROID.md)
+- **Bundled flows** include **Summarize text**, **Check a total** and **Browse and
+  summarize**. The first two run locally once their models are installed. In
+  **Check a total**, a model selects the amounts, the calculator adds them, and
+  an authored direct tool task compares the saved sum with the budget.
+  [Direct tool execution](DIRECT-TOOL-EXECUTION.md)
+- **The runtime** follows authored steps, checks tool calls and outputs, and
+  saves original evidence for later steps. A coder chooses explicitly granted
+  tools where the flow calls for model judgment. A reasoner gives advice in
+  ordinary text. The runtime uses authored transitions and verified choices.
+  [Anatomy of a flow](ANATOMY-OF-A-FLOW.md) · [Flow reliability](FLOW-RELIABILITY.md)
+- **The desktop flow review companion** is available as a public Linux/amd64
+  container. It opens source files or bundles so people can inspect steps,
+  prompts and tool permissions, leave feedback and compare revisions.
+  Execution and inference happen in the Android app.
+  [Deployment guide](../apps/flow-review/deploy/README.md) · [GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
 
-The coder chooses explicitly granted tools or writes prose. An explicitly
-authored direct task invokes one fully bound ordinary tool call. The tool-free
-reasoner gives advice. The runtime executes the authored graph, validates tool
-calls and saved outputs, and enforces budgets and recovery. It does not infer a
-branch from words in a model answer. [Anatomy of a flow](ANATOMY-OF-A-FLOW.md)
-walks through a small current-format example.
+## Open GitHub issues
 
-## What is implemented
+All seven issues below were open when reviewed. Follow [GitHub Issues](https://github.com/e2llm/trollm/issues)
+for current status, labels and acceptance criteria. [Contributing](../CONTRIBUTING.md)
+covers the issue and pull request process.
 
-| Area | Current source |
+| Issue | What remains |
 | --- | --- |
-| Flow control | Fixed transitions, coder-selected authored exits, per-step prompt supplements and generation limits; [adaptive flows](ADAPTIVE-FLOWS.md). |
-| Repeated work | Prepared worklists, invocation-owned iteration, reusable child returns and declared child-outcome exits; [reliability contracts](FLOW-RELIABILITY.md) and [collection contracts](amazon-generalization/README.md). |
-| Local operations | Nine isolated tools for arithmetic, assertions, worklists, totals, decimal extraction and original-record filtering/selection/ordering; [tool contracts](BUILTIN-TOOLS.md). A coder can choose a call, or an authored [direct task](DIRECT-TOOL-EXECUTION.md) can supply its complete arguments. Structural membership and exact arithmetic do not prove semantic suitability. |
-| Evidence and boundaries | Typed bindings, bounded field views, model-owned argument fields, task-specific native result destinations, mutation journals, and timing/size observations; [result artifacts](TASK-RESULT-ARTIFACTS.md) and [measurement boundaries](amazon-generalization/PERFORMANCE.md). |
-| Authoring and diagnosis | Current-format examples, model-specific prompt guidance and a read-only frozen-observation replay bundle helper; [Flow prompting](FLOW-PROMPTING.md) and [replay guidance](FLOW-RELIABILITY.md#replay-one-observation-before-repeating-the-mission). |
-| Android | A local starter or saved run leads the library; input and prerequisites share a flow journey, with retained Start handoff, typed progress and report-first results. Bundle installation, pinned model downloads, per-flow settings, browser OAuth/manual Bearer, encrypted credentials, foreground execution and run history remain available. |
-| Human review | A separate self-hosted [flow review companion](../apps/flow-review/README.md): desktop graph and inspector, business phases, source details, anchored feedback and revision comparisons. Mapped packages are read-only; uploads are transient. |
+| [#1 Show file and field paths in example-validation errors](https://github.com/e2llm/trollm/issues/1) | Add actionable diagnostics and malformed-input tests for the current format, including invalid registry versions under `python3 -O`. Good first issue. |
+| [#2 Validate final-report selection and copying on Android](https://github.com/e2llm/trollm/issues/2) | Check selection, partial and full copying, scrolling and reopening a completed report from history on a device or emulator with a stub build. The report already supports selection and has a dedicated full-copy action. |
+| [#3 Validate run-control layout at narrow widths and large text](https://github.com/e2llm/trollm/issues/3) | The issue describes the earlier wrapping row. On 1.1.0, check Pause and Resume in the run screen and Cancel in the **Run actions** menu at the requested widths, font sizes and run states. A stub build is enough for these layout checks. |
+| [#4 Add a deterministic packer for existing v1 flow bundles](https://github.com/e2llm/trollm/issues/4) | Package arbitrary current-format flow sources using the existing manifest and reader. The starter and replay packers already serve their specific inputs. |
+| [#5 Add a small non-browser selection replay walkthrough](https://github.com/e2llm/trollm/issues/5) | The replay helper and tests are available. Add synthetic fixtures and a walkthrough for supported, unsupported and ambiguous selections using that helper. Good first issue. |
+| [#6 Collect third-party license and NOTICE material for APK delivery](https://github.com/e2llm/trollm/issues/6) | The issue predates the generated notices and manifest in the 1.1.0 APK. Review what remains against that build and the [notice collector documentation](../THIRD_PARTY_NOTICES.md#notices-accompanying-an-apk) with the maintainer before duplicating the inventory. |
+| [#7 Track temporary development-only picomatch exception — expires 2026-11-24 00:00 UTC](https://github.com/e2llm/trollm/issues/7) | Track remediation of the viewer's development dependency. The [approved exception](SECURITY-EXCEPTIONS.md) expires on **2026-11-24 at 00:00 UTC**. |
 
-The app bundles **Summarize text**, **Browse and summarize** and **Check a total**.
-The last uses local arithmetic without an MCP connection; version 2 compares
-the saved sum and budget directly, without model inference for that step. Starter setup pins
-text-only Qwen3.5-0.8B Q4_K_M for the coder and, where needed, Gemma 4 E2B IT
-Q4_K_M for the reasoner, with non-thinking templates and 4096-token contexts.
-Specialised experimental flows are not implied to be shipped starters.
+## What remains to validate
 
-Models and run data use persistent app-specific storage. After explicit
-Start/Resume, up to two task-referenced models prepare in parallel after checksum
-verification and are reused within the run. More than two slots retain lazy
-loading; inference remains serial. Opening the app never preloads models or
-replays work. Lost workers require explicit Resume. See
-[model preparation](MODEL-PREPARATION.md) and the [Android guide](../apps/android/README.md).
+The [1.1.0 release](https://github.com/e2llm/trollm/releases/tag/v1.1.0) records
+scripted workflow, JVM, Android lint, packaging and dependency checks. Physical
+phone, TalkBack, real-model and live MCP acceptance for 1.1.0 remains open.
+Current-build checks also need to cover OAuth refresh, ordinary model download
+and recovery, and behavior in Doze. Issues #2 and #3 are bounded UI checks that
+can be done with a stub build and no model downloads or live MCP connection.
 
-The companion inspects packages; it does not execute flows, call models, edit
-executable sources or install packages on a phone. Its [implementation
-record](flow-review/IMPLEMENTATION.md) distinguishes source checks from earlier
-browser/container acceptance.
+The [two recorded v342 phone runs](../examples/run-342/README.md) document
+particular runs on an earlier APK, with their exact flow and model files. The
+bounded browser run and OAuth login recorded in the [Android guide](../apps/android/README.md)
+used an earlier emulator build. Use the exact build and settings when reporting
+new observations.
 
-## Evidence and remaining acceptance
+## Proposed authoring changes
 
-Current release metadata is **1.1.0 / Android code 72**. Source-only
-refreshes carry a source commit identity; they do not allocate a new APK version
-or establish acceptance of different APK bytes. See [versioning](VERSIONING.md).
-
-Host unit/integration checks cover the generic runtime, local tool contracts,
-bundle handling and scripted flow paths. The new replay helper has packaging
-checks, not a claim of real-model accuracy. A correct selection from a frozen
-observation does not establish a complete browser mission.
-
-On 2026-10-19, signed **0.1.0-rc.5 / Android code 6** passed email-OTP OAuth
-login/callback, connection persistence after cold reopen, live MCP open/read and
-a bounded native known-answer browser check on an 8 GiB API 36 x86_64 emulator.
-The expected facts and exact source information were returned, and service and
-wake-lock cleanup passed. These results retain that build/device scope.
-
-Acceptance of actual OAuth refresh, ordinary download transfer/recovery,
-Doze-specific behavior and physical-phone operation remains open for the current
-main build. A previous emulator download attempt failed Android's validated-network
-check; this is historical test context, not a verified current outage or a claim
-about every device. Experimental phone results must retain their own flow, model
-and APK identities. Source checks do not replace these acceptance tasks.
-
-The [architecture](ARCHITECTURE-ANDROID.md), current schemas and readers define
-implemented contracts. Minimal summary and ticket triage are scripted references;
-procurement is an incomplete sketch. Specialised starter/replay packers exist,
-but a general packer for arbitrary existing v1 packages does not. The broader
-[flow contract direction](FLOW-CONTRACT-DIRECTION.md) and
-[authoring pack](FLOW-AUTHORING.md) remain proposals.
-
-## Next work
-
-1. **Qualify the current runtime and flows.** Check representative supported,
-   unsupported and ambiguous model decisions, then complete current-build native
-   and physical-phone runs. Measure model preparation, generation, tool and
-   runtime time separately before optimizing slow paths. Keep observation replays
-   separate from end-to-end acceptance.
-2. **Finish Android acceptance.** Exercise real OAuth refresh, download
-   transfer/recovery, backgrounding/Doze and report/control usability on identified
-   builds. Track missing evidence separately from missing implementation.
-3. **Make current-format contributions easier.** Improve diagnostics, add a
-   small replay walkthrough and provide a general v1 bundle packer. This work can
-   proceed now; it does not depend on redesigning authoring or distributing an APK.
-4. **Maintain release provenance.** Keep each APK with its matching source,
-   signing/build records and generated dependency notices. Record observations
-   against the exact build and hardware used.
-5. **Revisit proposed authoring interfaces separately.** A shared flow contract,
-   catalogue and wider authoring pack need their own design and compatibility
-   review; they are not prerequisites for improving today's flows.
-
-No delivery dates are implied by this order. The live issues below track bounded
-contributions, not every maintainer/device acceptance activity.
-
-## Help wanted
-
-| Task | Contribution and environment |
-| --- | --- |
-| [#1: Useful validator error paths](https://github.com/e2llm/trollm/issues/1) | Good first issue: Python diagnostics and malformed-input fixtures; no Android or weights. |
-| [#2: Validate report selection/copying](https://github.com/e2llm/trollm/issues/2) | Selection is implemented; check Android interaction on a stub device/emulator build. |
-| [#3: Validate wrapping run controls](https://github.com/e2llm/trollm/issues/3) | Wrapping is implemented; check narrow widths and large text on Android. |
-| [#4: General v1 bundle packer](https://github.com/e2llm/trollm/issues/4) | Intermediate Python/Rust integration work using existing bundle contracts. |
-| [#5: Small non-browser replay walkthrough](https://github.com/e2llm/trollm/issues/5) | Good first issue: labelled synthetic fixtures and documentation for the existing helper. |
-| [#6: APK license/NOTICE inventory](https://github.com/e2llm/trollm/issues/6) | Packaging work against an identified APK and its build inputs; coordinate with the maintainer. |
-
-The [live help-wanted backlog](https://github.com/e2llm/trollm/labels/help%20wanted)
-is authoritative for open/closed status. Follow [Contributing](../CONTRIBUTING.md)
-for the GitHub issue/PR route and checks. Agent-assisted contributions are welcome;
-start with [AGENTS.md](../AGENTS.md). Keep private captures, credentials and raw
-phone reports out of public contributions. Dependency and distribution changes
-also need [third-party notices](../THIRD_PARTY_NOTICES.md).
-
-## Design boundaries
-
-Keep procedure in the graph and computation in isolated tools. Model tasks ask
-the coder to choose a call; explicitly authored direct tasks invoke one fully
-bound ordinary call through the same checked dispatch and journal. Selected-guard
-calls retain their model path. Preserve original evidence; model prose remains
-advisory. Do not add site-specific executor branches, extra graph node kinds or a
-flow expression language. Observe
-before retrying uncertain writes. Consequential contract changes need maintainer
-review; ordinary contributions can use the existing format and tests today.
+Today's flows use the current [plan and bundle formats](../flows/README.md).
+The [flow contract direction](FLOW-CONTRACT-DIRECTION.md) and the wider
+[authoring pack](FLOW-AUTHORING.md) describe proposals. The packer in issue #4
+works with the existing format and can proceed independently. Discuss changes
+that affect readers or compatibility with the maintainer.

@@ -1,35 +1,69 @@
 # Run the flow review companion
 
-The planned public image is **`ghcr.io/e2llm/trollm-flow-review`** for
-**Linux/amd64**. Public pulling has not yet been verified. Once the first
-publication and anonymous-pull check succeed, find tags and digests on the
-[GitHub package page](https://github.com/orgs/e2llm/packages/container/package/trollm-flow-review)
-or the repository's **Packages** sidebar. The image's full commit tag names the
-public GitHub source commit; `latest` follows successfully checked current-main
-builds. Pin a digest for repeatable deployment.
+The public image is **`ghcr.io/e2llm/trollm-flow-review`** for **Linux/amd64**.
+The pinned image was built from [public source commit `9f154ec5`](https://github.com/e2llm/trollm/commit/9f154ec5ef591aca180046fb6562e867ec77b41d).
+The [GitHub package page](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
+lists tags and digests and opens without a GitHub account. Full commit tags name
+public GitHub source revisions. The workflow can advance `latest` while the
+build's source commit is still current on `main`.
 
-After public availability is confirmed, substitute the digest emitted by that
-successful publication (no registry login is needed for a public package):
+## Pull the image with Docker
 
 ```sh
-FLOW_REVIEW_IMAGE='ghcr.io/e2llm/trollm-flow-review@sha256:PUBLISHED_DIGEST'
+docker pull --platform linux/amd64 \
+  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+```
+
+## Start the viewer with Docker
+
+For local inspection, start the container and open the loopback address on
+the machine running Docker. Uploads work with the empty package directory in
+the image.
+
+```sh
+docker run --detach --rm --name trollm-flow-review --platform linux/amd64 \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --memory 1g --cpus 2 --tmpfs /tmp --publish 127.0.0.1:8080:8080 \
+  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+```
+
+Open `http://127.0.0.1:8080`. Choose **Open files / tar** to load an
+uncompressed flow bundle or **Open folder** to load its source directory.
+When finished, run `docker stop trollm-flow-review`. The container is removed
+when it stops.
+
+## Start the viewer with Podman
+
+The Podman launcher mounts a package directory for browsing. It uses Podman's
+image store. From the repository root on Linux/amd64, use
+rootless **Podman 5.0 or newer** with cgroups v2, Python 3 and PyYAML. The
+repository's `scripts/requirements.txt` includes PyYAML. Use the repository's
+`flows/starters` directory or substitute your own flow package directory.
+
+```sh
+FLOW_REVIEW_IMAGE='ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2'
 podman pull "$FLOW_REVIEW_IMAGE"
-python3 apps/flow-review/deploy/launch.py --packages /srv/trollm/packages \
+python3 apps/flow-review/deploy/launch.py --packages "$PWD/flows/starters" \
   --image "$FLOW_REVIEW_IMAGE" --port 8080
 ```
 
-Use rootless **Podman 5.0 or newer** with cgroups v2, Python 3 and PyYAML (the repository's
-`scripts/requirements.txt` includes it). For a local build, run from the repository root:
+Open `http://127.0.0.1:8080` on the host running the viewer. Choose **Open files /
+tar** to load an uncompressed flow bundle, **Open folder** for a source directory,
+or select a flow from **Mounted packages**.
+
+## Build locally with Podman
+
+Run from the repository root.
 
 ```sh
 podman build --format docker --ignorefile apps/flow-review/.containerignore \
   -f apps/flow-review/Containerfile -t localhost/trollm-flow-review:dev .
-python3 apps/flow-review/deploy/launch.py --packages /srv/trollm/packages \
+python3 apps/flow-review/deploy/launch.py --packages "$PWD/flows/starters" \
   --image localhost/trollm-flow-review:dev --port 8080
 ```
 
-Open `http://127.0.0.1:8080`. Use a published full commit SHA tag or digest for
-repeatable deployments. `--print` renders the exact pod configuration for review;
+Use a published full commit SHA tag or digest for repeatable deployments.
+`--print` renders the exact pod configuration for review;
 `pod.yaml` can also be copied and customized directly. `--bind` controls the
 host interface and defaults to loopback. `podman pod rm -f trollm-flow-review`
 stops and removes the pod. Restart with the launcher after changing the image.
@@ -61,8 +95,9 @@ resource-limit checks in the smoke.
 
 One container serves the browser and API. It runs as UID/GID 10001, drops all
 capabilities, disallows privilege escalation and has a read-only root filesystem.
-`/packages` is mounted read-only; make source directories readable by the mapped
-container user. The launcher does not chmod or relabel host sources. On SELinux
+The Docker quick start uses the empty `/packages` directory in that image.
+The Podman launcher mounts host packages read-only; make source directories
+readable by the mapped container user. It does not chmod or relabel host sources. On SELinux
 hosts, arrange an appropriate container-readable label for this dedicated source
 directory before launching. Never map a home directory or credential store.
 
@@ -119,6 +154,16 @@ still be read-only, and `/tmp` must still be writable tmpfs. Rootless operators
 must also be able to traverse those process root paths. Insufficient access
 fails the smoke; the earlier Podman 5.8.2 results predate this mount-ID check and
 do not establish its rootless acceptance on another host.
+
+The pinned Linux/amd64 image passed the kernel mount and cgroup checks with
+rootful Podman 5.7.0 on a GitHub-hosted Ubuntu 26.04.1 runner. The browser
+check against the actual image API ran with Docker, the confinement and
+resource flags above, and a mounted starter directory. The same archive
+passed the HIGH/CRITICAL vulnerability and secret scan and Rust notice
+verification. See the
+[GitHub Actions build job](https://github.com/e2llm/trollm/actions/runs/44284133755/job/134732279371).
+The [publication job](https://github.com/e2llm/trollm/actions/runs/44284133755/job/135408120868)
+verified an anonymous pull of the same digest.
 
 The launcher and smoke accept `PODMAN` as a command plus flags (parsed without a
 shell), for example `PODMAN="podman --root /tmp/review-storage --runroot

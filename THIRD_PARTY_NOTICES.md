@@ -253,12 +253,14 @@ and embedded AAR/JAR notices. [The notice collector](scripts/android/make_apk_no
 combines those with exact Rust package texts, pinned supplemental upstream
 licenses, the installed Rust toolchain’s standard-library copyright and license
 bundle, vendored native notices and the installed NDK notices. The generated
-`THIRD_PARTY_NOTICES.txt` and `third-party-manifest.json` are packaged as APK assets
-and supplied beside the release. APK validation checks that the packaged notice
-bytes match the distributed text and its manifest digest.
+`THIRD_PARTY_NOTICES.txt` and `third-party-manifest.json` are packaged as APK assets.
+APK validation checks that the embedded notice text matches the build output and
+its manifest digest. Future Android releases distribute the notice bundle
+inside the APK; the 1.1.0 release also supplies separate copies. See the
+[APK extraction instructions](docs/INSTALL-ANDROID.md#read-the-apk-notices).
 
 Some crate archives omit their workspace license text. The corresponding exact
 upstream revisions and retained texts are in [the supplemental inventory](licenses/upstream/sources.json).
 This includes UniFFI's MPL-2.0 text and source reference, the llama Rust wrappers,
 SIMD helpers, jsonschema helpers, and JNA/libffi. No GGUF weights are included in
-the APK or the notice archive; model downloads retain their own terms and pins.
+the APK or the notice bundle. Model downloads retain their own terms and pins.
