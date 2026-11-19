@@ -278,7 +278,9 @@ Keep signing files and credentials out of source control, logs and reports.
 The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
 `1.1.0` (code `72`), read from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. The generated notices are included in the
-APK and copied beside it after assembly, which recreates the APK output directory.
+APK and copied beside it for build verification after assembly, which recreates
+the APK output directory. Future releases distribute the notices inside the APK
+under the [three-upload policy](../../docs/VERSIONING.md#android-release-uploads).
 The collector follows bounded parent-POM chains for
 inherited Maven licenses and records the declaring POM's coordinates. If using
 `trollm.buildRoot`, adjust the generated-asset and report paths accordingly.

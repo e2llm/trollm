@@ -14,16 +14,21 @@ release or other inputs.
 
 ## Verify the download
 
-Download `app-release.apk.sha256` from the same release and put it beside
-`app-release.apk`. On a computer with `sha256sum`, run in that directory:
+For 1.1.0, download `app-release.apk.sha256` from the same release and put it
+beside `app-release.apk`. On a computer with `sha256sum`, run in that directory:
 
 ```sh
 sha256sum -c app-release.apk.sha256
 ```
 
-It must report `app-release.apk: OK`. `SHA256SUMS` covers the other release
-assets too. The release's `build-info.json` records the APK hash, source commit,
-version and signing certificate under `certificateSha256`.
+It must report `app-release.apk: OK`. The 1.1.0 `SHA256SUMS` covers the other
+uploaded assets too. For releases using the
+[three-upload policy](VERSIONING.md#android-release-uploads), put `app-release.apk`,
+`build-info.json` and `SHA256SUMS` in the same directory and run
+`sha256sum -c SHA256SUMS`. Both files must report `OK`.
+
+The release's `build-info.json` records the APK hash, source commit, version and
+signing certificate under `certificateSha256`.
 
 With Android SDK Build Tools installed, inspect the APK signature with:
 
@@ -39,6 +44,17 @@ e34115258267beec63ff83eaf2b8cb51767a3f3b71f42cfcd3570c99ce2dc7a8
 
 The checksum checks the downloaded bytes; comparing the signing certificate
 checks continuity with this release identity.
+
+## Read the APK notices
+
+The full third-party notice text and its manifest are inside the APK. On a
+computer with `unzip`, extract both from the downloaded APK without installing it.
+
+```sh
+unzip app-release.apk assets/THIRD_PARTY_NOTICES.txt assets/third-party-manifest.json
+```
+
+The 1.1.0 release also has separate copies of these files.
 
 ## First run
 

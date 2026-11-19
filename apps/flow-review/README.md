@@ -19,23 +19,30 @@ the contracts and exact validation status. This component is separate from the
 Android app. Its server reuses trollm's Rust readers and validators; it needs no
 models, Android SDK, MCP accounts or LLM API key.
 
-## Run with Podman
+## Get the public image
 
-Use **Podman 5.0 or newer**. Earlier releases do not honor the pod's
-memory-backed transient volume; the launcher and smoke reject them before
-starting a pod. `--print` remains available without a Podman installation.
+The **Linux/amd64** image can be pulled without a registry login.
+[GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
 
-The [GitHub Actions workflow](../../.github/workflows/flow-review-image.yml) is
-configured to publish Linux/amd64 images at
-`ghcr.io/e2llm/trollm-flow-review`. **Public image availability is not yet
-verified.** The planned [GitHub package page](https://github.com/orgs/e2llm/packages/container/package/trollm-flow-review)
-will also be linked from this repository's **Packages** sidebar once published.
-The workflow publishes a full public GitHub commit tag and updates `latest` after
-its checks. A full commit tag or digest identifies a deployment; image publication
-does not imply a new Android release. See the [deployment guide](deploy/README.md)
-for the planned pull command and the current local-build route.
+```sh
+docker pull --platform linux/amd64 \
+  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+```
 
-Build from the repository root:
+Then [start the viewer with Docker](deploy/README.md#start-the-viewer-with-docker).
+Open `http://127.0.0.1:8080` on that host and choose **Open files / tar** to load
+an uncompressed flow bundle or **Open folder** to load its source directory.
+To browse mounted packages, use the
+[Podman launcher](deploy/README.md#start-the-viewer-with-podman) with its own
+image store and package directory.
+
+## Build locally with Podman
+
+Earlier Podman releases do not honor the pod's memory-backed transient volume.
+The launcher and smoke reject them before starting a pod. `--print` remains
+available without a Podman installation.
+
+To build locally, run from the repository root:
 
 ```sh
 podman build --format docker --ignorefile apps/flow-review/.containerignore \

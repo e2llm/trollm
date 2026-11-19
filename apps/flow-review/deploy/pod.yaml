@@ -6,7 +6,7 @@ spec:
   restartPolicy: Always
   containers:
     - name: server
-      image: registry.example.invalid/trollm/flow-review:COMMIT_SHA
+      image: ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
       ports:
         - containerPort: 8080
           hostPort: 8080
