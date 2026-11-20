@@ -2,8 +2,7 @@
 
 ## What this is
 
-trollm is a lean runtime for orchestrating **small on-device models** on edge
-hardware (Android phone first; Raspberry Pi / Linux edge boxes later) with a
+trollm is a runtime for orchestrating **small on-device models** on Android with a
 **deterministic execution plan** ("the ledger") between them:
 
 - **Coder model** — code/JSON/tool-call-tuned (e.g. Qwen3.5-0.8B class). The only model allowed
@@ -70,7 +69,7 @@ These are load-bearing. Any change that violates one is a redesign, not a patch.
 
 1. **The graph defines allowed flow control; the runtime enforces it.** Transitions
    use verification results, enumeration state, budgets and explicitly declared
-   coder tool choices. The approved [adaptive-flow contract](ADAPTIVE-FLOWS.md)
+   coder tool choices. The [adaptive-flow contract](ADAPTIVE-FLOWS.md)
    adds bounded selection among authored exits. Model prose never becomes a
    branch condition, and models cannot invent graph edges. No magic strings.
 2. **The runtime retains and binds structured data; advice stays prose.** Worklists,
@@ -130,57 +129,43 @@ snapshot iteration → cached enrichment → advisory prose → inferred mutatio
 - Document processing pipelines (per-chunk analysis with steering)
 - Home-automation batch ops (device list → per-device checks → advisory → actuation)
 
-## Proposed approach (summary)
+## Runtime structure
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Ledger core | Rust crate, pure Rust API | shared with Pi/desktop later; UniFFI → Kotlin |
+| Ledger core | Rust crate, pure Rust API | workflow execution is separate from the Android UI; UniFFI connects Rust and Kotlin |
 | Execution plan | YAML, `task`/`foreach`/`end` node kinds, transition keys, `flowRef` stack | matches how flows are actually authored; no generic graph walker |
-| Model runtime | llama.cpp (GGUF), GBNF on the tool-call fence only | arbitrary models; constrained decode where it matters |
+| Model runtime | llama.cpp (GGUF), GBNF on the tool-call fence only | models supported by the pinned backend; constrained decode for tool-call syntax |
 | MCP | in-process smart proxy (streamable HTTP client + policy engine) | single choke point; cache/paginate/shape/mutation policies per tool |
 | Event log | JSONL per run | audit + replay + resume + queue in one artifact |
 | Artifacts | content-addressed files + meta sidecars | atomic writes (tmp+rename), completeness flags |
 | Android app | Kotlin/Compose UI + foreground service | OS-mandated lifecycle |
 
-## Rejected approaches (and why)
+## Design reasons
 
-| Rejected | Why |
-|---|---|
-| Adopting a general orchestration framework as the runtime | The project currently chooses a small native Android interpreter with explicit model/tool/artifact contracts; any alternative needs a concrete footprint and integration comparison |
-| MCP gateways (IBM ContextForge, MCPJungle, Docker MCP GW, Lunar.dev, Obot) | Registries, auth stacks, multi-tenant governance — the n8n problem one layer down. One device, one client: in-process middleware wins |
-| A2A protocol | JSON-RPC over HTTP for cross-org delegation. On one device a function call beats a protocol; adds bytes, buys nothing |
-| dora-rs **on Android** | Daemon/process model fights the app sandbox; Zenoh SHM broken on Android (bionic lacks `shm_open`); its value (multi-process, multi-machine, hot reload) is muted in a single app. Kept as the Pi/multi-device extension path |
-| gearmand **on-device** | Same daemon-in-sandbox problem; the ledger's event log already provides pull-queue semantics. Kept for cross-machine durable dispatch (SQLite/Redis backends) |
-| ROS 2 | Massive overkill; relevant only as interop target via zenoh-bridge-dds |
-| Zenoh standalone on a single device | A component with no job. Arrives free with dora when multi-device happens |
-| LiteRT-LM / ExecuTorch as primary runtime | Constrained generation for arbitrary GGUFs is the blocker (coder needs GBNF). Kept as future NPU-offload adapters |
-| Magic strings / strict schemas between models | Sub-1B models are unreliable at strict outputs; prose between models, structure only at the tool-call fence |
-| Raw multicast + UDP sockets for device fabric | Rebuild discovery, topics, fragmentation, reliability, NAT traversal badly. Zenoh already is that, done well |
-| Worklist/items sourced from model output | Sub-1B transcription corrupts lists. Structured data binds from artifacts |
+The runtime uses one native interpreter inside the Android app. Model calls,
+tool policies and saved evidence share explicit contracts without requiring a
+separate orchestration service on the phone. Platform lifecycle and credential
+handling remain with the app.
 
-## Extensibility paths (not built now, design must not foreclose)
+Model advice stays in prose. Tool-call syntax is constrained and validated before
+dispatch, while saved structured data passes through bindings. This avoids asking
+a model to transcribe an existing worklist or turning an unvalidated phrase into
+a control signal. These mechanisms constrain execution; they do not establish
+that a model chose the right product, record or operands.
 
-- **Pi / Linux edge**: dora-rs wraps ledger-core nodes as a dataflow graph; nodes as processes;
-  Zenoh pub-sub for cross-machine; gearmand (SQLite or Redis queue backend) for durable
-  cross-machine job dispatch where pull semantics are needed.
-- **Multi-device**: Zenoh arrives via dora — NAT traversal, discovery, location-transparent
-  key expressions; Zenoh storage/queryables can turn the per-device MCP cache into a shared
-  cache. dora's service/action patterns map onto ledger consults.
-- **More/larger models**: broader residency/routing strategies remain extension
-  work. Current [model preparation](MODEL-PREPARATION.md) overlaps up to two
-  referenced slots after Start/Resume and uses lazy loading when a plan references
-  more than two; it is not a promise that every model set fits phone memory.
-- **NPU offload**: LiteRT-LM (Snapdragon/Dimensity NPU) or ExecuTorch (ANE/NNAPI) adapters
-  behind the same `ModelSlot` trait — blocked on their constrained-decoding support for the
-  coder slot.
-- **WasmEdge/LlamaEdge**: if hard cross-platform portability of the whole stack becomes a
-  requirement (runtime + API server < 30 MB).
-- **ROS 2 interop**: zenoh-bridge-dds, only if robotics hardware enters the picture.
+## Model and backend limits
 
-## Enterprise tech debt (see docs/SECURITY-ENTERPRISE.md)
+Current [model preparation](MODEL-PREPARATION.md) overlaps up to two referenced
+slots after Start/Resume and uses lazy loading when a plan references more than
+two. Available memory and the selected model files still limit practical use.
 
-On-prem airgap deployment, enterprise-grade security, and auditability are **requirements,
-not options** — but parts are deliberately deferred. The architecture must not foreclose:
-signed content bundles, hash-chained audit logs, mTLS with internal CA, egress allowlists,
-Keystore/HSM secrets, RBAC on flow installation, SBOM, offline update channel. What is
-designed-in now vs deferred is tracked in the security doc.
+Any alternative model backend must preserve the `ModelSlot` generation contract,
+including the coder's grammar constraints, limits and failure behavior. A backend
+or model supported elsewhere is not automatically supported by this app.
+
+## Security scope
+
+[Enterprise security](SECURITY-ENTERPRISE.md) distinguishes current controls from
+deferred features such as signed publisher identities, stronger audit integrity
+and installation policy. The current app does not claim those deferred controls.

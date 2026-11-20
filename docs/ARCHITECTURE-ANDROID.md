@@ -1,6 +1,6 @@
 # trollm — Android Architecture (v1 target)
 
-The approved [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds explicit
+The [coder-directed flow extension](ADAPTIVE-FLOWS.md) adds explicit
 coder control tools, authored routes, node instructions, recovery context and
 per-task generation limits. It supersedes the static-routing restriction below
 for opted-in tasks; legacy task/foreach/end behavior remains supported. This
@@ -13,13 +13,9 @@ without a model or prompt. Default model tasks retain their existing behavior.
 Selected-guard calls are excluded from direct execution. It is available in
 1.1.0 and later; the earlier 1.0.1 APK predates it.
 
-Normative document. Implementation agents: **implement exactly this**. If a consequential
-decision is missing or contradictory here, STOP and report the question — do not assume.
-Non-consequential choices (formatting, internal helpers, which micro-library for YAML) are
-yours to make.
-
-The current prototype constraints in §16 qualify the earlier target behavior where
-the baseline review found unsafe or incomplete implementations.
+The implementation constraints in §16 qualify the earlier target behavior.
+The schemas, readers and current implementation qualifications define the
+supported format; proposed extensions require corresponding compatibility work.
 
 The [product plan](PRODUCT-PLAN.md) records the next product direction. Its
 [flow ICD brief](FLOW-CONTRACT-DIRECTION.md) proposes flow-owned model/MCP
@@ -736,9 +732,9 @@ pub trait ToolGateway: Send {
     fn validate_call(&self, call: &ToolCall) -> anyhow::Result<()>; // before mutation intent
     fn call(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult>; // applies policies
 }
-// McpGateway: streamable-HTTP client + PolicyEngine; emits events via a sink callback
-// into the core's event log. MCP transport: use `rmcp` crate if it cleanly supports
-// streamable HTTP client; otherwise hand-rolled JSON-RPC over reqwest. (May decide.)
+// McpGateway: HTTP JSON-RPC transport + PolicyEngine; ordinary HTTP calls use reqwest.
+// Gateway events pass through a sink callback to proxy.events.jsonl,
+// separate from the core's events.jsonl (see §15).
 ```
 
 ### trollm-core
@@ -800,45 +796,31 @@ they are not synthetic journal events or evidence of task completion.
   serveFrom hit/miss, shape-to-file, mutation passthrough + journaling).
 - **models**: MockModel contract tests; llama slot smoke test behind feature flag, skipped
   without weights.
-- **android**: build-only verification deferred (no SDK on dev machine); unit-testable logic
-  must live in the Rust core, not in Kotlin.
+- **android**: JVM tests cover app helpers; Android builds and device/emulator
+  checks cover packaging, UI and lifecycle behavior. See the
+  [Android development guide](../apps/android/README.md) for commands and limits.
 
-## 12. Milestones
+## 12. Validation scope
 
-- **M1 (agents now)**: crates core + models(mock) + mcp(mock-server tests) + example flows +
-  JSON schema. `cargo test --workspace` green.
-- **M2**: llama.cpp adapter on a Linux dev box with real weights; GBNF fence tuning;
-  measure tok/s + tool-call parse reliability (go/no-go for coder model choice).
-- **M3**: UniFFI + Android app skeleton; sideload flow bundle; first on-device run.
-- **M4**: security tech-debt burn-down (signatures, hash chaining, mTLS).
+Scripted models and mock services establish execution rules and failure behavior.
+Native compilation, real-model inference and device checks establish separate
+properties. Report the exact build, model and flow identities with observations;
+passing host tests does not establish model accuracy or phone performance.
+See the [product plan](PRODUCT-PLAN.md) for current validation gaps and
+[Android installation](INSTALL-ANDROID.md) for released builds.
 
-## 13. Decision points (may decide vs must ask)
+## 13. Compatibility changes
 
-Documentation rule for all contributors and agents: docs, READMEs, and code comments
-contain only project-specific technical content — mechanisms, decisions, constraints,
-verification status. No generic explainers (what MCP/enterprise security/auditability
-"is"), no process or team-culture prose. If a concept needs explaining, link out; don't
-paraphrase.
+Changes to plan, registry, tool-policy, event, bundle or bridge formats require
+aligned schemas, readers, validation, consumers and compatibility fixtures.
+Keep runtime behavior consistent with the [design invariants](PREMISE.md).
+Use the [contribution guide](../CONTRIBUTING.md) for proposing and checking changes.
 
-Agents MAY decide: internal module organization within a crate, serde vs manual YAML,
-`rmcp` vs hand-rolled JSON-RPC (per §9), tokio vs std-threads for background fetch,
-exact GBNF text, test naming.
-
-Agents MUST STOP AND REPORT (not assume): any change to §3–§9 formats or signatures;
-adding/removing node kinds, transition keys, event types, error classes, policy keys;
-any deviation from the design invariants in PREMISE.md; any new third-party dependency
-beyond: serde, serde_yaml/serde_json, anyhow, thiserror, reqwest(or rmcp's transport),
-tokio(if needed), uuid, sha2, llama-cpp-2(feature-gated), uniffi(in uniffi crate only),
-parking_lot/once_cell-style utils.
-
-## 14. Ratified implementation decisions (post-M1)
-
-Ambiguities reported by M1 implementation agents, resolved by the design owner. These
-refine §3–§9 without changing them:
+## 14. Execution details
 
 1. **Counter scope**: budgets are enforced per frame (each flowRef frame enforces its own
-   plan's limits); `RunState.counters` is the run-wide aggregate mirror. Rationale: the
-   example flows only work per-frame (`return-to-list` gets maxSteps:2 per invocation).
+   plan's limits); `RunState.counters` is the run-wide aggregate mirror.
+   For example, `return-to-list` gets maxSteps:2 per invocation.
    Gateway artifact bytes and foreach worklist snapshots charge their owning frame
    and the aggregate; parent/sibling bytes do not consume a child's allowance.
    Artifact limits are checked after writing, with `value` and `limit` expressed
@@ -862,12 +844,11 @@ refine §3–§9 without changing them:
    `tool-call-parse`; template render failure (unbound `{{ var }}`) → `verification-failed`;
    log/snapshot I/O failure → `artifact-io`.
 5. **Tool-call grammar root**: `ws (fence+ | prose)` where prose may not contain the
-   fence-open token; grammar is applied to every coder-slot generation. (M1 shipped
-   fences-only, which made prose loop-termination impossible on constrained steps.)
+   fence-open token; grammar is applied to every coder-slot generation.
 6. **MCP pagination response shape**: items = first array-of-objects field in the payload
    (or top-level array); cursors are 1-based integer page numbers for file slicing, with an
-   internal `<hash>.pages.json` index. Opaque string cursors from real servers = **M2
-   decision point** (current fallback: serve page 1 from cache).
+   internal `<hash>.pages.json` index. The cache reader does not interpret remote
+   opaque string cursors; its current fallback serves page 1 from cache.
 7. **Mutation journaling wiring**: core writes its intent before gateway dispatch;
    proxy events are separate observations. Required gateway classification is
    forwarded through adapters and checked with root policies. Unresolved intents
@@ -875,20 +856,14 @@ refine §3–§9 without changing them:
    reconciliation remains future work. Mutation-grant and intent-log tasks cannot
    enable automatic `onError.retry`.
 
-## 15. Wrapper-integration decisions (post-M3) and core gaps
+## 15. Android bridge behavior and limitations
 
-Decisions ratified from the UniFFI/Android implementation; the two "core gap" items are
-accepted tech debt with specified fixes — they are the first work items of the next
-iteration.
-
-1. **Bundle format**: uncompressed ustar (hand-rolled reader, zero new deps — §13 admits no
-   `zip` crate). Integrity comes from manifest sha256s (fail-closed). Switching to ZIP is an
-   owner decision (adds `zip` to the allowlist).
+1. **Bundle format**: uncompressed ustar, checked by the bundle reader.
+   Integrity comes from manifest SHA-256 hashes; invalid content fails closed.
 2. **UniFFI mechanics**: proc-macro mode (`uniffi = "0.28"`), bindgen via a feature-gated
    shim binary inside the wrapper crate (pins bindgen to the lockfile's UniFFI).
-3. **CORE GAP A — proxy events into the main event log.** §9 intended the gateway sink to
-   write into the run's `events.jsonl`, but `Executor` owns `EventLog` seq internally; a
-   second writer breaks §7's monotonic seq. Stopgap (accepted): gateway events go to
+3. **Separate gateway events.** `Executor` owns the run event sequence;
+   a second writer cannot independently assign that sequence. Gateway events go to
    `runs/<uuid>/proxy.events.jsonl` (same envelope, own seq); `tail_events` serves the main
    log only, so `cache_hit`/`fetch_progress` don't reach the UI yet. Opening the
    required sidecar validates its records and continues its positive increasing
@@ -899,9 +874,7 @@ iteration.
    through the main log. Records are bounded to 1 MiB on scan and append. A valid
    last record without a newline is delimited before appending. Remote `isError`
    details are omitted from persistent errors, retaining only bounded escaped
-   tool context and the error category. **Specified future fix**:
-   core exposes a shared sequenced sink (`Arc<Mutex<EventLog>>`) that the gateway writes
-   through; sidecar is retired.
+   tool context and the error category.
 4. **Cooperative run controls.** The bridge injects an `ExecutionControl` hook
    at dispatch, model/tool and retry boundaries. Retry delays use the existing
    condition variable: Pause wakes and holds the delay, Resume continues its
@@ -913,18 +886,15 @@ iteration.
    authored pause; process loss requires explicit recovery.
 5. **`user_input` persistence**: not in `RunState`; wrapper stores
    `runs/<uuid>/user_input.txt` sidecar so cold resume re-renders prompts faithfully.
-   Additive; a later core version may absorb it into RunState.
 6. **`sourceBaseline.sha256` semantics** ("authored against" what, exactly) remain undefined
    by design for now; wrapper verifies registry+weights against the *bundle manifest* (§8)
    and deliberately does not enforce plan↔registry equality.
 7. **Final report access**: §9 has no result accessor; on `Succeeded`, `poll_status` derives
-   `final_report` from the run's own records (terminal node's bound prose outputs). A core
-   `run_result()` accessor remains a possible later API.
+   `final_report` from the run's own records (terminal node's bound prose outputs).
 
-## 16. Constraints after baseline-review remediation
+## 16. Current implementation constraints
 
-The constraints below summarize the baseline review remediation.
-These implementation choices keep the current prototype bounded:
+These constraints bound the current implementation:
 
 1. **Listing publication:** a paginated call collects the complete dataset before
    returning the requested page and publishing `<server>.<tool>.latest.jsonl` plus
@@ -959,9 +929,8 @@ These implementation choices keep the current prototype bounded:
    requests are serialized before reconstruction. The foreground service retains
    ownership only while attached runs are actively running. Native library packaging and device
    lifecycle behavior require the Android CI/device checks described in the app README.
-7. **Tool input validation:** the fix for
-   INPUT-003 (tool argument schema validation) adds schema
-   validation before mutation journaling and on direct gateway calls, as detailed
+7. **Tool input validation:** schema validation runs before mutation journaling
+   and on direct gateway calls, as detailed
    in §5.1. This checks arguments against the advertised contract; it does not
    establish business authorization or reconcile uncertain external effects.
 

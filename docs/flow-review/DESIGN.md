@@ -1,6 +1,6 @@
 # Flow review design
 
-Approved scope: 2026-10-24. Delivery status: [implementation plan](IMPLEMENTATION.md).
+Implemented behavior and validation: [implementation and checks](IMPLEMENTATION.md).
 
 ## Purpose and workflow
 
@@ -18,7 +18,7 @@ part of this delivery.
 
 ## Page and progressive detail
 
-Desktop revision approved 2026-10-24: use the available monitor width and height.
+The desktop layout uses the available monitor width and height.
 The page is a three-pane workspace: phase/node navigation on the left, an always
 visible graph canvas in the center, and independently scrolling details on the
 right. Target desktop windows of at least 1180 pixels; a stacked mobile layout is
@@ -78,8 +78,7 @@ cannot replace executable facts. See [interface](INTERFACE.md).
 
 Use `apps/flow-review/server/` for the independent `trollm-flow-review` Rust
 workspace member and `apps/flow-review/web/` for the browser application.
-Deployment files live in `apps/flow-review/deploy/`. Public app/operator docs
-contain placeholders; private CI integration stays in `ci/` and GitLab YAML.
+Deployment files live in `apps/flow-review/deploy/`.
 
 The server uses existing core plan/registry readers and validators. Reuse the
 bundle reader/integrity rules and setup validation from the bridge via a narrow
@@ -133,18 +132,17 @@ SIGTERM/Ctrl-C with graceful HTTP shutdown. Container smoke checks actual proces
 mount and cgroup state from the Linux runtime host, without adding test-only
 application interfaces or untracked helper binaries to the production image.
 
-GitLab builds/tests this component only for relevant inputs or explicit full
-pipelines. Run frontend type/lint/tests/build, backend tests/Clippy, HTTP smoke,
-dependency/secret checks and HIGH/CRITICAL image gates before image publication.
-Use immutable commit image tags, existing registry conventions and repository
-CA/proxy setup; do not copy private endpoints into public deployment examples.
-Viewer-only changes must not schedule Android/native builds. Add the portable
-component/docs to curated export policy, preserving separate public history.
+Use the component's [development checks](../../apps/flow-review/README.md#development-and-checks)
+and [container smoke checks](../../apps/flow-review/deploy/README.md) to validate
+changes. Frontend type/lint/tests/build, backend tests/Clippy, HTTP smoke and
+dependency/image scans cover different parts of the application. Published images
+use source-commit tags and content digests. Viewer-only changes need no Android
+SDK, model weights or native inference build.
 
 Tests must exercise the real Rust validation path, malformed/incomplete imports,
 unsafe paths, presentation coverage, shared prompts, foreach/subflows, routing,
 paused continuations, feedback anchors, revision comparisons, and large packages
-with many nodes/edges as well as long prompts. Existing examples are smaller
-than the requested 300 KB case, so add explicit generated stress fixtures.
+with many nodes/edges as well as long prompts. Generated stress fixtures cover
+packages larger than the included starter examples.
 Browser tests and an actual container/Podman smoke establish their own scopes;
 no phone or live model/MCP end-to-end acceptance is required for this companion.

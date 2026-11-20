@@ -14,8 +14,8 @@ its saved sum and budget without a model call. Release validation and observed
 device checks are recorded separately from these implemented capabilities.
 
 The earlier **1.0.1 / Android code 71** added node-ID and artifact filename
-validation, plus launch documentation corrections. Its release, APK and tags,
-and the original **1.0.0 / Android code 70** release, remain unchanged. Both
+validation, plus launch documentation corrections. Its APK and the original
+**1.0.0 / Android code 70** APK retain their published bytes. Both
 include the earlier runtime and launcher fixes, curated v342 evidence and a
 native Android APK.
 The historical v342 runs used APK68 / 0.1.0-rc.24; their observations remain tied
@@ -32,8 +32,10 @@ APK checksum, package/version and signing certificate with the distributed build
 a version label alone does not identify its bytes or acceptance evidence.
 
 The product version selected for this feature release is `v1.1.0`; subsequent
-compatible fixes advance the patch version. Use annotated tags for new releases. Never move a published release
-tag or replace its APK with different bytes. Prepare another version instead.
+compatible fixes advance the patch version. Use annotated tags for new releases.
+Prepare another version for code changes; do not move published release tags or
+replace an APK with different bytes. The source metadata update below changed
+Git identities only.
 
 To prepare a candidate, edit the two root manifest values and refresh the local
 crate entries in `Cargo.lock`, without upgrading dependencies:
@@ -48,6 +50,22 @@ The check requires Python 3.11+ and uses only its standard library. It rejects
 invalid version values, independently versioned workspace crates and stale
 lockfile versions. APK release validation uses the same identity and checks the
 actual manifest before recording the build's version.
+
+## Source metadata update (2026-11-20)
+
+The `v1.0.0`, `v1.0.1` and `v1.1.0` tags now use corrected maintainer attribution.
+Source files, APKs, checksums, signatures and download URLs are unchanged. Existing
+build records retain their original source IDs. Each [release page](https://github.com/e2llm/trollm/releases)
+lists the corresponding old and new public source commits.
+
+GitHub-generated source ZIP/tarball checksums can change after retagging. An
+existing GitHub clone may retain the old tags until explicitly refreshed:
+
+```sh
+git fetch origin +refs/tags/v1.0.0:refs/tags/v1.0.0
+git fetch origin +refs/tags/v1.0.1:refs/tags/v1.0.1
+git fetch origin +refs/tags/v1.1.0:refs/tags/v1.1.0
+```
 
 ## Android release uploads
 

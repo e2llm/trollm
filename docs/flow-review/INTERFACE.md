@@ -1,7 +1,7 @@
 # Flow review interfaces
 
-Approved implementation contract, 2026-10-24. Main agent owns changes to this
-document; implementers report any necessary material deviation before coding it.
+This document describes the viewer's presentation, inspection and feedback
+interfaces. The executable flow remains the source of runtime behavior.
 
 ## Authored presentation
 

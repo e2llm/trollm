@@ -1,12 +1,10 @@
 # Performance observations and measurement contracts
 
-Status: **M1/M2 IMPLEMENTED IN SOURCE; DEVICE MEASUREMENT OPEN**. The bounded
-observation and numeric timing/correlation changes below have synthetic host
-tests. This does not establish phone latency, CPU, battery or workflow accuracy.
-Historical source observations describe baseline `239e7e6`, which lives in
-private development history rather than the curated GitHub history. The baseline polling
-paths below remain available as strict disk APIs but Android now uses the
-separate bounded observation API.
+The bounded observation and numeric timing/correlation changes below are
+implemented and have synthetic host tests. Device measurement remains open;
+those tests do not establish phone latency, CPU, battery or workflow accuracy.
+The historical polling paths below remain available as strict disk APIs, while
+Android uses the separate bounded observation API.
 
 The objective is to explain where time and context go during any authored flow,
 and make observing a long run inexpensive. Metrics remain observations: they
@@ -15,9 +13,8 @@ mutation or replace journal-based recovery.
 
 ## What the source establishes
 
-The recollection that response-size collection repeatedly reads all logs does
-not describe the current production counters. Size events are emitted where
-payloads already exist. The baseline Android observer did repeatedly scan journals. That path has
+Size events are emitted where payloads already exist. The baseline Android
+observer repeatedly scanned journals. That path has
 been replaced for screen/service polling; full collection scans when serving
 cached pages remain.
 These deserve separate work from prompt and model optimization.
@@ -400,43 +397,19 @@ from full prompt tokens. Failure paths need timing without inventing a successfu
 tool result. Snapshot writes currently serialize the entire state
 ([exec.rs](../../crates/trollm-core/src/exec.rs)); measure before redesigning.
 
-## Staged work and remaining gates
+## Measurement coverage and remaining limits
 
-M1 numeric fields/offline summaries and M2 bounded observation/reconstruction
-are implemented in source as described above. Device performance measurement
-remains open. M3 cache indexing/reuse is deferred: cached collection page reads
-continue to scan and validate the complete collection on every request, including
-replacement/incomplete generations. No new cache-trust contract is introduced.
-The original sequence below remains the roadmap for later measurement and reuse.
+Numeric fields/offline summaries and bounded observation/reconstruction are
+implemented in source as described above. Device performance measurement remains
+open. Cache indexing/reuse is deferred: cached collection page reads continue to
+scan and validate the complete collection on every request, including replacement
+or incomplete generations. No new cache-trust contract is introduced.
 
-1. **Define and measure.** Agree optional numeric field definitions and phase
-   containment, then add representative synthetic observer benchmarks. Record
-   bytes/records processed and retained memory alongside elapsed time. Separate
-   model, gateway, persistence and observation work before optimizing any one.
-2. **Add a bounded worker-owned live observation projection.** Feed it from
-   committed append results and completed boundaries; publish coherent immutable
-   snapshots for the screen/service. Use bounded recent-event storage and
-   bounded batches, including an explicit older-events-omitted indicator.
-   Cap Android technical-line retention and avoid rebuilding unlimited lists.
-3. **Seed reconstruction once.** For a cold opening, perform strict validated
-   journal reconstruction, seed summary/watermark state and continue from the
-   live owner. Bound inactive projections and release them on eviction. A new
-   cold opening revalidates; metrics remain disposable derived data.
-4. **Preserve the strict disk APIs.** Keep existing journal validation, limits,
-   error and recovery behavior. Add a separate live observation path for UI
-   consumers; do not silently weaken `tail_events` or `poll_status` semantics.
-   An incremental disk offset cannot detect arbitrary edits to an old prefix
-   without revalidation. A retained cursor is not a security guarantee.
-5. **Optimize boundary reuse after measurement.** Consider reusing exact byte
-   counts and verified artifact bytes within one immutable generation. Preserve
-   audit flush ordering and failure behavior. Gate cache scan changes on a
-   separately reviewed generation/invalidation and validation contract; this
-   plan assumes no new trust guarantee for cached files or page metadata.
-6. **Add offline numeric summaries.** Present per-attempt wall time, model
-   phases/tokens, tool/persistence time and size boundaries with explicit unknown
-   counts and sample coverage. Keep overlapping totals visibly separate. New
-   optional payload fields need reader/consumer tests; the main event type set
-   is closed, so adding event types requires compatibility review.
+Any future reuse of artifact bytes or cached page indexes must preserve generation
+validation, journal flush ordering, corruption checks and failure behavior. An
+incremental disk offset cannot detect arbitrary edits to an old prefix without
+revalidation. Optional metric fields need reader/consumer checks; the main event
+type set remains closed.
 
 ## Validation and privacy gates
 

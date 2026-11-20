@@ -2,8 +2,8 @@
 
 Historical design implemented for flow105 / `0.1.0-rc.8` / Android code 43.
 See [versioning](../VERSIONING.md) and [Android installation](../INSTALL-ANDROID.md)
-for current release status. The approved design below started from flow104
-(`239e7e6`, in private development history rather than curated GitHub history).
+for current release status. The design below started from the earlier flow104
+procedure.
 Exact tool arguments are in
 [BUILTIN-TOOLS.md](../BUILTIN-TOOLS.md); child returns and limits are in
 [G2-CONTRACT.md](G2-CONTRACT.md). See the [scope](README.md).
@@ -12,8 +12,8 @@ Exact tool arguments are in
 
 Assume useful preformatted input. The demonstrator needs original per-item prose,
 requested pack quantities, global preferences/currency and an explicit budget.
-There is no work package for extracting arbitrary shopping missions or building
-a repeatable Android form.
+Arbitrary shopping-mission extraction and consumer input forms are outside this
+demonstrator's scope.
 
 For the implementation fixture, use a small prepared envelope containing a
 context string and an item array. Each entry carries original request prose and
@@ -273,7 +273,5 @@ them as unknown fields. This work first pinned product version `0.1.0-rc.8` and
 Android update code 43; native APK delivery was pending at that historical
 checkpoint. Current release identity is maintained in [versioning](../VERSIONING.md).
 
-Generic capabilities, tests and contracts belong on main and then in the Amazon
-branch. The shopping procedure, prepared fixture and phone handoff belong on the
-Amazon branch. Use isolated commits rather than importing all experimental
-runtime changes from that branch without review.
+The runtime supplies generic execution and tool contracts. Shopping-specific
+steps and prompts remain in the flow package.

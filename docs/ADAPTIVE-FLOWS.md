@@ -1,6 +1,6 @@
 # Coder-directed flows
 
-Approved implementation contract, 2026-10-23. This source implements the generic
+This source implements the generic
 extension; delivery and the separate Amazon track remain tracked in the product
 plan and issues. This document is the reading entry point for both tracks.
 Older flow bundles retain their current
@@ -140,27 +140,7 @@ ends the run. The runtime never treats a timeout as proof that a write did not
 happen. See [the architecture contract](ARCHITECTURE-ANDROID.md) for argument
 constraints, compact artifact views and private failure diagnostics.
 
-## Implementation and handoff
-
-1. Generic runtime: schema/readers/validators, routing, prompt/context rendering,
-   durable error/transition state, generation limits and focused unit/integration
-   tests. Add a non-browser example and preserve existing-flow compatibility.
-2. Amazon development: create `e2llm-amazon-dev-1` from clean updated main.
-   Re-author discovery, inspection, reasoner advice, coder action/routing,
-   cart observation, `local.calculate`, assessment and reporting/recovery.
-   Use graph stages and instructions, existing E2LLM tools and exact calculator
-   results. Do not import the old branch's domain-specific executor, magic-word
-   completion, environment binaries or automatic diagnostic exports.
-3. Keep ordinary branch pushes from triggering Android compilation. Validate
-   host unit/integration tests and schema/bundle consistency. No live browser,
-   simulator or physical-phone end-to-end tests are part of this work package.
-   The phone-flow maintainer owns physical acceptance using the new branch.
-
-Main-session ownership covers specification and architecture. Delegate bounded
-implementation tasks with distinct file ownership; bring material departures
-back for alignment. Keep host RAM/disk use bounded and leave long CI jobs to
-finish without polling loops. Track delivery in repository issues and MRs;
-this contract and onboarding links survive session changes.
+## Implementation and checks
 
 Host regression checks include actual-source
 `cargo test --locked -p trollm-core --test adaptive_example`, core control and

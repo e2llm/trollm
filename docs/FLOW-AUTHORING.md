@@ -167,7 +167,7 @@ not independent proof that the model selected the right input amounts.
 
 ## Human review of LLM-authored packages
 
-The [flow review companion](flow-review/README.md) is the approved human review
+The [flow review companion](flow-review/README.md) is the human review
 interface. Its [implementation plan](flow-review/IMPLEMENTATION.md) records
 delivery status. Source authoring remains with the LLM: humans inspect the
 procedure, comment on relevant phases or steps, and return exported Markdown

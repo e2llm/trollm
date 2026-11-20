@@ -1,6 +1,6 @@
 # Prepare models during an explicitly started run
 
-Approved on 2026-10-31. The Android bridge prepares up to two task-referenced
+The Android bridge prepares up to two task-referenced
 model slots after constructing or restoring the executor for an explicit Start
 or Resume. The coder is scheduled first when present. Preparation can overlap
 the other slot's preparation and foreground model/tool work; inference remains

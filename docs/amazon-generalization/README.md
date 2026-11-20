@@ -1,16 +1,15 @@
 # Generalizing the Amazon demonstrator
 
 These design and implementation records began with flow105 / `0.1.0-rc.8` /
-Android code 43 on 2026-10-25. The comparison baseline was flow104 / Android
-code 42 at `239e7e6`, which lives in private development history, not the curated
-GitHub history. See [the historical checkpoint](IMPLEMENTATION.md#historical-implementation-checkpoint).
+Android code 43 on 2026-10-25, compared with the earlier flow104 / Android code 42
+procedure. See [the historical checkpoint](IMPLEMENTATION.md#historical-implementation-checkpoint).
 Current release identity and APK downloads are in [versioning](../VERSIONING.md)
 and [Android installation](../INSTALL-ANDROID.md). The later
 [v342 phone examples](../../examples/run-342/README.md) retain their own flow,
 APK and model identities; they do not establish general workflow reliability.
 
-The maintainer clarified the scope: this is a **technological demonstrator** of
-trollm executing complex authored procedures, not a complete shopping product.
+This is a **technological demonstrator** of trollm executing complex authored
+procedures, not a complete shopping product.
 Assume the input is already prepared usefully for the first step. Input forms,
 general natural-language request normalization and consumer onboarding are out
 of scope. The same mechanisms should support other procedures such as ticket
@@ -63,18 +62,16 @@ not remove model calls or prefill. The plan explicitly measures executed calls,
 input tokens, model phases, tool work and observer/storage overhead. It retains
 fresh observation and uncertain-write boundaries even when they cost calls.
 
-## Reading and implementation order
+## Reading order
 
 1. [DESIGN.md](DESIGN.md): procedure, data handoffs, implemented capability
    changes, existing limitations and safe stopping behavior.
 2. [PERFORMANCE.md](PERFORMANCE.md): verified size/timing instrumentation,
    repeated scans, measurement boundaries and implemented bounded live observation.
-3. [IMPLEMENTATION.md](IMPLEMENTATION.md): bounded work packages, dependency
-   order, checks, effort ranges and completion conditions.
+3. [IMPLEMENTATION.md](IMPLEMENTATION.md): implemented capabilities, regression
+   coverage, resource limits and the scope of historical checks.
 
-Delivery was staged through a host composition slice, generic capabilities and
-the Amazon package. Generic source is synchronized to main separately; shopping
-procedure stays in its development branch. Host unit/integration, lint, schema/bundle and portable checks pass;
-CI/native APK validation is the remaining delivery gate. The phone test owner performs later physical
-acceptance. Long CI jobs run without polling loops. Flow104 remains pinned in
-history for comparison.
+Use [versioning](../VERSIONING.md) and the linked release records for current
+APK delivery and validation. The published [v342 examples](../../examples/run-342/README.md)
+describe their exact historical flow, models and APK; they do not establish
+acceptance of other builds or inputs.

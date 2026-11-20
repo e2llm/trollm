@@ -53,12 +53,12 @@ manifest paths. These are different trust boundaries.
 | 4 | **Egress allowlist enforcement** | Network security config + gateway-level host allowlist from enterprise policy, not just plan. |
 | 5 | **RBAC on flow installation** | Enterprise decides who may install/run which plans; device-local policy file, signed. |
 | 6 | **Airgap update channel** | Signed bundles via USB/ADB/MDM side-load; version pinning + rollback. |
-| 7 | **SBOM + dependency policy** | cargo-sbom/cargo-audit in CI; Gradle equivalent; the dependency allowlist in ARCHITECTURE-ANDROID.md §13 exists partly for this. |
+| 7 | **SBOM + dependency policy** | Dependency inventories and vulnerability checks for Rust and Gradle inputs; see [contribution checks](../CONTRIBUTING.md) and [third-party notices](../THIRD_PARTY_NOTICES.md). |
 | 8 | **Secrets beyond bearer tokens** | HSM/Keystore-attested keys; rotation; per-run credential scoping. |
 | 9 | **PII/data-classification hooks in `shape` policies** | Strip/redact classes of fields before they reach model context; policy-driven. |
-| 10 | **Multi-device audit correlation** | When dora/Zenoh multi-device lands: correlated run ids across devices, central (on-prem) log aggregation. |
+| 10 | **Multi-device audit correlation** | Any future multi-device execution needs correlated run IDs across devices and deployment-owned log aggregation. |
 
-## Explicit non-goals for v1 (documented so nobody "helpfully" adds them)
+## Explicit non-goals for v1
 
 - No cloud sync, no analytics, no crash-reporting SDKs.
 - No remote flow execution or remote model calls.

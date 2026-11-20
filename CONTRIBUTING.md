@@ -48,11 +48,11 @@ identity. GitHub's contributor graph counts these curated publications. Original
 development authorship and community contribution discussions remain separate
 records; each snapshot's `Source-Commit` trailer identifies its source revision.
 
-On 2026-11-19, the automated mirror's author and committer metadata was corrected
-on public `main` after its former email address was associated with an unrelated
-GitHub account. Source contents, provenance trailers and published release tags
-and assets were preserved. If your clone predates this correction, preserve local
-work, fetch the updated `main` and base subsequent changes on its new history.
+Source attribution metadata was updated on 2026-11-20. Source files and uploaded
+release assets are unchanged; Git commit and tag identities changed. Existing
+clones should preserve local work and base new changes on the updated `main`.
+See the [source metadata update](docs/VERSIONING.md#source-metadata-update-2026-11-20)
+for instructions to refresh existing release tags.
 
 ## Start with the current scope
 

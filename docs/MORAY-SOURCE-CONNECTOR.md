@@ -316,7 +316,7 @@ is not a runnable or supported collection profile. RPA's measured validUntil is
 retrospective coverage and cannot supply forward native mapping validity.
 
 
-The selected provider now composes the literal RPA72 source contract in native
+The selected provider composes the source contract in native
 code: exact ready/guard v2 association, admitted item and original opaque native
 context, original cutoff evidence, oldest acquisition/error arithmetic, final
 arguments and the installed result-artifact destination. The task-level
@@ -382,9 +382,8 @@ fields, and checks only an explicitly supplied error ceiling. Controlled error
 cases and a real linked host read exercise that boundary without assuming host
 synchronization. These checks are not NDK/device qualification or an installed
 final-send clock implementation. The reader supplies no timestamp, forward lease,
-clock-rate bound, authority, or Android suspend proof. The qualified RPA72 host
-installer remains attributed to its original source; this acquired native reader
-is a separate explicit source pin.
+clock-rate bound, authority, or Android suspend proof. The pinned reader's
+component checks do not qualify a host installer or Android deployment.
 
 
 The executor's after_retained_intent hook now precedes selected dispatch. The
@@ -409,7 +408,7 @@ authority cutoffs. Empty or already-complete selections can have no action bindi
 any attempted effect then refuses. These constructor/source cases do not establish
 restoration, owned admission or an executed empty workload.
 
-The private JavaScript wrapper now recognizes the explicit selected-v2 prepare
+The selected-call JavaScript adapter recognizes the explicit selected-v2 prepare
 shape. It checks the inner opaque caller-context bytes against the outer original
 native bytes without parsing native u64 values, preserves the separate association
 bytes/hash and refuses missing selected input instead of using the legacy one-item
