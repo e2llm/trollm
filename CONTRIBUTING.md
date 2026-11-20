@@ -42,6 +42,12 @@ Maintainers must first integrate it into the source tree or its export policy.
 Contributors should branch from GitHub `main`; they do not need to reproduce the
 private delivery setup or work with the other repository's history.
 
+New snapshot commits are published on behalf of maintainer
+[soko246](https://github.com/soko246), using that account's GitHub-provided commit
+identity. GitHub's contributor graph counts these curated publications. Original
+development authorship and community contribution discussions remain separate
+records; each snapshot's `Source-Commit` trailer identifies its source revision.
+
 On 2026-11-19, the automated mirror's author and committer metadata was corrected
 on public `main` after its former email address was associated with an unrelated
 GitHub account. Source contents, provenance trailers and published release tags
