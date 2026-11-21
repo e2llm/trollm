@@ -1,5 +1,7 @@
 # trollm flow review
 
+![A flow graph with the selected step's instructions open in the inspector](../../docs/screenshots/flow-review.png)
+
 A self-hostable browser companion for reviewing LLM-authored flow packages.
 Open a package, read its purpose and business phases, inspect the graph and
 instructions, comment, and export feedback for the authoring LLM. Load a revised
@@ -21,15 +23,8 @@ models, Android SDK, MCP accounts or LLM API key.
 
 ## Get the public image
 
-The **Linux/amd64** image can be pulled without a registry login.
-[GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
-
-```sh
-docker pull --platform linux/amd64 \
-  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
-```
-
-Then [start the viewer with Docker](deploy/README.md#start-the-viewer-with-docker).
+The [Docker quick start](deploy/README.md#start-the-viewer-with-docker) pulls
+and runs the public **Linux/amd64** image without a registry login.
 Open `http://127.0.0.1:8080` on that host and choose **Open files / tar** to load
 an uncompressed flow bundle or **Open folder** to load its source directory.
 To browse mounted packages, use the
@@ -38,11 +33,8 @@ image store and package directory.
 
 ## Build locally with Podman
 
-Earlier Podman releases do not honor the pod's memory-backed transient volume.
-The launcher and smoke reject them before starting a pod. `--print` remains
-available without a Podman installation.
-
-To build locally, run from the repository root:
+Running the pod requires Podman 5.0 or newer for its memory-backed transient
+volume. Run the build from the repository root.
 
 ```sh
 podman build --format docker --ignorefile apps/flow-review/.containerignore \
@@ -178,7 +170,9 @@ defines the bounded development-dependency allowance and expiry.
 The container uses `trollm-flow-review --healthcheck` to probe its own endpoint.
 This command succeeds only for HTTP 200 with `status: ok`, has a three-second
 deadline and bounded response size, and does not initialize imports or models.
-The production image uses distroless Debian 13 `base-nossl` plus the required libgcc runtime and its package/license metadata. Rustls owns TLS; OpenSSL and its compression dependencies are not part of this server runtime. The build checks the ELF dependency set, and the final image still passes the required vulnerability/secret scan. No shell or curl is required.
+The image uses distroless Debian 13 `base-nossl` with libgcc and its
+package/license metadata. The server uses Rustls for TLS and runs its health
+probe without a shell or curl.
 
 ## Code map
 
@@ -188,10 +182,9 @@ The production image uses distroless Debian 13 `base-nossl` plus the required li
 - `Containerfile`: multi-stage build using the repository root as its context.
 - `flow-review.schema.json`: optional authored presentation contract.
 
-The server is a Rust workspace member. Android and the executor do not depend on
-it. Runtime changes belong in their existing modules; this application adapts
-their contracts for review. Private delivery CI is omitted from curated source;
-the portable checks and deployment files above remain available.
+The server is a Rust workspace member that reuses the runtime's plan and
+registry contracts for inspection. It runs independently of the Android app
+and the executor.
 
 Task details retain `toolArguments.modelFields`, typed binding paths and artifact
 `view` masks when inspecting current packages. The generation panel explains that

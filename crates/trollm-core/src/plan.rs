@@ -295,6 +295,27 @@ pub struct FlowRef {
     pub inputs: BTreeMap<String, FromBinding>,
 }
 
+/// Between-child invocation. Without a predicate, runs after every item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForeachBetween {
+    pub flow_ref: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, FromBinding>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_option"
+    )]
+    pub when: Option<BetweenWhen>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BetweenWhen {
+    MoreItems,
+}
+
 /// foreach output aggregation spec (§4.6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -399,7 +420,7 @@ pub struct Node {
     #[serde(default)]
     pub body: Option<FlowRef>,
     #[serde(default)]
-    pub between: Option<FlowRef>,
+    pub between: Option<ForeachBetween>,
     #[serde(default)]
     pub on_empty: Option<Transition>,
     #[serde(default)]

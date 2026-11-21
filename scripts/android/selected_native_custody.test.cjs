@@ -109,7 +109,16 @@ for(const mode of ['complete','root-alias','selected-originals','selected-incomp
   }finally{await fs.rm(directory,{recursive:true,force:true});}
  });
 }
-for(const mode of ['valid','missing-ack','foreign-context','foreign-selection','foreign-case','dirty-evidence','invalid-ack','early-missing-request','volume32','volume435','volume435-missing-ack','volume-context-overflow'])test(`native outcome originals ${mode} never synthesize delivery or ACK`,async(t)=>{
+function declaredMissingStat(logical,overrides={}){
+ const privateStderr=Buffer.from(`stat: '${logical}': No such file or directory\n`);
+ return Object.assign(Error('ADB_COMMAND_FAILED'),{code:'ADB_COMMAND_FAILED',childExitCode:1,childSignal:null,
+  privateStdout:Buffer.alloc(0),privateStderr,stdoutBytes:0,stderrBytes:privateStderr.length,
+  timedOut:false,outputTruncated:false,...overrides});
+}
+
+for(const mode of ['valid','missing-ack','confirmed-missing-ack','foreign-context','foreign-selection','foreign-case','dirty-evidence','invalid-ack','early-missing-request',
+ 'native05-abandoned-context','native05-budget-exhaustion','native05-transport-refusal','native05-foreign-enoent','native05-truncated-enoent',
+ 'native05-path-escape','native05-orphan-ack','native05-committed-missing','native05-acknowledged-missing','volume32','volume435','volume435-missing-ack','volume-context-overflow'])test(`native outcome originals ${mode} never synthesize delivery or ACK`,async(t)=>{
  const f=fixture(),directory=await fs.mkdtemp(path.join(os.tmpdir(),'native-outcome-custody-'));
  const source=JSON.parse(f.binding.sourceAssociationJson),selectionRef={tenantId:'declared',artifactId:'art_selection',sha256:'a'.repeat(64)};
  const owner={registrationId:'declared',tenantId:'declared',subject:'declared',workerId:'declared',runId:'declared',epoch:1};
@@ -140,7 +149,26 @@ for(const mode of ['valid','missing-ack','foreign-context','foreign-selection','
  const requestPath=`${f.root}/selected-report/${native.sha256}.request.json`,ackPath=`${f.root}/selected-report/${native.sha256}.ack.json`;
  const requestBytes=Buffer.from(JSON.stringify(request));
  if(mode!=='early-missing-request')f.files.set(requestPath,requestBytes);
- if(mode!=='missing-ack')f.files.set(ackPath,Buffer.from(JSON.stringify({recorded:mode!=='invalid-ack',source:'native-adapter-reported-not-independent-settlement'})));
+ if(!['missing-ack','confirmed-missing-ack'].includes(mode))f.files.set(ackPath,Buffer.from(JSON.stringify({recorded:mode!=='invalid-ack',source:'native-adapter-reported-not-independent-settlement'})));
+ const native05=mode.startsWith('native05-'),runId=f.binding.nativeRunId;
+ const secondJson=JSON.stringify({runId,callContext:{epoch:'original',attempt:2,call:1}});
+ const second={json:secondJson,sha256:sha(Buffer.from(secondJson)),callContext:{epoch:'original',attempt:'2',call:1}};
+ const secondRequest=`${f.root}/selected-report/${second.sha256}.request.json`,secondAck=`${f.root}/selected-report/${second.sha256}.ack.json`;
+ if(native05){
+  const rows=[
+   {type:'tool_call_result'},
+   {type:'tool_call_outcome_acknowledged',contextSha256:native.sha256},
+   {type:'tool_call_prepared',nativeContext:second},
+  ];
+  if(mode==='native05-committed-missing')rows.push({type:'artifact_written',
+   path:base+'/'+secondRequest.slice('files/trollm/'.length),sha256:'a'.repeat(64),bytes:17});
+  if(mode==='native05-acknowledged-missing')rows.push({type:'tool_call_outcome_acknowledged',contextSha256:second.sha256});
+  rows.push({type:'run_ended',outcome:'failed'});
+  f.journal=Buffer.concat([f.journal,Buffer.from(rows.map((row,index)=>JSON.stringify({runId,seq:index+3,...row})).join('\n')+'\n')]);
+  f.files.set(`${f.root}/events.jsonl`,f.journal);
+  if(mode==='native05-orphan-ack')f.files.set(secondAck,f.files.get(ackPath));
+ }
+ const padding=new Set();
  const volume=mode.startsWith('volume'),contextCount=mode==='volume-context-overflow'?129:mode==='volume32'?32:volume?128:1;
  if(volume){
   // DECLARED source/transport volume, not new native/calibration execution.
@@ -174,11 +202,51 @@ for(const mode of ['valid','missing-ack','foreign-context','foreign-selection','
   const commands=[];
   const adb=async(args)=>{commands.push(args);if(['version','features'].includes(args[0]))return declaredProbe(args);
    const name=args.at(-1);if(args.includes('ls'))return volume?Buffer.from([...f.files.keys()].filter(n=>n.startsWith(name+'/')&&!n.slice(name.length+1).includes('/')).map(n=>n.slice(name.length+1)).join('\n')):Buffer.alloc(0);
-   if(args.includes('readlink'))return Buffer.from(name==='shared_prefs/moray-source-device.xml'?'/data/user/0/com.trollm.app/'+name:name==='files/trollm'?base:base+'/'+name.slice('files/trollm/'.length));
+   if(args.includes('readlink'))return Buffer.from(mode==='native05-path-escape'&&name===path.posix.dirname(secondRequest)?'/outside/report':
+    name==='shared_prefs/moray-source-device.xml'?'/data/user/0/com.trollm.app/'+name:name==='files/trollm'?base:base+'/'+name.slice('files/trollm/'.length));
+   if(args.includes('stat')){
+    if(f.files.has(name))return Buffer.from('regular file\n');
+    if(mode==='confirmed-missing-ack'&&name===ackPath||native05&&[secondRequest,secondAck].includes(name)){
+     if(mode==='native05-transport-refusal')throw declaredMissingStat(name,{childExitCode:255});
+     if(mode==='native05-foreign-enoent')throw declaredMissingStat(name+'.different');
+     if(mode==='native05-truncated-enoent')throw declaredMissingStat(name,{outputTruncated:true});
+     throw declaredMissingStat(name);
+    }
+   }
    if(volume&&args.includes('tar')){const names=args.slice(args.indexOf('tar')+3);return Buffer.concat([...names.map(n=>{if(!f.files.has(n))throw Object.assign(Error('declared missing original'),{code:'ADB_COMMAND_FAILED'});return declaredTar(n,f.files.get(n)).subarray(0,-1024);}),Buffer.alloc(1024)]);}
    if(!f.files.has(name))throw Object.assign(Error('declared missing original'),{code:'ADB_COMMAND_FAILED'});
+   if(padding.has(name))return declaredTar(name,f.files.get(name));
    return frame(args,f.files.get(name));};
-  const index=await retainOriginalCustody({adb,binding:f.binding,snapshot:f.snapshot,journal:f.journal,resultDirectory:directory,signal:new AbortController().signal,check:()=>{}});
+  const capture=resultDirectory=>retainOriginalCustody({adb,binding:f.binding,snapshot:f.snapshot,journal:f.journal,
+   resultDirectory,signal:new AbortController().signal,check:()=>{}});
+  if(mode==='native05-budget-exhaustion'){
+   const beforePadding=path.join(directory,'before-padding');
+   await fs.mkdir(beforePadding);
+   const original=await capture(beforePadding);
+   assert.equal(original.complete,true);
+   const retainedBytes=[...original.members,...original.diagnostics].filter(row=>![secondRequest,secondAck].includes(row.logicalPath))
+    .reduce((sum,row)=>sum+row.sizeBytes,0);
+   const rows=f.journal.toString().trimEnd().split('\n').map(JSON.parse),terminal=rows.pop();
+   const chunk=Buffer.alloc(32*1024*1024,1),limit=4*chunk.length,chunkSha=sha(chunk);
+   for(let n=0;n<4;n++){
+    const logical=`${f.root}/artifacts/declared-padding-${n}.bin`;
+    padding.add(logical);f.files.set(logical,chunk);
+    rows.push({runId,seq:rows.length+1,type:'artifact_written',path:base+'/'+logical.slice('files/trollm/'.length),sha256:chunkSha,bytes:chunk.length});
+   }
+   rows.push({...terminal,seq:rows.length+1});
+   const encode=()=>Buffer.from(rows.map(row=>JSON.stringify(row)).join('\n')+'\n');
+   const tentative=encode(),lastPadding=rows.at(-2);
+   const remaining=limit-retainedBytes-(tentative.length-f.journal.length)-3*chunk.length;
+   assert(remaining>0&&remaining<chunk.length);
+   const tail=chunk.subarray(0,remaining);
+   lastPadding.bytes=tail.length;lastPadding.sha256=sha(tail);
+   f.files.set([...padding].at(-1),tail);
+   const finalJournal=encode();
+   assert.equal(finalJournal.length,tentative.length);
+   f.journal=finalJournal;f.files.set(`${f.root}/events.jsonl`,f.journal);
+   commands.length=0;
+  }
+  const index=await capture(directory);
   if(volume){
    assert.equal(index.complete,['volume32','volume435'].includes(mode));
    assert.equal(index.members.filter(m=>m.logicalPath.includes('/clock-calibration-')).length,mode==='volume32'?3914:3915);
@@ -196,10 +264,54 @@ for(const mode of ['valid','missing-ack','foreign-context','foreign-selection','
    assert(commands.filter(args=>args.includes('tar')&&args.length>9).length>=15,'calibration originals use bounded batches');
    return;
   }
-  assert.equal(index.complete,mode==='valid');assert.equal(index.nativeOutcomes.length,1);
+  if(native05){
+   const [original,abandoned]=index.nativeOutcomes;
+   assert.equal(index.nativeOutcomes.length,2);
+   assert.equal(original.request,'retained-associated');assert.equal(original.ack,'retained-native-response');
+   assert.equal(original.journalOutcomeAcknowledged,true);
+   assert.equal(abandoned.journalOutcomeAcknowledged,mode==='native05-acknowledged-missing');
+   assert.equal(abandoned.delivery,'not-established');assert.equal(original.delivery,'not-established');
+   assert.equal(index.complete,mode==='native05-abandoned-context',JSON.stringify(index.missing));
+   assert(!index.members.some(member=>member.logicalPath===secondRequest));
+   assert(!commands.some(args=>args.includes('am')||args.includes('start')||args.includes('POST')));
+   if(mode==='native05-abandoned-context'){
+    assert.equal(abandoned.request,'confirmed-absent');assert.equal(abandoned.ack,'confirmed-absent');
+    assert(!index.members.some(member=>member.logicalPath===secondAck));
+    assert.deepEqual(index.missing,[]);
+    for(const logical of [secondRequest,secondAck]){
+     const originalError=index.diagnostics.find(member=>member.logicalPath===logical&&member.stream==='stderr');
+     assert(originalError);
+     const saved=await fs.readFile(path.join(directory,'original-custody',originalError.file));
+     assert(saved.equals(declaredMissingStat(logical).privateStderr));
+    }
+   }else if(mode==='native05-budget-exhaustion'){
+    assert.equal(abandoned.request,'unavailable');assert.equal(abandoned.ack,'unavailable');
+    assert.deepEqual(index.missing,[{logicalPath:secondRequest,adbExitCode:1,
+     stderrBytes:declaredMissingStat(secondRequest).stderrBytes,code:'NATIVE_CUSTODY_LIMIT'}]);
+    assert(!index.diagnostics.some(row=>row.logicalPath===secondRequest));
+    assert.equal(index.members.filter(member=>padding.has(member.logicalPath)).length,4);
+   }else if(mode==='native05-orphan-ack'){
+    assert.equal(abandoned.request,'confirmed-absent');assert.equal(abandoned.ack,'retained-unverified');
+    assert(index.members.some(member=>member.logicalPath===secondAck));
+    assert(index.missing.some(member=>member.logicalPath===secondAck&&member.code==='NATIVE_CUSTODY_OUTCOME_REQUEST_UNAVAILABLE'));
+   }else{
+    assert.equal(abandoned.request,'unavailable');
+    const failure=index.missing.find(member=>member.logicalPath===secondRequest);
+    assert(failure);
+    if(mode==='native05-committed-missing')assert.equal(failure.expectedSha256,'a'.repeat(64));
+    if(mode==='native05-acknowledged-missing')assert(!commands.some(args=>args.includes('stat')&&args.at(-1)===secondRequest));
+    if(mode==='native05-path-escape')assert.equal(failure.code,'NATIVE_CUSTODY_PATH_ESCAPE');
+   }
+   return;
+  }
+  assert.equal(index.complete,['valid','confirmed-missing-ack'].includes(mode),JSON.stringify(index.missing));assert.equal(index.nativeOutcomes.length,1);
   const row=index.nativeOutcomes[0];assert.equal(row.delivery,'not-established');assert.equal(row.journalOutcomeAcknowledged,false);
   if(mode==='valid')assert.equal(row.ack,'retained-native-response');
   if(mode==='missing-ack')assert.equal(row.ack,'absent-or-unavailable');
+  if(mode==='confirmed-missing-ack'){
+   assert.equal(row.request,'retained-associated');assert.equal(row.ack,'confirmed-absent');
+   assert(!index.members.some(member=>member.logicalPath===ackPath));
+  }
   if(mode==='early-missing-request')assert.equal(row.request,'unavailable');
   else{
    const member=index.members.find(member=>member.logicalPath===requestPath);assert(member);

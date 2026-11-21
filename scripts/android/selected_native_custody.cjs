@@ -21,11 +21,14 @@ async function writeOriginal(directory,name,bytes){
   try{await file.writeFile(bytes);await file.sync();}finally{await file.close();}
 }
 async function saveReadDiagnostics(directory,index,logical,error,budget){
+  let stderrRetained=false;
   for(const [stream,raw] of [['stdout',error.custodyRaw],['stderr',error.custodyStderr]]){
     if(!raw||budget.used+raw.length>134217728||index.diagnostics.length>=512)continue;
     const file=`diagnostic-${index.diagnostics.length}.raw`;await writeOriginal(directory,file,raw);budget.used+=raw.length;
     index.diagnostics.push({logicalPath:logical,stream,file,sha256:sha(raw),sizeBytes:raw.length,meaning:'failed-read-transport-not-file-original'});
+    if(stream==='stderr')stderrRetained=true;
   }
+  return stderrRetained;
 }
 // Structural decoding only, never remote status, app identity or report proof.
 function inspectOriginalTar(raw,logical,{maxBytes}){
@@ -137,6 +140,27 @@ async function readAppOriginal(adb,logical,{maxBytes,signal}){
   try{return inspectOriginalTar(raw,logical,{maxBytes});}
   catch(error){error.custodyRaw=raw;throw error;}
 }
+// Only the exact, complete remote stat response can establish absence.
+async function statOutcomeMember(adb,logical,signal){
+  let raw;
+  try{
+    raw=await adb(['shell','-T','run-as','com.trollm.app','stat','-c','%F',logical],
+      {maxBytes:4096,signal,captureFailureOutput:true});
+  }catch(error){
+    if(error.privateStdout?.length)error.custodyRaw=error.privateStdout;
+    error.custodyStderr=error.privateStderr;
+    const absent=Buffer.from(`stat: '${logical}': No such file or directory\n`);
+    if(error.code==='ADB_COMMAND_FAILED'&&error.childExitCode===1&&error.childSignal===null&&
+      error.timedOut===false&&error.outputTruncated===false&&error.stdoutBytes===0&&
+      error.privateStdout?.length===0&&error.stderrBytes===absent.length&&error.privateStderr?.equals(absent))return error;
+    throw error;
+  }
+  if(!['regular file','regular empty file'].includes(raw.toString('utf8').trimEnd())){
+    throw Object.assign(Error('NATIVE_CUSTODY_OUTCOME_TYPE_INVALID'),{
+      code:'NATIVE_CUSTODY_OUTCOME_TYPE_INVALID',custodyRaw:raw});
+  }
+  return null;
+}
 async function requireShellV2(adb,signal,directory,index,budget,check){
   index.adbProbes=[];
   const probe=async(name)=>{
@@ -233,12 +257,26 @@ async function retainOriginalCustody({adb,binding,snapshot,journal,resultDirecto
   };
   const missing=(logical,error,expected)=>index.missing.push({logicalPath:logical,...adbFailureStatus(error),...(expected?{...(expected.sha256!==undefined?{expectedSha256:expected.sha256}:{}),...(expected.sizeBytes!==undefined?{expectedSizeBytes:String(expected.sizeBytes)}:{})}:{}),code:
     typeof error?.code==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)?error.code:'NATIVE_CUSTODY_READ_FAILED'});
+  const absentOutcome=Symbol('confirmed absent outcome original');
   const read=async(logical,expected)=>{
     try{
       check();
       if(expected?.sizeBytes!==undefined&&(!/^[0-9]+$/.test(String(expected.sizeBytes))||BigInt(expected.sizeBytes)>33554432n))fail('NATIVE_CUSTODY_LIMIT');
-      const canonical=(await adb(['exec-out','run-as','com.trollm.app','readlink','-f',logical],{maxBytes:4096,signal})).toString('utf8').trim();
       const expectedPath=logical==='shared_prefs/moray-source-device.xml'?canonicalRoot.replace(/\/files\/trollm$/,'/'+logical):canonicalRoot+'/'+logical.slice('files/trollm/'.length);
+      if(expected?.optionalOutcome){
+        // The report directory itself may never have been created. Resolve it
+        // as the final component before considering a missing child.
+        const parent=(await adb(['exec-out','run-as','com.trollm.app','readlink','-f',path.posix.dirname(logical)],
+          {maxBytes:4096,signal})).toString('utf8').trim();
+        if(parent!==path.posix.dirname(expectedPath))fail('NATIVE_CUSTODY_PATH_ESCAPE');
+        const absence=await statOutcomeMember(adb,logical,signal);check();
+        if(absence){
+          if(await saveReadDiagnostics(directory,index,logical,absence,budget))return absentOutcome;
+          missing(logical,{childExitCode:absence.childExitCode,stderrBytes:absence.stderrBytes,code:'NATIVE_CUSTODY_LIMIT'});
+          return null;
+        }
+      }
+      const canonical=(await adb(['exec-out','run-as','com.trollm.app','readlink','-f',logical],{maxBytes:4096,signal})).toString('utf8').trim();
       if(canonical!==expectedPath)fail('NATIVE_CUSTODY_PATH_ESCAPE');
       const bytes=await readAppOriginal(adb,logical,{maxBytes:expected?.maxBytes??33554432,signal});check();
       // Keep actual bytes even on identity mismatch; never repair them.
@@ -358,7 +396,19 @@ async function retainOriginalCustody({adb,binding,snapshot,journal,resultDirecto
       const row={contextSha256,request:'unavailable',ack:'unavailable',delivery:'not-established',journalOutcomeAcknowledged:outcomeAcknowledged.has(contextSha256),
         meaning:'native-request-and-response-originals-not-independent-settlement'};
       index.nativeOutcomes.push(row);
-      const raw=await read(requestPath,{maxBytes:262144});
+      const readOutcome=(logical,maxBytes)=>read(logical,{maxBytes,
+        optionalOutcome:!row.journalOutcomeAcknowledged&&!committed.has(canonicalRoot+'/'+logical.slice('files/trollm/'.length))});
+      const raw=await readOutcome(requestPath,262144);
+      if(raw===absentOutcome){
+        row.request='confirmed-absent';
+        const ack=await readOutcome(ackPath,65536);
+        if(ack===absentOutcome)row.ack='confirmed-absent';
+        else if(ack){
+          row.ack='retained-unverified';
+          missing(ackPath,{code:'NATIVE_CUSTODY_OUTCOME_REQUEST_UNAVAILABLE'});
+        }
+        continue;
+      }
       if(!raw)continue;
       row.request='retained-unverified';
       let stagePath=requestPath;
@@ -386,7 +436,8 @@ async function retainOriginalCustody({adb,binding,snapshot,journal,resultDirecto
           fail('NATIVE_CUSTODY_OUTCOME_EVIDENCE_INVALID');
         row.request='retained-associated';
         stagePath=ackPath;
-        const ack=await read(ackPath,{maxBytes:65536});
+        const ack=await readOutcome(ackPath,65536);
+        if(ack===absentOutcome){row.ack='confirmed-absent';continue;}
         if(!ack){row.ack='absent-or-unavailable';continue;}
         row.ack='retained-unverified';
         const value=identityProjection(ack.toString('utf8'));

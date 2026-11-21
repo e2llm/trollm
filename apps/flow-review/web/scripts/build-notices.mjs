@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Include the complete production lock tree, conservatively including type packages. */
-export function collectNotices(root) {
+export function collectNotices(root, title = "trollm flow review", extraPaths = []) {
   const lock = JSON.parse(
     readFileSync(join(root, "package-lock.json"), "utf8"),
   );
@@ -11,7 +11,7 @@ export function collectNotices(root) {
   for (const [path, entry] of Object.entries(lock.packages).sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
-    if (!path || entry.dev) continue;
+    if (!path || (entry.dev && !extraPaths.includes(path))) continue;
     if (!path.startsWith("node_modules/") || path.split("/").includes(".."))
       throw new Error(`Unsafe dependency path: ${path}`);
     const directory = join(root, path),
@@ -40,7 +40,7 @@ export function collectNotices(root) {
       `${metadata.name}@${metadata.version}\nDeclared license: ${typeof metadata.license === "string" ? metadata.license : "see upstream text"}\n\n${texts.join("\n\n")}`,
     );
   }
-  return `trollm flow review — browser dependency notices\n\nExact installed production dependency tree from package-lock.json.\nLicense and attribution texts are reproduced from upstream package files.\n\n${notices.join("\n\n" + "=".repeat(78) + "\n\n")}\n`;
+  return `${title} — browser dependency notices\n\nExact installed production dependencies and explicitly included build-runtime helpers from package-lock.json.\nLicense and attribution texts are reproduced from upstream package files.\n\n${notices.join("\n\n" + "=".repeat(78) + "\n\n")}\n`;
 }
 if (
   process.argv[1] &&

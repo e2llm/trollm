@@ -174,6 +174,20 @@
         }
       }
     },
+    "foreachBetween": {
+      "description": "Omit when to run after every item. moreItems runs only when the immutable snapshot has another item.",
+      "type": "object",
+      "required": ["flowRef"],
+      "additionalProperties": false,
+      "properties": {
+        "flowRef": { "type": "string", "minLength": 1 },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/fromBinding" }
+        },
+        "when": { "enum": ["moreItems"] }
+      }
+    },
     "onError": {
       "description": "§4.5. Default if absent: retry 0, then {status: failed, reason: <error-class>}.",
       "type": "object",
@@ -289,7 +303,7 @@
             "maxItems": { "type": "integer", "minimum": 1 },
             "onLimit": { "$ref": "#/$defs/transition" },
             "body": { "$ref": "#/$defs/flowRef" },
-            "between": { "$ref": "#/$defs/flowRef" },
+            "between": { "$ref": "#/$defs/foreachBetween" },
             "outputs": {
               "type": "object",
               "minProperties": 1,

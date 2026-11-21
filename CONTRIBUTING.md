@@ -2,10 +2,8 @@
 
 Use [GitHub Issues](https://github.com/e2llm/trollm/issues) for community bug
 reports, questions and proposed improvements, and open pull requests against
-GitHub `main`. Contributors do not need access to the development repository.
-If you already work in that repository, use its existing issue/MR workflow.
-For vulnerabilities, follow [SECURITY.md](SECURITY.md); do not post sensitive
-details in Issues or pull requests.
+GitHub `main`. Use the private reporting channel for vulnerabilities.
+[Security policy](SECURITY.md)
 
 Agent-assisted contributions are welcome. Start from [AGENTS.md](AGENTS.md),
 review the generated changes and run the relevant checks. The contributor is
@@ -28,31 +26,14 @@ responsible for the patch and its validation regardless of the tools used.
   checks actually run and their limits. Include tests for changed behavior where
   useful; documentation-only changes do not need unrelated builds.
 
-### How a GitHub pull request reaches the source tree
+### After review
 
-GitHub contains a curated source tree with separate history from the development
-repository. Maintainers review a GitHub pull request, integrate accepted changes
-into the development tree while retaining contributor attribution, run its
-checks, and publish the resulting curated snapshot. The maintainer links that
-GitHub commit back to the pull request before closing it as integrated. A public
-pull request may therefore be closed without GitHub marking it as merged.
-
-Do not merge a GitHub-only change and assume it will survive the next export.
-Maintainers must first integrate it into the source tree or its export policy.
-Contributors should branch from GitHub `main`; they do not need to reproduce the
-private delivery setup or work with the other repository's history.
-
-New snapshot commits are published on behalf of maintainer
-[soko246](https://github.com/soko246), using that account's GitHub-provided commit
-identity. GitHub's contributor graph counts these curated publications. Original
-development authorship and community contribution discussions remain separate
-records; each snapshot's `Source-Commit` trailer identifies its source revision.
-
-Source attribution metadata was updated on 2026-11-20. Source files and uploaded
-release assets are unchanged; Git commit and tag identities changed. Existing
-clones should preserve local work and base new changes on the updated `main`.
-See the [source metadata update](docs/VERSIONING.md#source-metadata-update-2026-11-20)
-for instructions to refresh existing release tags.
+Maintainers publish accepted contributions in a curated snapshot and link
+the published commit before closing the pull request. The snapshot's
+`Source-Commit` trailer identifies its source revision.
+If your clone predates the source metadata update, fetch the current `main`
+before starting a branch and refresh the affected release tags as needed.
+[Refreshing release tags](docs/VERSIONING.md#source-metadata-update-2026-11-20)
 
 ## Start with the current scope
 
@@ -102,6 +83,8 @@ of contributions; label synthetic examples as synthetic.
 - `crates/trollm-uniffi`: Android bridge and bundle handling.
 - `apps/android`: Kotlin/Compose application and JVM tests; see its
   [development guide](apps/android/README.md).
+- `apps/desktop`: Linux host, local web interface and container packaging;
+  see its [development checks](apps/desktop/README.md#development-checks).
 - `flows`, `schemas`, `scripts`: reference inputs, contracts and portable checks.
 
 The separate [flow review companion](apps/flow-review/README.md) lives in
@@ -120,17 +103,18 @@ bound concurrency. On constrained hosts, use the existing build environment for
 Android/native compilation rather than installing SDK/NDK packages or downloading
 model weights. Run relevant regression checks once changes settle.
 
-Rust is pinned to 1.90.0 in `rust-toolchain.toml`. From the repository root:
+Use the Rust version pinned in `rust-toolchain.toml` and run these commands
+from the repository root.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --no-default-features --all-targets -- -D warnings
 cargo test --locked --workspace --no-default-features
 cargo test --locked -p trollm-uniffi --features stub
 cargo clippy --locked -p trollm-uniffi --all-targets --features stub,bindgen-cli -- -D warnings
 ```
 
-Default/stub checks need no model weights. The `stub` feature supplies
+Portable and stub checks need no model weights. The `stub` feature supplies
 deterministic responses; a bridge without `stub` or `llama` compiles but cannot
 start a model run. Native compilation is a separate, heavier check:
 

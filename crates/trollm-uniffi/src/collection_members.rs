@@ -446,18 +446,35 @@ impl CollectionMembers {
         endpoint: &str,
     ) -> Result<Self> {
         let mut members = Self::compile_matched(selection, context, endpoint)?;
+        let root_file = format!("{ROOT}.flow.yaml");
+        let between_file = format!("{BETWEEN}.flow.yaml");
+        members.files.remove("prompts/choose-continuation.md");
         for (name, bytes) in &mut members.files {
             if name.ends_with(".flow.yaml") {
                 let mut plan: Value = serde_json::from_slice(bytes)?;
                 plan["limits"]["timeoutS"] = json!(600);
+                if *name == root_file {
+                    if let Some(between) = plan
+                        .pointer_mut("/nodes/items/between")
+                        .and_then(Value::as_object_mut)
+                    {
+                        between.insert("when".into(), json!("moreItems"));
+                    }
+                } else if *name == between_file {
+                    plan["entryStep"] = json!("navigate");
+                    plan["nodes"]
+                        .as_object_mut()
+                        .context("workload between nodes missing")?
+                        .remove("choose");
+                }
                 *bytes = encode(&plan)?;
             } else if name.ends_with(".tasks.yaml") {
                 let mut registry: Value = serde_json::from_slice(bytes)?;
-                for task in registry["tasks"]
+                let tasks = registry["tasks"]
                     .as_object_mut()
-                    .context("workload tasks missing")?
-                    .values_mut()
-                {
+                    .context("workload tasks missing")?;
+                tasks.remove("choose-continuation");
+                for task in tasks.values_mut() {
                     task["generationTimeoutS"] = json!(45);
                 }
                 *bytes = encode(&registry)?;
@@ -639,9 +656,17 @@ impl CollectionMembers {
 mod controls {
     use super::*;
     #[test]
-    fn explicit_600_workload_inspects_original_subset_empty_changed_and_refuses_cap_drift() {
-        for variant in ["original", "subset", "empty", "changed"] {
-            let selection = selected(variant, 0);
+    fn explicit_600_workload_inspects_suffixes_and_refuses_routing_or_cap_drift() {
+        for (variant, prefix) in [
+            ("original", 0),
+            ("subset", 0),
+            ("empty", 0),
+            ("changed", 0),
+            ("original", 1),
+            ("original", 2),
+            ("original", 3),
+        ] {
+            let selection = selected(variant, prefix);
             let endpoint = "https://api.e2llm.dev/mcp";
             let legacy = CollectionMembers::compile_matched(
                 &selection,
@@ -689,18 +714,81 @@ mod controls {
                     }
                 }
             }
-            // A producer cannot silently lower, raise or omit the selected cap.
             let name = format!("{ROOT}.flow.yaml");
-            let mut changed: Value = serde_json::from_slice(&members.files[&name]).unwrap();
+            let root: Value = serde_json::from_slice(&members.files[&name]).unwrap();
+            let between_name = format!("{BETWEEN}.flow.yaml");
+            let registry: Value =
+                serde_json::from_slice(&members.files[&format!("{ROOT}.tasks.yaml")]).unwrap();
+            assert!(registry["tasks"].get("choose-continuation").is_none());
+            assert!(!members.files.contains_key("prompts/choose-continuation.md"));
+            let suffix_count = selection.selection.items.len() - prefix;
+            assert_eq!(inspected.expected_snapshot.len(), suffix_count);
+            if suffix_count == 0 {
+                assert!(root["nodes"].get("items").is_none());
+                assert!(!members.files.contains_key(&between_name));
+                assert!(inspected.bindings.is_empty());
+            } else {
+                assert_eq!(
+                    root["nodes"]["items"]["between"],
+                    json!({"flowRef":BETWEEN,"when":"moreItems"})
+                );
+                let between: Value = serde_json::from_slice(&members.files[&between_name]).unwrap();
+                let old: Value = serde_json::from_slice(&legacy.files[&between_name]).unwrap();
+                assert_eq!(between["entryStep"], "navigate");
+                assert!(between["nodes"].get("choose").is_none());
+                assert_eq!(between["nodes"]["navigate"], old["nodes"]["navigate"]);
+                assert_eq!(old["entryStep"], "choose");
+                let navigation = &registry["tasks"]["navigate-next"];
+                assert_eq!(
+                    navigation["toolArguments"]["e2llm.act"],
+                    json!({"fixed":{"action":"navigate"},"modelFields":[]})
+                );
+                assert_eq!(navigation["mutations"]["onUncertain"], "fail-run");
+                assert!(inspected.bindings.iter().any(|binding| {
+                    binding.node == "navigate"
+                        && binding.task_ref == "navigate-next"
+                        && binding.purpose == "navigate-next"
+                        && binding.cursor_node.as_deref() == Some("items")
+                        && binding.plan_pin.starts_with(BETWEEN)
+                }));
+
+                // Substituting the old between flow must fail exact reconstruction.
+                std::fs::write(directory.join(&between_name), &legacy.files[&between_name])
+                    .unwrap();
+                assert!(CollectionMembers::inspect_matched_600(
+                    &directory,
+                    &selection,
+                    b"controlled source context",
+                    endpoint
+                )
+                .is_err());
+                std::fs::write(directory.join(&between_name), &members.files[&between_name])
+                    .unwrap();
+            }
+
+            // A producer cannot silently change the cap or remove the predicate.
+            let mut changed = root.clone();
             changed["limits"]["timeoutS"] = json!(601);
-            std::fs::write(directory.join(name), encode(&changed).unwrap()).unwrap();
-            assert!(CollectionMembers::inspect_matched_600(
-                &directory,
-                &selection,
-                b"controlled source context",
-                endpoint
-            )
-            .is_err());
+            for changed in [
+                Some(changed),
+                (suffix_count > 0).then(|| {
+                    let mut altered = root.clone();
+                    altered["nodes"]["items"]["between"] = json!({"flowRef":BETWEEN});
+                    altered
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                std::fs::write(directory.join(&name), encode(&changed).unwrap()).unwrap();
+                assert!(CollectionMembers::inspect_matched_600(
+                    &directory,
+                    &selection,
+                    b"controlled source context",
+                    endpoint
+                )
+                .is_err());
+            }
             std::fs::remove_dir_all(directory).unwrap();
             assert_eq!(
                 legacy.files,

@@ -1,16 +1,27 @@
 # trollm: pronounced “tro-le-lem”
 
-trollm is an experimental Android app that runs workflows with small language
-models on your phone. A workflow, or **flow**, defines the steps for a task.
-Choose a flow, supply its input, and follow the run through to its report.
-Install the APK directly to try a flow without compiling Rust or llama.cpp.
-You can adapt and reuse the open-source app and runtime.
+trollm lets you try a practical task with small language models running on your
+phone. Install the Android app and pick a **flow**, a sequence of steps for a
+task. Give **Check a total** two prices and a budget. It uses the calculator
+to add the prices and compare the sum with your budget. The [Linux desktop preview](apps/desktop/README.md)
+runs flows with the same runtime. You can use the included flows, write your
+own or adapt the open-source runtime for another app.
 
 ## Run a flow on Android
 
-1. **Install the app.** On Android 13 or later, open the APK from GitHub Releases
-   and follow Android's prompts. [Download the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk) ·
-   [Installation and verification](docs/INSTALL-ANDROID.md)
+<p align="center">
+  <a href="docs/screenshots/android/01-flow-library.png"><img src="docs/screenshots/android/01-flow-library.png" alt="Flow library" width="18%"></a>
+  <a href="docs/screenshots/android/02-prepare-flow.png"><img src="docs/screenshots/android/02-prepare-flow.png" alt="Preparing a text summary" width="18%"></a>
+  <a href="docs/screenshots/android/03-run-progress.png"><img src="docs/screenshots/android/03-run-progress.png" alt="Local run in progress" width="18%"></a>
+  <a href="docs/screenshots/android/04-completed-report.png"><img src="docs/screenshots/android/04-completed-report.png" alt="Completed summary report" width="18%"></a>
+  <a href="docs/screenshots/android/05-model-preparation.png"><img src="docs/screenshots/android/05-model-preparation.png" alt="Downloaded model ready for a run" width="18%"></a>
+</p>
+
+These screenshots show a text-summary run in an earlier Android interface.
+
+1. **Install the app.** On Android 13 or later, download `app-release.apk` from
+   an Android release, open it, and follow Android's prompts.
+   [Latest release](https://github.com/e2llm/trollm/releases/latest) · [Installation and verification](docs/INSTALL-ANDROID.md)
 2. **Choose or add a flow.** Start with **Summarize text** or **Check a total**
    in the library. Both run locally after their models are downloaded. To add
    a flow, save its `.tar` file on your phone, then tap **Manage flows → Import
@@ -28,23 +39,31 @@ intended Amazon tab open in that browser, and follow the example's input format.
 The flow updates the cart and stops before checkout. The recorded runs used an
 earlier APK and specific model files. [Amazon v342 instructions and run evidence](examples/run-342/README.md)
 
+## Run a flow on Linux (preview)
+
+![Preparing a browser flow in the desktop app with simulated models](docs/screenshots/linux-desktop-setup.png)
+
+The Linux x86-64 preview runs flows with local CPU models. Start the container,
+open the app in your browser and choose a flow. You can return to its report
+from **History**. [Install and run the Linux preview](apps/desktop/README.md#install-and-start)
+
 ## Inspect a flow on a desktop
 
-Download the public Linux/amd64 viewer image with Docker.
+![The Check a total graph and its selected calculator task in the flow viewer](docs/screenshots/flow-review.png)
+
+Pull the public Linux/amd64 viewer image with Docker.
 
 ```sh
-docker pull --platform linux/amd64 \
-  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+docker pull --platform linux/amd64 ghcr.io/e2llm/trollm-flow-review:latest
 ```
 
-Then [start the viewer with Docker](apps/flow-review/deploy/README.md#start-the-viewer-with-docker).
-The container has everything needed to inspect an uploaded flow.
-[GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
+Start the container using the flags in the deployment guide.
+[Run the viewer with Docker](apps/flow-review/deploy/README.md#start-the-viewer-with-docker)
 
 Open `http://127.0.0.1:8080` on the host running the viewer. Choose **Open files /
 tar** to load the same flow bundle, or **Open folder** to load flow source.
-The viewer displays the flow's steps, prompts, and tool permissions. Flow
-execution and local model inference happen in the Android app.
+The viewer displays the flow's steps, prompts, and tool permissions. The Android
+app and Linux desktop preview execute flows and run local models.
 
 ## Learn, author and contribute
 
@@ -62,47 +81,16 @@ runtime, Android, reliability or security work. Before contributing, read
 
 ## Current evidence and limits
 
-Current release metadata is **1.1.0 / Android code 72**; see
-[versioning](docs/VERSIONING.md) for source, bundle and APK identities.
-The library leads with a local starter or a saved active/interrupted run. Input,
-model requirements and connection setup share a flow journey, and completed runs
-lead with their report. [Direct tool execution](docs/DIRECT-TOOL-EXECUTION.md)
-keeps fully bound ordinary calls within the same checked dispatch and journal.
+Two selected runs of the Amazon cart flow used local Qwen 0.8B and 2B models
+on a Samsung A04e and an S21. Both completed the supplied mission. Their
+largest recorded model inputs were 1,237 and 1,253 tokens, even though the
+runs lasted about 4 hours 20 minutes and 1 hour 41 minutes respectively.
+You can inspect the inputs, bundle, pinned models, results and sanitized logs
+to see how the work was split into small steps. These observations apply to
+the two recorded runs. [Explore the v342 examples](examples/run-342/README.md)
 
-[Two recorded v342 runs](examples/run-342/README.md) show an Amazon cart workflow
-on Samsung A04e and S21 phones, using local Qwen 0.8B and 2B models. Both completed
-the supplied mission; their largest recorded model inputs were 1,237 and 1,253
-tokens despite execution lasting about 4h20m and 1h41m. The directory contains
-the exact flow, model pins, results, measurements and already-sanitized historical
-logs. These are selected examples worth examining further, not a reliability
-measurement. They used an earlier APK, whose identity is recorded separately
-from the 1.1.0 release.
-
-The runtime now supports prepared worklists, reusable child returns,
-invocation-owned iteration and authored exits on child outcomes. Built-in tools
-filter, select and order original records as well as perform exact arithmetic.
-Bindings retain the evidence needed by later tasks. The
-[reliability guide](docs/FLOW-RELIABILITY.md) includes a read-only selection replay
-helper; [flow prompting](docs/FLOW-PROMPTING.md) describes how to test wording with
-each execution model. Host/scripted checks cover these contracts. They do not
-establish real-model selection accuracy or acceptance of a current-source APK.
-
-On 2026-10-19, the signed **0.1.0-rc.5 / Android code 6** candidate completed
-email-OTP OAuth login and callback, retained the connection after cold reopen,
-and completed live MCP open/read plus a bounded native browser known-answer
-check on an 8 GiB API 36 x86_64 emulator. The Qwen3.5-0.8B Q4_K_M coder and
-Gemma 4 E2B IT Q4_K_M reasoner returned the expected answer and exact source
-information. Service and wake-lock cleanup passed.
-
-Acceptance of actual OAuth refresh, ordinary download transfer/recovery,
-Doze-specific behavior and physical-phone operation remains open for the current
-main build. The earlier emulator download attempt had a validated-network
-connectivity failure; that is a historical test limitation, not a current claim
-that downloads fail on every device. Emulator checks do not establish phone
-performance or arbitrary-page accuracy. Experimental flows and other APKs require
-their own checks. The downloadable 1.1.0 APK remains experimental; the historical
-records describe their exact tested builds and inputs.
-
+For the checks performed on a particular Android build, see its release notes.
+[GitHub Releases](https://github.com/e2llm/trollm/releases)
 
 ## Repository and contribution boundaries
 
@@ -117,8 +105,6 @@ Trollm remains usable with direct authors and other producers. The optional
 account or central controller a prerequisite for unrelated flows. Each native
 contract and its current acceptance scope still applies.
 
-The curated source tree has separate history from the development repository.
-Use the Issues and contribution channel for your checkout, as described in
-[Contributing](CONTRIBUTING.md). See [Versioning](docs/VERSIONING.md),
+For issues and pull requests, see [Contributing](CONTRIBUTING.md). See [Versioning](docs/VERSIONING.md),
 [Security](SECURITY.md) and [Third-party notices](THIRD_PARTY_NOTICES.md) for their
 respective release and reporting boundaries.

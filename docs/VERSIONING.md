@@ -1,48 +1,25 @@
 # Product version and build identity
 
-trollm has one product release version for the Rust workspace and Android app.
-The root `Cargo.toml` `[workspace.package].version` is authoritative; all workspace
-crates inherit it with `version.workspace = true`. Android uses that value as
-`versionName`. Gradle reads Cargo's resolved metadata with
-`cargo metadata --no-deps --offline --locked`; Android configuration needs no
-Python version parser.
+The root `Cargo.toml` defines the product version under
+`[workspace.package].version` and the Android update code under
+`[workspace.metadata.android].version-code`. Workspace crates inherit the
+product version. Gradle reads both values through
+`cargo metadata --no-deps --offline --locked` and uses them as the APK's
+`versionName` and `versionCode`.
 
-The current release version is **1.1.0 / Android code 72**. It adds the mobile
-library/setup/run presentation, retained Start handoff and direct execution of
-fully bound ordinary tool calls. The packaged Check a total version 2 compares
-its saved sum and budget without a model call. Release validation and observed
-device checks are recorded separately from these implemented capabilities.
-
-The earlier **1.0.1 / Android code 71** added node-ID and artifact filename
-validation, plus launch documentation corrections. Its APK and the original
-**1.0.0 / Android code 70** APK retain their published bytes. Both
-include the earlier runtime and launcher fixes, curated v342 evidence and a
-native Android APK.
-The historical v342 runs used APK68 / 0.1.0-rc.24; their observations remain tied
-to those recorded bytes. Source-only updates do not allocate a new APK identity.
-Development branches may carry later candidates;
-the next distributed APK must exceed the latest distributed Android code across
-branches. Keep each existing APK tied to its actual source, not the moving branch.
-
-Use a `v`-prefixed product version for release tags. Increase the product version
-when preparing a new product release candidate or release, and strictly increase
-Android `versionCode` for every newly distributed APK, including pre-releases.
-Keep the signing identity for ordinary Android updates. Record the source commit,
-APK checksum, package/version and signing certificate with the distributed build;
-a version label alone does not identify its bytes or acceptance evidence.
-
-The product version selected for this feature release is `v1.1.0`; subsequent
-compatible fixes advance the patch version. Use annotated tags for new releases.
-Prepare another version for code changes; do not move published release tags or
-replace an APK with different bytes. The source metadata update below changed
-Git identities only.
+Use an annotated `v`-prefixed tag for each product release. Give new product
+releases and candidates a new version. Every newly distributed APK, including
+a pre-release, needs an Android update code greater than previous distributed
+builds. Retain the application ID and signing certificate for in-place Android
+updates. Keep published release tags and assets tied to their original builds.
+[Android installation and verification](INSTALL-ANDROID.md)
 
 To prepare a candidate, edit the two root manifest values and refresh the local
 crate entries in `Cargo.lock`, without upgrading dependencies:
 
 ```sh
 cargo update --offline -p trollm-core -p trollm-models -p trollm-mcp \
-  -p trollm-uniffi -p trollm-flow-review
+  -p trollm-uniffi -p trollm-flow-review -p trollm-desktop
 python3 scripts/release_version.py --check
 ```
 
@@ -53,13 +30,11 @@ actual manifest before recording the build's version.
 
 ## Source metadata update (2026-11-20)
 
-The `v1.0.0`, `v1.0.1` and `v1.1.0` tags now use corrected maintainer attribution.
-Source files, APKs, checksums, signatures and download URLs are unchanged. Existing
-build records retain their original source IDs. Each [release page](https://github.com/e2llm/trollm/releases)
-lists the corresponding old and new public source commits.
-
-GitHub-generated source ZIP/tarball checksums can change after retagging. An
-existing GitHub clone may retain the old tags until explicitly refreshed:
+The public Git tags for `v1.0.0`, `v1.0.1` and `v1.1.0` were refreshed
+on 2026-11-20. The APKs retain their original hashes and signing certificates.
+The release notes identify both source commits. Refresh the affected tags in
+an older clone with the commands below. GitHub-generated source archive hashes
+can differ after a tag refresh. [GitHub Releases](https://github.com/e2llm/trollm/releases)
 
 ```sh
 git fetch origin +refs/tags/v1.0.0:refs/tags/v1.0.0
@@ -69,7 +44,7 @@ git fetch origin +refs/tags/v1.1.0:refs/tags/v1.1.0
 
 ## Android release uploads
 
-For future signed Android releases, upload three files to GitHub Releases.
+Publish these files for new signed Android releases.
 
 - `app-release.apk` is the signed native Android build. It contains the full
   third-party notice text and manifest. See [how to extract them](INSTALL-ANDROID.md#read-the-apk-notices).
@@ -82,36 +57,25 @@ For future signed Android releases, upload three files to GitHub Releases.
 sha256sum app-release.apk build-info.json > SHA256SUMS
 ```
 
-GitHub also provides a ZIP and a tarball of the tagged source automatically,
-so a new release can show five download entries. [GitHub release documentation](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
+Release notes identify the build source commit and matching curated source tag.
+They record the checks performed on that build and the scope of device,
+real-model and live MCP validation. Any applicable security exception includes
+its scope and expiry. [Security exceptions](SECURITY-EXCEPTIONS.md)
 
-In the release notes, record the APK build source commit and matching curated
-source tag. Summarize the checks performed on that build, including scripted
-and JVM checks, packaging and security scans where applicable. State the limits
-of device, real-model and live MCP validation. Identify any applicable
-approved [security exception](SECURITY-EXCEPTIONS.md) with its scope and expiry.
-Keep these facts in the release notes so they remain available after CI
-artifacts expire.
-
-Link to the [checksum-covered v342 example](../examples/run-342/README.md) when
-referencing that historical bundle and its evidence. Existing releases retain
-their published assets. The 1.1.0 release has eight uploaded files, including
-separate notices and the historical bundle, alongside the two source archives.
-Build validation still compares the embedded notices with generated copies,
-as described in the [third-party notice guide](../THIRD_PARTY_NOTICES.md).
+The historical v342 runs used APK68 / 0.1.0-rc.24. Their build, model files
+and results are recorded with the checksum-covered bundle.
+[v342 run evidence](../examples/run-342/README.md)
 
 ## Source-only updates
 
-A curated source-only update is identified by its source commit. Publish
-documentation-only changes through the source export without bumping the
-product version, allocating an Android update code or rebuilding the APK.
-Device validation stays attached to the exact APK that was checked.
+Publish documentation-only updates with the existing product version and use
+the Git commit to identify the update. Android build identity and device
+validation stay attached to the specific APK. Published container images
+use full public source-commit tags and content digests. The flow review companion
+uses `:latest`. The experimental desktop publication channel is `:preview`.
+[Viewer image guide](../apps/flow-review/deploy/README.md) · [Desktop preview](../apps/desktop/README.md)
 
-Flow review container builds use full source-commit tags and content digests;
-publishing one does not by itself require a Rust/Android product version bump.
-Its Rust server inherits the workspace version. The private browser package's
-npm metadata is not an independently published product release.
-Flow/schema compatibility is versioned by its own format identifiers, such as
-`ledger.execution-plan.v1` and `trollm.flow-bundle.v1`. A product version change does not
-change those contracts. Model setup pins upstream model revisions, sizes and
-SHA-256 hashes separately; the product version is not a model revision.
+Flow schemas use identifiers such as `ledger.execution-plan.v1` and
+`trollm.flow-bundle.v1` for format compatibility. Model setup pins upstream model
+revisions, sizes and SHA-256 hashes. Those identities are independent of the
+product version.

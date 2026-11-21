@@ -211,8 +211,16 @@ needs the complete data while the next model needs only selected fields.
 ### 4.4 Executor = stack machine
 
 - `flowRef` pushes a call frame (plan id + sha256, bound inputs, own counter scope).
-- `foreach` executes: snapshot `items` once → per item push body frame → after each item,
-  push `between` frame → aggregate per §4.6.
+- `foreach` snapshots `items` once and aggregates each body return as described
+  in §4.6. An optional `between` child runs after each item by default, including
+  the last item. Set `between: { flowRef: return-to-list, when: moreItems }`
+  to run the child only if the saved snapshot contains another item. With
+  `moreItems`, the runtime verifies the snapshot's content address before
+  starting an item or deciding whether to run `between`. A matching
+  `onItemOutcome` route takes precedence. Resume continues a saved `between`
+  child where it stopped, then advances the cursor.
+  Readers released before `between.when` support reject the field. Omit
+  `when` to use the compatible after-each-item form.
 - Run state (serializable at every node boundary):
 
 ```json

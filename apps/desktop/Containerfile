@@ -1,0 +1,114 @@
+# Build from the repository root. The image contains the native CPU runtime;
+# model files are downloaded separately into the persistent data volume.
+ARG NODE_IMAGE=docker.io/library/node:22.22.2-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e
+ARG RUST_IMAGE=docker.io/library/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
+ARG CC_RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
+ARG RUNTIME_IMAGE=gcr.io/distroless/base-nossl-debian13:nonroot@sha256:89815d620ac01d8de13cdaf04d19ed874447ca2296d4985b14b818f6e5e47854
+
+FROM ${NODE_IMAGE} AS web
+WORKDIR /src/apps/desktop/web
+COPY apps/desktop/web/package*.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund --fetch-retries=2 --fetch-timeout=60000
+COPY apps/desktop/web/ ./
+COPY scripts/make_desktop_web_notices.mjs /src/scripts/
+COPY apps/flow-review/web/scripts/build-notices.mjs /src/apps/flow-review/web/scripts/
+RUN npm audit --audit-level=low && npm run build
+
+FROM ${RUST_IMAGE} AS server
+ARG TARGETARCH=amd64
+WORKDIR /src
+ENV CARGO_BUILD_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 \
+    RUSTFLAGS="-C target-cpu=x86-64" \
+    GGML_NATIVE=OFF GGML_OPENMP=ON GGML_SSE42=OFF GGML_AVX=OFF GGML_AVX2=OFF \
+    GGML_BMI2=OFF GGML_FMA=OFF GGML_F16C=OFF GGML_AVX512=OFF
+RUN test "$TARGETARCH" = amd64 \
+    && export http_proxy="${http_proxy:-${HTTP_PROXY:-}}" https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates cmake clang libclang-dev python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY schemas/ schemas/
+COPY apps/desktop/server/ apps/desktop/server/
+COPY apps/flow-review/server/ apps/flow-review/server/
+COPY flows/starters/browser-summary/setup.json flows/starters/browser-summary/setup.json
+COPY scripts/make_flow_review_notices.py scripts/
+COPY scripts/android/make_apk_notices.py scripts/android/
+COPY licenses/upstream/ licenses/upstream/
+# These native grammar/vocabulary tests use a generated fixture, not model weights.
+# The successful native build is reused for the release executable and notices.
+RUN rustup run 1.90.0 cargo test --locked --release --target x86_64-unknown-linux-gnu \
+      -p trollm-models --features llama --lib \
+    && rustup run 1.90.0 cargo build --locked --release --target x86_64-unknown-linux-gnu \
+      -p trollm-desktop --bin trollm-desktop --no-default-features --features llama \
+      --message-format=json-render-diagnostics > /cargo-build.jsonl \
+    && python3 scripts/make_flow_review_notices.py collect --component desktop \
+      --build-messages /cargo-build.jsonl \
+      --sysroot "$(rustup run 1.90.0 rustc --print sysroot)" /out/notices \
+    && python3 scripts/make_flow_review_notices.py verify --component desktop /out/notices \
+    && readelf -d target/x86_64-unknown-linux-gnu/release/trollm-desktop > /out/desktop-elf.txt \
+    && grep -Fq '[libgomp.so.1]' /out/desktop-elf.txt \
+    && ! grep NEEDED /out/desktop-elf.txt | grep -Ev '\[(libgomp\.so\.1|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libm\.so\.6|libc\.so\.6|ld-linux-x86-64\.so\.2)\]$'
+
+# Rustls uses public certificate trust from base-nossl. Retain the matching
+# Debian compiler runtime packages, including their file and copyright records.
+FROM ${CC_RUNTIME_IMAGE} AS compiler-runtime
+FROM ${RUST_IMAGE} AS runtime-files
+COPY --from=compiler-runtime /usr/ /compiler-runtime/usr/
+COPY --from=compiler-runtime /var/lib/dpkg/status.d/ /compiler-runtime/var/lib/dpkg/status.d/
+# Nest symlinks and the private data directory so COPY preserves their metadata.
+RUN set -eu; \
+    install -d -m 0755 /out/runtime-root; \
+    install -d -o 10001 -g 10001 -m 0700 /out/runtime-root/data; \
+    cd /compiler-runtime; \
+    cp -a --parents \
+      usr/lib/x86_64-linux-gnu/libgcc_s.so.1 \
+      usr/lib/x86_64-linux-gnu/libgomp.so.1* \
+      usr/lib/x86_64-linux-gnu/libstdc++.so.6* \
+      var/lib/dpkg/status.d/gcc-14-base* var/lib/dpkg/status.d/libgcc-s1* \
+      var/lib/dpkg/status.d/libgomp1* var/lib/dpkg/status.d/libstdc++6* \
+      usr/share/doc/gcc-14-base usr/share/doc/libgcc-s1 \
+      usr/share/doc/libgomp1 usr/share/doc/libstdc++6 \
+      usr/share/gcc/python/libstdcxx \
+      usr/share/gdb/auto-load/usr/lib/x86_64-linux-gnu/libstdc++.so.*-gdb.py \
+      usr/share/lintian/overrides/libgcc-s1 /out/runtime-root; \
+    cd /out/runtime-root; \
+    test "$(stat -c '%u:%g:%a' data)" = 10001:10001:700; \
+    test -f usr/lib/x86_64-linux-gnu/libgcc_s.so.1; \
+    for library in libgomp.so.1 libstdc++.so.6; do \
+      test -L "usr/lib/x86_64-linux-gnu/$library"; \
+      test -f "usr/lib/x86_64-linux-gnu/$library"; \
+    done; \
+    for package in gcc-14-base libgcc-s1 libgomp1 libstdc++6; do \
+      test -f "var/lib/dpkg/status.d/$package"; \
+      test -f "var/lib/dpkg/status.d/$package.md5sums"; \
+      test -f "usr/share/doc/$package/copyright"; \
+    done; \
+    for package in libgcc-s1 libgomp1 libstdc++6; do \
+      test -L "usr/share/doc/$package"; \
+    done
+
+FROM ${RUNTIME_IMAGE} AS runtime
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/e2llm/trollm" \
+    org.opencontainers.image.revision="${SOURCE_REVISION}" \
+    org.opencontainers.image.description="Experimental trollm Linux desktop runtime with a local browser interface" \
+    org.opencontainers.image.licenses="Apache-2.0"
+COPY --from=runtime-files /out/runtime-root/ /
+WORKDIR /app
+COPY --from=server /src/target/x86_64-unknown-linux-gnu/release/trollm-desktop /app/trollm-desktop
+COPY --from=server /out/notices/ /app/notices/rust/
+COPY --from=web /src/apps/desktop/web/dist/ /app/web/
+COPY --from=web /src/apps/desktop/web/dist/notices/ /app/notices/browser/
+COPY apps/android/app/src/main/assets/flows/ /app/starters/
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/notices/
+USER 10001:10001
+ENV TROLLM_DESKTOP_BIND=0.0.0.0:8080 \
+    TROLLM_DESKTOP_ORIGIN=http://127.0.0.1:8080 \
+    TROLLM_DESKTOP_DATA=/data \
+    TROLLM_DESKTOP_WEB=/app/web \
+    TROLLM_DESKTOP_STARTERS=/app/starters
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["/app/trollm-desktop", "--healthcheck"]
+ENTRYPOINT ["/app/trollm-desktop"]

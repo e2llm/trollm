@@ -12,6 +12,10 @@ exact computation, saved data, allowed transitions and execution limits. This is
 an experimental Android 13/API 33+ app with signed APK releases. [README.md](README.md) records
 current capabilities and acceptance gaps.
 
+The [Linux desktop preview](apps/desktop/README.md) runs the shared runtime
+on Linux x86-64. Its local browser interface lives in `apps/desktop/web/`
+and its host in `apps/desktop/server/`.
+
 ## The three roles
 
 Here, `coder` and `reasoner` name model roles **inside the app**:

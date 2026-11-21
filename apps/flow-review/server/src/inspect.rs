@@ -10,7 +10,7 @@ use std::{
     fs,
     path::{Component, Path},
 };
-use trollm_core::{plan::hex_sha256, ExecutionPlan, TaskRegistry};
+use trollm_core::{plan::hex_sha256, ExecutionPlan, Node, TaskRegistry};
 use trollm_uniffi::bundle::{BundleManifest, ManifestFile};
 
 #[derive(Debug, Serialize)]
@@ -93,6 +93,17 @@ fn reference(base_file: &str, relative: &str, files: &BTreeMap<String, String>) 
     Ok(path)
 }
 
+fn subflow_references(node: &Node) -> impl Iterator<Item = &str> {
+    [
+        node.body.as_ref().map(|body| body.flow_ref.as_str()),
+        node.between
+            .as_ref()
+            .map(|between| between.flow_ref.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 fn preflight(
     files: &BTreeMap<String, String>,
     parsed: &BTreeMap<String, ExecutionPlan>,
@@ -102,16 +113,12 @@ fn preflight(
     for (path, plan) in parsed {
         let mut refs = Vec::new();
         for node in plan.nodes.values() {
-            for r in [&node.body, &node.between].into_iter().flatten() {
+            for flow_ref in subflow_references(node) {
                 // flowRef is an ID resolved by the existing loader, not a path.
-                if r.flow_ref.contains(['/', '\\']) || r.flow_ref == "." || r.flow_ref == ".." {
+                if flow_ref.contains(['/', '\\']) || flow_ref == "." || flow_ref == ".." {
                     bail!("unsafe flow reference");
                 }
-                refs.push(reference(
-                    path,
-                    &format!("{}.flow.yaml", r.flow_ref),
-                    files,
-                )?);
+                refs.push(reference(path, &format!("{flow_ref}.flow.yaml"), files)?);
             }
         }
         if let Some(setup) = &plan.setup {
@@ -323,12 +330,12 @@ pub fn inspect(request: SourceRequest, temp_root: &Path, display_name: &str) -> 
     let referenced: BTreeSet<_> = parsed
         .iter()
         .flat_map(|(path, p)| {
-            p.nodes.values().flat_map(move |n| {
-                [&n.body, &n.between].into_iter().flatten().map(move |r| {
+            p.nodes.values().flat_map(move |node| {
+                subflow_references(node).map(move |flow_ref| {
                     Path::new(path)
                         .parent()
                         .unwrap_or(Path::new(""))
-                        .join(format!("{}.flow.yaml", r.flow_ref))
+                        .join(format!("{flow_ref}.flow.yaml"))
                         .to_string_lossy()
                         .into_owned()
                 })

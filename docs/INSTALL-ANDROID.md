@@ -1,11 +1,12 @@
 # Install trollm on Android
 
-Download [the 1.1.0 APK](https://github.com/e2llm/trollm/releases/download/v1.1.0/app-release.apk)
-from [GitHub Releases](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
-and open `app-release.apk` on an Android 13/API 33 or newer device. Allow your
-browser or file manager to install that APK when Android asks. The release
-includes a SHA-256 checksum, build identity and third-party notices alongside
-the APK. Model weights are downloaded separately.
+Open the [latest release](https://github.com/e2llm/trollm/releases/latest) and
+download `app-release.apk` from **Assets**. If that release has no APK, choose an
+Android release with the APK in its assets. [All releases](https://github.com/e2llm/trollm/releases)
+
+Open the APK on an Android 13/API 33 or newer device. Allow your browser or file
+manager to install it when Android asks. Download the checksum and build
+metadata from the same release. Model weights are downloaded separately.
 
 trollm is an experimental app for authored workflows with small local language
 models. The [two v342 phone runs](../examples/run-342/README.md) show examples
@@ -14,18 +15,19 @@ release or other inputs.
 
 ## Verify the download
 
-For 1.1.0, download `app-release.apk.sha256` from the same release and put it
-beside `app-release.apk`. On a computer with `sha256sum`, run in that directory:
+Put `app-release.apk`, `build-info.json` and `SHA256SUMS` from the same release
+in one directory. On a computer with `sha256sum`, run this command in that
+directory.
 
 ```sh
-sha256sum -c app-release.apk.sha256
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-It must report `app-release.apk: OK`. The 1.1.0 `SHA256SUMS` covers the other
-uploaded assets too. For releases using the
-[three-upload policy](VERSIONING.md#android-release-uploads), put `app-release.apk`,
-`build-info.json` and `SHA256SUMS` in the same directory and run
-`sha256sum -c SHA256SUMS`. Both files must report `OK`.
+Check that it reports `OK` for both `app-release.apk` and `build-info.json`.
+The option skips entries for any other release assets you did not download.
+If an older release supplies only `app-release.apk.sha256`, put it beside the
+APK and run `sha256sum -c app-release.apk.sha256`. Check that it reports
+`app-release.apk: OK`.
 
 The release's `build-info.json` records the APK hash, source commit, version and
 signing certificate under `certificateSha256`.
@@ -54,7 +56,7 @@ computer with `unzip`, extract both from the downloaded APK without installing i
 unzip app-release.apk assets/THIRD_PARTY_NOTICES.txt assets/third-party-manifest.json
 ```
 
-The 1.1.0 release also has separate copies of these files.
+Some releases also provide separate copies of these files.
 
 ## First run
 
@@ -91,15 +93,14 @@ mission description and historical run evidence are in
 [the example directory](../examples/run-342/README.md). Installing the app does
 not install model weights or establish an E2LLM account/session.
 Historical run instructions use the earlier **Install bundle** label for this
-picker; in 1.1.0 it is **Manage flows → Import flow file**. The archived evidence
-and its checksums remain unchanged.
+picker. The archived evidence and its checksums retain the original instructions.
 
 ## Updates and diagnostics
 
 An ordinary Android update requires the same application ID and signing
-certificate, plus a larger Android version code. This release uses the maintained
-CI signing identity. The experimental APK68 used for the archived v342 runs has
-a different recorded certificate and cannot be updated in place by this APK.
+certificate, plus a larger Android version code. The experimental APK68 used
+for the archived v342 runs has a different recorded certificate and cannot be
+updated in place by an APK signed with the maintained release certificate.
 Do not remove an existing installation merely to bypass a signature mismatch:
 that can discard its models, credentials and run data.
 

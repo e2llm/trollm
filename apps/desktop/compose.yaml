@@ -1,0 +1,24 @@
+services:
+  trollm:
+    image: ${TROLLM_DESKTOP_IMAGE:-localhost/trollm-desktop:local}
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      TROLLM_DESKTOP_ORIGIN: http://127.0.0.1:8080
+    volumes:
+      - trollm-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    cpus: 2
+    mem_limit: 8g
+    stop_grace_period: 30s
+
+volumes:
+  trollm-data:

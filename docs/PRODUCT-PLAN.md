@@ -1,13 +1,13 @@
 # Product direction and current work
 
-Reviewed on **2026-11-19**. trollm lets people run authored workflows with small
+trollm lets people run authored workflows with small
 local models on Android. A flow defines the steps and tools. The user chooses a
 flow, supplies its input, and follows the run to its report. Browser flows can
 use E2LLM with a browser on another computer. [Learn trollm](LEARN-TROLLM.md)
 
 ## Available now
 
-- **Android 1.1.0** (update code 72) is an experimental signed APK for Android
+- **The Android app** is available as an experimental signed APK for Android
   13 or later. It brings inputs, model downloads and connection setup into the
   flow screen. Saved runs can be reopened, and completed runs lead with a
   selectable report and a copy button. [Download and verify the APK](INSTALL-ANDROID.md)
@@ -24,12 +24,18 @@ use E2LLM with a browser on another computer. [Learn trollm](LEARN-TROLLM.md)
 - **The desktop flow review companion** is available as a public Linux/amd64
   container. It opens source files or bundles so people can inspect steps,
   prompts and tool permissions, leave feedback and compare revisions.
-  Execution and inference happen in the Android app.
+  The companion inspects packages. The Android app and Linux desktop preview
+  execute flows.
   [Deployment guide](../apps/flow-review/deploy/README.md) · [GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
 
-## Open GitHub issues
+The [Linux desktop preview](../apps/desktop/README.md) targets Linux x86-64
+with CPU inference and a local browser interface. It reuses the same runtime,
+adds preparation and connection handling, and retains explicit run recovery.
+Its build, native-model and live-connection checks are tracked separately.
 
-All seven issues below were open when reviewed. Follow [GitHub Issues](https://github.com/e2llm/trollm/issues)
+## Selected GitHub issues
+
+The issues below describe selected areas of work. Follow [GitHub Issues](https://github.com/e2llm/trollm/issues)
 for current status, labels and acceptance criteria. [Contributing](../CONTRIBUTING.md)
 covers the issue and pull request process.
 
@@ -37,7 +43,7 @@ covers the issue and pull request process.
 | --- | --- |
 | [#1 Show file and field paths in example-validation errors](https://github.com/e2llm/trollm/issues/1) | Add actionable diagnostics and malformed-input tests for the current format, including invalid registry versions under `python3 -O`. Good first issue. |
 | [#2 Validate final-report selection and copying on Android](https://github.com/e2llm/trollm/issues/2) | Check selection, partial and full copying, scrolling and reopening a completed report from history on a device or emulator with a stub build. The report already supports selection and has a dedicated full-copy action. |
-| [#3 Validate run-control layout at narrow widths and large text](https://github.com/e2llm/trollm/issues/3) | The issue describes the earlier wrapping row. On 1.1.0, check Pause and Resume in the run screen and Cancel in the **Run actions** menu at the requested widths, font sizes and run states. A stub build is enough for these layout checks. |
+| [#3 Validate run-control layout at narrow widths and large text](https://github.com/e2llm/trollm/issues/3) | The issue describes the earlier wrapping row. Check Pause and Resume in the run screen and Cancel in the **Run actions** menu at the requested widths, font sizes and run states. A stub build is enough for these layout checks. |
 | [#4 Add a deterministic packer for existing v1 flow bundles](https://github.com/e2llm/trollm/issues/4) | Package arbitrary current-format flow sources using the existing manifest and reader. The starter and replay packers already serve their specific inputs. |
 | [#5 Add a small non-browser selection replay walkthrough](https://github.com/e2llm/trollm/issues/5) | The replay helper and tests are available. Add synthetic fixtures and a walkthrough for supported, unsupported and ambiguous selections using that helper. Good first issue. |
 | [#6 Collect third-party license and NOTICE material for APK delivery](https://github.com/e2llm/trollm/issues/6) | The issue predates the generated notices and manifest in the 1.1.0 APK. Review what remains against that build and the [notice collector documentation](../THIRD_PARTY_NOTICES.md#notices-accompanying-an-apk) with the maintainer before duplicating the inventory. |

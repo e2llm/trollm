@@ -859,6 +859,52 @@ fn build_gateway(
 // Model wiring (feature-gated; §9: weights are pinned by the app, never the
 // plan — the plan contributes only slot names and ctx sizes).
 
+#[cfg(any(feature = "llama", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct WeightFingerprint {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(any(feature = "llama", test))]
+impl WeightFingerprint {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+#[cfg(any(feature = "llama", test))]
+#[derive(Debug)]
+struct VerifiedWeights {
+    path: PathBuf,
+    fingerprint: WeightFingerprint,
+}
+
+#[cfg(any(feature = "llama", test))]
+impl VerifiedWeights {
+    fn check_path_after(&self, slot: &str, checkpoint: impl FnOnce() -> Result<()>) -> Result<()> {
+        checkpoint()?;
+        let metadata = fs::metadata(&self.path).with_context(|| {
+            format!("could not recheck model weights after verification for slot '{slot}'")
+        })?;
+        if WeightFingerprint::from_metadata(&metadata) != self.fingerprint {
+            bail!("model weights changed after verification for slot '{slot}'");
+        }
+        // The native loader reopens the path immediately after this check.
+        Ok(())
+    }
+}
+
 /// Verify `models/<slot>.gguf` against its `models/<slot>.gguf.sha256`
 /// manifest (§8). sha256sum-style lines ("<hex>  <name>") and bare hex are
 /// both accepted.
@@ -868,7 +914,7 @@ fn verify_model_weights(
     slot: &str,
     ctl: &RunControl,
     budget: &GenerationBudget,
-) -> Result<PathBuf> {
+) -> Result<VerifiedWeights> {
     let path = base.join("models").join(format!("{slot}.gguf"));
     let manifest_path = base.join("models").join(format!("{slot}.gguf.sha256"));
     let expected_raw = fs::read_to_string(&manifest_path).with_context(|| {
@@ -882,8 +928,7 @@ fn verify_model_weights(
         .next()
         .unwrap_or("")
         .to_string();
-    verify_weights(&path, &expected, slot, ctl, budget)?;
-    Ok(path)
+    verify_weights(&path, &expected, slot, ctl, budget)
 }
 
 #[cfg(any(feature = "llama", test))]
@@ -893,7 +938,7 @@ fn verify_weights(
     slot: &str,
     ctl: &RunControl,
     budget: &GenerationBudget,
-) -> Result<()> {
+) -> Result<VerifiedWeights> {
     verify_weights_with_checkpoint(path, expected, slot, &|| {
         ctl.before_boundary()?;
         budget.check()
@@ -906,9 +951,10 @@ fn verify_weights_with_checkpoint(
     expected: &str,
     slot: &str,
     checkpoint: &dyn Fn() -> Result<()>,
-) -> Result<()> {
+) -> Result<VerifiedWeights> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("no weights for model slot '{slot}' ({})", path.display()))?;
+    let fingerprint = WeightFingerprint::from_metadata(&file.metadata()?);
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -926,7 +972,13 @@ fn verify_weights_with_checkpoint(
             "model weights sha256 mismatch for slot '{slot}': manifest {expected}, actual {actual}"
         );
     }
-    Ok(())
+    if WeightFingerprint::from_metadata(&file.metadata()?) != fingerprint {
+        bail!("model weights changed during verification for slot '{slot}'");
+    }
+    Ok(VerifiedWeights {
+        path: path.to_owned(),
+        fingerprint,
+    })
 }
 
 /// Each executor owns its lazy slots. The injected loader runs only after
@@ -963,28 +1015,30 @@ impl ModelSlot for LazyModel {
                 let verification = match &self.weights {
                     Some((path, expected)) => {
                         verify_weights(path, expected, &self.slot, &self.ctl, &budget)
-                            .map(|()| path.clone())
                     }
                     None => verify_model_weights(&self.base, &self.slot, &self.ctl, &budget),
                 };
                 loading_diagnostics.weight_verify_ms =
                     Some(verify_started.elapsed().as_millis() as u64);
-                let path = match verification {
-                    Ok(path) => path,
+                let weights = match verification.and_then(|weights| {
+                    weights.check_path_after(&self.slot, || {
+                        self.ctl.before_boundary()?;
+                        budget.check()?;
+                        self.ctl.set_activity(Some(RunActivityApi::LoadingModel {
+                            slot: self.slot.clone(),
+                        }));
+                        Ok(())
+                    })?;
+                    Ok(weights)
+                }) {
+                    Ok(weights) => weights,
                     Err(error) if error.is::<GenerationExpired>() => {
                         return Ok(generation_timeout())
                     }
                     Err(error) => return Err(error),
                 };
-                self.ctl.before_boundary()?;
-                if budget.expired() {
-                    return Ok(generation_timeout());
-                }
-                self.ctl.set_activity(Some(RunActivityApi::LoadingModel {
-                    slot: self.slot.clone(),
-                }));
                 let load_started = Instant::now();
-                let loaded = (self.loader)(&path);
+                let loaded = (self.loader)(&weights.path);
                 loading_diagnostics.load_ms = Some(load_started.elapsed().as_millis() as u64);
                 self.loaded = Some(loaded?);
             }
@@ -3424,7 +3478,8 @@ mod regression_tests {
                     &handle().0.control,
                     &GenerationBudget::new(None)
                 )
-                .unwrap(),
+                .unwrap()
+                .path,
                 weights
             );
         }
@@ -3439,6 +3494,74 @@ mod regression_tests {
         .to_string()
         .contains("mismatch"));
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn replaced_model_path_cannot_reach_the_loader_after_a_cooperative_hold() {
+        let base = TrustTestDir::new("model-verified-then-replaced");
+        let path = base.0.join("weights.gguf");
+        let replacement = base.0.join("replacement.gguf");
+        // Two distinct inodes with the same valid hash.
+        fs::write(&path, b"abc").unwrap();
+        fs::write(&replacement, b"abc").unwrap();
+        let weights =
+            verify_weights_with_checkpoint(&path, ABC_DIGEST, "coder", &|| Ok(())).unwrap();
+
+        let (handle, _) = handle();
+        handle.control.request_pause();
+        let ctl = handle.control.clone();
+        let loads = Arc::new(AtomicU64::new(0));
+        let loads_in_worker = loads.clone();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            weights.check_path_after("coder", || ctl.before_boundary())?;
+            loads_in_worker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let replacement_result = (|| -> Result<()> {
+            let started = Instant::now();
+            while !matches!(*handle.status.lock().unwrap(), RunPhase::Paused { .. }) {
+                if started.elapsed() >= Duration::from_secs(2) {
+                    bail!("model verification did not reach the cooperative hold");
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            fs::rename(replacement, path)?;
+            Ok(())
+        })();
+        handle.control.request_resume();
+        let result = worker.join().unwrap();
+        replacement_result.unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("changed after verification"));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn model_verification_rejects_in_place_changes_even_when_the_hash_matches() {
+        let base = TrustTestDir::new("model-edited-during-verification");
+        let path = base.0.join("weights.gguf");
+        fs::write(&path, b"").unwrap();
+        let changed = std::cell::Cell::new(false);
+        let error = verify_weights_with_checkpoint(&path, ABC_DIGEST, "coder", &|| {
+            if !changed.replace(true) {
+                fs::write(&path, b"abc")?;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("changed during verification"));
+
+        let weights =
+            verify_weights_with_checkpoint(&path, ABC_DIGEST, "coder", &|| Ok(())).unwrap();
+        fs::write(&path, b"abcd").unwrap();
+        assert!(weights
+            .check_path_after("coder", || Ok(()))
+            .unwrap_err()
+            .to_string()
+            .contains("changed after verification"));
     }
 
     fn request() -> GenerateRequest {

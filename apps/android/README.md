@@ -2,8 +2,8 @@
 
 The Kotlin/Compose app uses the Rust runtime through UniFFI. This is an experimental
 app targeting Android 13/API 33+, with S21-class hardware or newer as the
-phone target. [Version 1.1.0](https://github.com/e2llm/trollm/releases/tag/v1.1.0)
-provides a native APK; see the [installation guide](../../docs/INSTALL-ANDROID.md).
+phone target. See the [installation guide](../../docs/INSTALL-ANDROID.md) to
+download and verify a released APK.
 
 The included app has flow installation, run history, foreground run ownership
 and execution controls. Source includes verified model downloads and a browser
@@ -63,8 +63,8 @@ and reuses the browser starter's pinned models. It performs no browser or purcha
 actions. Arithmetic is exact for the selected operands; selection and advice are
 model work. Its scripted tests do not establish native-device acceptance.
 
-Current release metadata is **1.1.0 / Android code 72**. Source includes prepared-list
-tools, explicit child returns, bounded observations and correlated timing.
+Source includes prepared-list tools, explicit child returns, bounded observations
+and correlated timing.
 Host checks use scripted dependencies. The [recorded v342 runs](../../examples/run-342/README.md)
 used an earlier APK and remain separate observations.
 
@@ -275,8 +275,8 @@ unset TROLLM_RELEASE_STORE_PASSWORD TROLLM_RELEASE_KEY_PASSWORD
 
 Keep signing files and credentials out of source control, logs and reports.
 
-The non-debuggable APK is under `app/build/outputs/apk/release/`, with version
-`1.1.0` (code `72`), read from the root Cargo manifest through
+The non-debuggable APK is under `app/build/outputs/apk/release/`. Gradle reads
+the version and Android update code from the root Cargo manifest through
 `cargo metadata --no-deps --offline --locked`. The generated notices are included in the
 APK and copied beside it for build verification after assembly, which recreates
 the APK output directory. Future releases distribute the notices inside the APK

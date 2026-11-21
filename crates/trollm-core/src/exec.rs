@@ -3158,8 +3158,22 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         }
         let phase = self.cursors()[node_id].phase;
         match phase {
-            ForeachPhase::Next => self.foreach_next(node_id, node, fp),
-            ForeachPhase::InBody => self.foreach_body_done(node_id, node),
+            ForeachPhase::Next | ForeachPhase::InBody => {
+                let only_when_more = node
+                    .between
+                    .as_ref()
+                    .is_some_and(|between| between.when == Some(BetweenWhen::MoreItems));
+                let items = match self.read_snapshot(node_id, only_when_more) {
+                    Ok(items) => items,
+                    Err(error) if only_when_more => return self.finish_failed(&error.to_string()),
+                    Err(error) => return Err(error),
+                };
+                if phase == ForeachPhase::Next {
+                    self.foreach_next(node_id, node, fp, &items)
+                } else {
+                    self.foreach_body_done(node_id, node, &items, only_when_more)
+                }
+            }
             ForeachPhase::InBetween => {
                 self.take_child_return(node_id)?;
                 let cur = self.cursors_mut().get_mut(node_id).unwrap();
@@ -3253,8 +3267,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
     }
 
     /// Phase Next: finish, hit the item limit, or push the body frame.
-    fn foreach_next(&mut self, node_id: &str, node: &Node, fp: &FramePlan) -> anyhow::Result<()> {
-        let items = self.read_snapshot(node_id)?;
+    fn foreach_next(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        fp: &FramePlan,
+        items: &[Value],
+    ) -> anyhow::Result<()> {
         let (index, session_items) = {
             let cur = &self.cursors()[node_id];
             (cur.index, cur.session_items)
@@ -3383,7 +3402,13 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
 
     /// Phase InBody: the body frame just popped; aggregate its outputs (§4.6),
     /// then push the between frame if declared.
-    fn foreach_body_done(&mut self, node_id: &str, node: &Node) -> anyhow::Result<()> {
+    fn foreach_body_done(
+        &mut self,
+        node_id: &str,
+        node: &Node,
+        items: &[Value],
+        only_when_more: bool,
+    ) -> anyhow::Result<()> {
         let returned = self.take_child_return(node_id)?;
         let outputs = returned.outputs;
         let outcome = returned.outcome;
@@ -3392,7 +3417,6 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             .as_ref()
             .and_then(|routes| routes.get(&outcome))
             .cloned();
-        let items = self.read_snapshot(node_id)?;
         // `indexBy: itemKey` (§3) means: index each result entry by the value
         // of the item's itemKey field. Any other literal names the item field
         // directly.
@@ -3454,7 +3478,11 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
             return self.transit("onItemOutcome", &target);
         }
 
-        if let Some(between) = node.between.clone() {
+        if let Some(between) = node
+            .between
+            .as_ref()
+            .filter(|_| !only_when_more || new_index_done < items.len())
+        {
             // The between flow sees the foreach progress as
             // `{{ <foreachId>.cursor }}` / `{{ <foreachId>.snapshot_len }}`.
             let mut child_vars = Map::new();
@@ -3519,14 +3547,32 @@ impl<M: ModelSlot, G: ToolGateway> Executor<M, G> {
         Ok(self.state.pending_return.take().unwrap())
     }
 
-    fn read_snapshot(&self, node_id: &str) -> anyhow::Result<Vec<Value>> {
+    fn read_snapshot(&self, node_id: &str, content_addressed: bool) -> anyhow::Result<Vec<Value>> {
         let cur = self
             .cursors()
             .get(node_id)
             .ok_or_else(|| anyhow!("no foreach cursor for '{node_id}'"))?;
         let path = self.run_dir.path().join(&cur.snapshot_ref);
+        if content_addressed {
+            anyhow::ensure!(
+                cur.snapshot_ref
+                    .strip_prefix("artifacts/")
+                    .is_some_and(|name| {
+                        name.ends_with(".snapshot.jsonl") && !name.contains(['/', '\\'])
+                    })
+                    && std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()),
+                "invalid content-addressed foreach snapshot reference for '{node_id}'"
+            );
+        }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading foreach snapshot {}", path.display()))?;
+        if content_addressed {
+            let expected = artifacts::foreach_snapshot_name(node_id, text.as_bytes());
+            anyhow::ensure!(
+                cur.snapshot_ref == format!("artifacts/{expected}"),
+                "foreach snapshot content address mismatch for '{node_id}'"
+            );
+        }
         let mut items = Vec::new();
         for line in text.lines() {
             if !line.trim().is_empty() {
@@ -3959,7 +4005,15 @@ mod recovery_regressions {
                 assert!(!context.run_id.is_empty());
                 assert!(matches!(context.node.as_str(), "work" | "retry"));
                 assert_eq!(context.origin.model_identity(), Some(("coder", 1)));
-                assert_eq!(context.frames.len(), 1);
+                if self.mode >= 8 {
+                    assert_eq!(context.frames.len(), 2);
+                    assert_eq!(context.cursors.len(), 1);
+                    assert_eq!(context.cursors[0].node, "each");
+                    assert_eq!(context.cursors[0].phase, "inBetween");
+                    assert_eq!(context.cursors[0].index, 0);
+                } else {
+                    assert_eq!(context.frames.len(), 1);
+                }
                 assert!(!EventLog::read_all(&self.log)?
                     .iter()
                     .any(|e| e["type"] == "tool_call_intent"));
@@ -4004,7 +4058,7 @@ mod recovery_regressions {
                 assert!(events
                     .iter()
                     .any(|event| event["seq"] == result && event["type"] == "tool_call_result"));
-                if self.mode == 5 {
+                if self.mode == 5 || self.mode == 9 {
                     anyhow::bail!("controlled ACK delivery loss");
                 }
                 Ok(())
@@ -4040,11 +4094,20 @@ mod recovery_regressions {
                 })
             }
         }
-        for mode in 0..8 {
+        // 8 and 9 run the guarded call in the deterministic between child.
+        for mode in 0..10 {
             let base = std::env::temp_dir().join(format!("prepared-dispatch-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&base).unwrap();
             std::fs::write(base.join("work.md"), "one controlled call").unwrap();
-            let mut root=plan("prepared-dispatch","work","  work: {kind: task, taskRef: work, onVerified: done}\n  done: {kind: end, outcome: succeeded}");
+            let task_nodes = "  work: {kind: task, taskRef: work, onVerified: done}\n  done: {kind: end, outcome: succeeded}";
+            let mut root = if mode >= 8 {
+                let mut root = more_items_plan();
+                root.subflows
+                    .insert("between".into(), plan("between", "work", task_nodes));
+                root
+            } else {
+                plan("prepared-dispatch", "work", task_nodes)
+            };
             if mode == 3 || mode == 6 {
                 root.nodes
                     .insert("retry".into(), root.nodes["work"].clone());
@@ -4083,15 +4146,20 @@ mod recovery_regressions {
             )
             .unwrap();
             exec.set_control(Arc::new(Control(cancel)));
+            if mode >= 8 {
+                exec.state.stack[0].vars =
+                    json!({"items":[{"id":1,"children":[]},{"id":2,"children":[]}]});
+            }
             let status = exec.run_until_blocked().unwrap();
-            assert_eq!(matches!(status, RunStatus::Succeeded), mode == 0);
-            let sent = mode == 0 || mode == 4 || mode == 5;
+            let succeeded = mode == 0 || mode == 8;
+            assert_eq!(matches!(status, RunStatus::Succeeded), succeeded);
+            let sent = succeeded || matches!(mode, 4 | 5 | 9);
             assert_eq!(exec.gateway.calls, usize::from(sent));
             assert_eq!(
                 exec.gateway.preparations, 1,
                 "a prepared guard is never reacquired"
             );
-            assert_eq!(exec.selected_call_pending, mode >= 2);
+            assert_eq!(exec.selected_call_pending, mode >= 2 && mode != 8);
             let events = EventLog::read_all(&run.events_path()).unwrap();
             assert_eq!(
                 events
@@ -4112,9 +4180,9 @@ mod recovery_regressions {
                     .iter()
                     .filter(|e| e["type"] == "tool_call_outcome_acknowledged")
                     .count(),
-                usize::from(mode == 0)
+                usize::from(succeeded)
             );
-            if mode == 5 {
+            if mode == 5 || mode == 9 {
                 assert_eq!(
                     exec.mutation_outcome,
                     crate::state::MutationOutcome::Unknown
@@ -4129,7 +4197,7 @@ mod recovery_regressions {
                 );
             }
             drop(exec);
-            if mode == 3 || mode == 5 || mode == 6 || mode == 7 {
+            if matches!(mode, 3 | 5 | 6 | 7 | 9) {
                 let mut reopened = Executor::new(
                     root,
                     registry,
@@ -4151,7 +4219,7 @@ mod recovery_regressions {
                     run.clone(),
                 )
                 .unwrap();
-                if mode == 5 || mode == 6 {
+                if matches!(mode, 5 | 6 | 9) {
                     assert!(reopened.selected_call_pending);
                 }
                 assert!(matches!(
@@ -4946,6 +5014,170 @@ nodes:
         }
     }
 
+    fn more_items_plan() -> ExecutionPlan {
+        let nodes = foreach_nodes("each", "child", true).replace(
+            "between: { flowRef: between }",
+            "between: { flowRef: between, when: moreItems }",
+        );
+        let mut root = plan("root", "each", &nodes);
+        for id in ["child", "between"] {
+            root.subflows.insert(
+                id.into(),
+                plan(id, "done", "  done: { kind: end, outcome: succeeded }"),
+            );
+        }
+        root
+    }
+
+    #[test]
+    fn between_predicate_is_closed_and_legacy_serialization_omits_it() {
+        let old: ForeachBetween =
+            serde_json::from_value(json!({"flowRef":"between","inputs":{}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap(),
+            json!({"flowRef":"between","inputs":{}})
+        );
+        for when in [Value::Null, json!("always"), json!(true)] {
+            assert!(serde_json::from_value::<ForeachBetween>(
+                json!({"flowRef":"between","when":when})
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn between_more_items_uses_durable_snapshot_and_resumes_each_boundary_once() {
+        for (count, boundary) in [(0usize, 0), (1, 0), (2, 0), (3, 0), (3, 1), (3, 2)] {
+            let root = more_items_plan();
+            let base = std::env::temp_dir().join(format!("between-more-{}", Uuid::new_v4()));
+            let run = RunDir::under(&base);
+            let mut exec = executor(root.clone(), run.clone());
+            exec.state.stack[0].vars = json!({"items":(0..count)
+                .map(|id| json!({"id":id,"children":[]}))
+                .collect::<Vec<_>>()});
+            if count > 0 {
+                advance_foreach(&mut exec, "each");
+                // The already-persisted snapshot, not this now-different source
+                // variable, controls every remaining body and between frame.
+                exec.state.stack[0].vars["items"] = json!([]);
+                let frame = exec.frame_plan("child").unwrap();
+                let end = root.subflows["child"].nodes["done"].clone();
+                exec.step_end("done", &end, &frame).unwrap();
+                if boundary > 0 {
+                    advance_foreach(&mut exec, "each");
+                    assert_eq!(
+                        exec.state.stack[0].foreach_cursors["each"].phase,
+                        ForeachPhase::InBetween
+                    );
+                    assert_eq!(
+                        exec.state.stack[1].vars["each"],
+                        json!({"cursor":1,"snapshot_len":count})
+                    );
+                }
+                if boundary > 1 {
+                    let frame = exec.frame_plan("between").unwrap();
+                    let end = root.subflows["between"].nodes["done"].clone();
+                    exec.step_end("done", &end, &frame).unwrap();
+                }
+                drop(exec);
+                exec = executor(root, run.clone());
+            }
+
+            assert_eq!(exec.resume().unwrap(), RunStatus::Succeeded);
+            let events = EventLog::read_all(&run.events_path()).unwrap();
+            let route = events
+                .iter()
+                .filter_map(|event| {
+                    if event["type"] == "transition" {
+                        match event["key"].as_str() {
+                            Some("body") => Some("body"),
+                            Some("between") => Some("between"),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let expected = (0..count)
+                .flat_map(|index| {
+                    ["body"]
+                        .into_iter()
+                        .chain((index + 1 < count).then_some("between"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(route, expected);
+            if count > 0 {
+                let results = exec.state.stack[0].vars["each"]["outputs"]["results"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(
+                    results
+                        .iter()
+                        .map(|result| result["id"].as_u64().unwrap())
+                        .collect::<Vec<_>>(),
+                    (0..count as u64).collect::<Vec<_>>()
+                );
+            }
+            drop(exec);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn between_more_items_refuses_truncated_snapshot_on_cold_resume() {
+        for after_between in [false, true] {
+            let root = more_items_plan();
+            let base = std::env::temp_dir().join(format!("between-truncation-{}", Uuid::new_v4()));
+            let run = RunDir::under(&base);
+            let mut exec = executor(root.clone(), run.clone());
+            exec.state.stack[0].vars =
+                json!({"items":[{"id":1,"children":[]},{"id":2,"children":[]}]});
+            advance_foreach(&mut exec, "each");
+            let path = run
+                .path()
+                .join(&exec.state.stack[0].foreach_cursors["each"].snapshot_ref);
+            let frame = exec.frame_plan("child").unwrap();
+            let end = root.subflows["child"].nodes["done"].clone();
+            exec.step_end("done", &end, &frame).unwrap();
+            if after_between {
+                advance_foreach(&mut exec, "each");
+                let frame = exec.frame_plan("between").unwrap();
+                let end = root.subflows["between"].nodes["done"].clone();
+                exec.step_end("done", &end, &frame).unwrap();
+            }
+            drop(exec);
+            // The first complete JSONL record still parses; trusting its length
+            // would turn this incomplete snapshot into a successful case.
+            let original = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, format!("{}\n", original.lines().next().unwrap())).unwrap();
+
+            let mut restored = executor(root, run.clone());
+            assert!(
+                matches!(restored.resume().unwrap(), RunStatus::Failed { reason }
+                if reason.contains("snapshot content address mismatch"))
+            );
+            let events = EventLog::read_all(&run.events_path()).unwrap();
+            assert_eq!(
+                events.iter().filter(|event| event["key"] == "body").count(),
+                1
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["key"] == "between")
+                    .count(),
+                usize::from(after_between)
+            );
+            assert!(!events
+                .iter()
+                .any(|event| event["type"] == "tool_call_intent"));
+            assert_eq!(events.last().unwrap()["outcome"], "failed");
+            drop(restored);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
     #[test]
     fn cold_restore_keeps_root_preparation_clock_after_child_returns() {
         let mut root = plan("root", "each", &foreach_nodes("each", "child", false));
@@ -5178,8 +5410,10 @@ nodes:
         exec.state.stack[0].vars = json!({"items": [{"id": 7, "children": []}]});
         advance_foreach(&mut exec, "each");
         exec.state.stack.pop();
+        let node = exec.plan.nodes["each"].clone();
+        let frame = exec.frame_plan("root").unwrap();
         assert!(exec
-            .foreach_body_done("each", &exec.plan.nodes["each"].clone())
+            .step_foreach("each", &node, &frame)
             .unwrap_err()
             .to_string()
             .contains("missing child return"));

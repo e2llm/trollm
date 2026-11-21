@@ -24,9 +24,9 @@ standard-library copyright and license bundle from the installed Rust toolchain,
 Android POM declarations and embedded notices, native source notices and the
 NDK notice files. This table is a shorter direct-dependency guide.
 
-The separate flow review server additionally uses the locked dependencies below.
-License identifiers were read from their Cargo manifests. The companion does not
-enable native inference. Tokio is also a direct dependency of `trollm-mcp` and
+The flow review and Linux desktop servers use the locked dependencies below.
+License identifiers were read from their Cargo manifests. The inspection companion
+does not enable native inference; the desktop application does. Tokio is also a direct dependency of `trollm-mcp` and
 is therefore part of the Android runtime dependency graph.
 
 | Project | Locked version | Use | License |
@@ -44,6 +44,19 @@ according to the installed locked packages. Its exact dependency tree is in
 `apps/flow-review/web/package-lock.json`. Vite, TypeScript, ESLint, Vitest and
 Playwright are development/build/test tools. Retain upstream notices when
 distributing browser assets or the container image.
+
+The desktop browser uses React and React DOM 19.3.1 with its own pinned tree in
+`apps/desktop/web/package-lock.json`. Its image includes browser notices and a
+separate Rust/native notice inventory generated from the actual compiled release.
+The desktop's direct cryptographic dependencies are ring 0.17.14 (its package
+includes ISC, MIT and OpenSSL notices) and zeroize 1.9.1 (Apache-2.0 OR MIT).
+The native build also compiles `find_cuda_helper` 0.2.0; the pinned upstream
+MIT and Apache-2.0 texts are recorded in `licenses/upstream/sources.json`.
+This build helper does not enable CUDA in the CPU image.
+
+The desktop image retains the Debian compiler runtime packages for GNU C++ and
+OpenMP, including their package records and copyright notices in
+`/usr/share/doc`. [Debian GCC source and package information](https://packages.debian.org/source/trixie/gcc-14).
 
 | Project | Locked version | Use | Upstream license / source |
 | --- | --- | --- | --- |

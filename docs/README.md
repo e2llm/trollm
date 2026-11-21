@@ -1,5 +1,8 @@
 # Learn trollm and choose a reading track
 
+To run an existing flow, start with the [Android installation guide](INSTALL-ANDROID.md)
+or the [Linux desktop quickstart](../apps/desktop/README.md#install-and-start).
+
 The teaching path builds a product picture before asking you to navigate runtime
 contracts. Start with [Learn trollm](LEARN-TROLLM.md): one existing flow explains
 what the models, tools and runtime each contribute. Then [Anatomy of a

@@ -2346,6 +2346,211 @@ pub(crate) mod controls {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
+    fn compiled_workload_drives_selected_body_and_navigation_in_order() {
+        use trollm_core::artifacts::{write_atomic, write_meta, ArtifactMeta};
+        use trollm_core::{Executor, RunDir, RunStatus, SlotMap};
+        use trollm_mcp::{policy::ToolClass, Provenance, ToolDescriptor, ToolGateway};
+        use trollm_models::MockModel;
+
+        struct SelectedFixture {
+            provider: InstalledCollectionPreparer,
+            sends: Arc<std::sync::Mutex<Vec<(u64, String)>>>,
+        }
+
+        impl ToolGateway for SelectedFixture {
+            fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
+                Ok(vec![])
+            }
+
+            fn tool_class(&self, server: &str, _: &str) -> ToolClass {
+                if server == "local" {
+                    ToolClass::Read
+                } else {
+                    ToolClass::Mutation
+                }
+            }
+
+            fn prepare_call(
+                &mut self,
+                call: &ToolCall,
+                context: &PreparationContext,
+            ) -> Result<Option<PreparedCall>> {
+                if call.server == "local" {
+                    return Ok(None);
+                }
+                ensure!(call.server == "e2llm" && call.tool == "act");
+                let request = self.provider.item_request(call, context)?;
+                let mut call = call.clone();
+                call.args["fixtureOrder"] = request["admittedOrder"].clone();
+                call.args["fixturePurpose"] = request["purpose"].clone();
+                let response_json = serde_json::to_string(&json!({"args":call.args}))?;
+                Ok(Some(PreparedCall {
+                    call,
+                    evidence: PreparationEvidence {
+                        provider: "offline-selected-fixture".into(),
+                        context_sha256: context.raw()?.sha256,
+                        response_sha256: raw_sha256(response_json.as_bytes()),
+                        response_json,
+                    },
+                }))
+            }
+
+            fn validate_call(&self, call: &ToolCall) -> Result<()> {
+                ensure!(matches!(
+                    (call.server.as_str(), call.tool.as_str()),
+                    ("local", "prepare_worklist") | ("e2llm", "act")
+                ));
+                Ok(())
+            }
+
+            fn call(&mut self, call: &ToolCall) -> Result<ToolResult> {
+                if call.server == "local" {
+                    let worklist = trollm_mcp::local::prepare_worklist(&call.args)?;
+                    let original = write_atomic(
+                        &self.provider.run_directory.join("artifacts"),
+                        "worklist.json",
+                        &serde_json::to_vec(&worklist)?,
+                    )?;
+                    write_meta(
+                        &original.path,
+                        &ArtifactMeta {
+                            complete: true,
+                            fetched_at: 0,
+                        },
+                    )?;
+                    return Ok(ToolResult {
+                        artifacts: vec![original.path],
+                        content_for_model: worklist,
+                        provenance: Provenance::Local,
+                    });
+                }
+                self.sends.lock().unwrap().push((
+                    call.args["fixtureOrder"]
+                        .as_u64()
+                        .context("expected selected order")?,
+                    call.args["fixturePurpose"]
+                        .as_str()
+                        .context("expected selected purpose")?
+                        .to_owned(),
+                ));
+                Ok(ToolResult {
+                    artifacts: vec![],
+                    content_for_model: json!({"ok":true}),
+                    provenance: Provenance::Live,
+                })
+            }
+        }
+
+        let context = b"controlled source context";
+        let endpoint = "https://api.e2llm.dev/mcp";
+        for prefix in [0, 1] {
+            let base = std::env::temp_dir().join(format!(
+                "compiled-selected-routing-{}",
+                RunDir::under(Path::new("unused")).run_id()
+            ));
+            std::fs::create_dir(&base).unwrap();
+            let run = RunDir::under(&base);
+            let members_dir = base.join("members");
+            let mut body = crate::collection::tests::body();
+            body["contextRef"]["sha256"] = json!(raw_sha256(context));
+            if prefix == 1 {
+                body["continuation"]["prefixLength"] = json!(1);
+                body["continuation"]["knownCommittedItemIds"] =
+                    json!([body["items"][0]["originalItemId"]]);
+                body["continuation"]["parentOrigin"] = json!("offline-declared");
+                body["continuation"]["parentCheckpointRef"] = body["applicationRef"].clone();
+            }
+            let selection = crate::collection::tests::decode(&body).unwrap();
+            let members = crate::collection_members::CollectionMembers::compile_matched_600(
+                &selection, context, endpoint,
+            )
+            .unwrap();
+            members.write_new(&members_dir).unwrap();
+            let inspected = crate::collection_members::CollectionMembers::inspect_matched_600(
+                &members_dir,
+                &selection,
+                context,
+                endpoint,
+            )
+            .unwrap();
+            let manifest =
+                serde_json::from_slice(&members.files[crate::bundle::MANIFEST_NAME]).unwrap();
+            let (plan, registry, _) =
+                crate::bundle::inspect_materialized_bundle(&members_dir, &manifest).unwrap();
+            let mut provider = fixture(
+                "https://localhost:1/guard".into(),
+                Arc::new(Environment {
+                    now: AtomicU64::new(0),
+                    revoked: AtomicBool::new(false),
+                }),
+                run.path().to_owned(),
+            );
+            provider.selection = selection;
+            provider.ready["navigationSupported"] = json!(true);
+            provider.server = "e2llm".into();
+            provider.bindings = inspected.bindings.clone();
+            let provider = provider.with_inspected_snapshot(&inspected).unwrap();
+            let mut expected = Vec::new();
+            for index in prefix..3 {
+                for purpose in ["candidate-select", "quantity-editor", "cart-add"] {
+                    expected.push((index, purpose.to_owned()));
+                }
+                if index < 2 {
+                    expected.push((index, "navigate-next".into()));
+                }
+            }
+
+            let prepare =
+                r#"<tool_call>{"server":"local","tool":"prepare_worklist","args":{}}</tool_call>"#;
+            let propose = r#"<tool_call>{"server":"e2llm","tool":"act","args":{}}</tool_call>"#;
+            let slot = MockModel::scripted(
+                std::iter::once(prepare).chain(std::iter::repeat_n(propose, expected.len())),
+            );
+            let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut executor = Executor::new(
+                plan,
+                registry,
+                inspected.selection_input_json,
+                SlotMap::new().with("coder", slot),
+                SelectedFixture {
+                    provider,
+                    sends: sends.clone(),
+                },
+                run.clone(),
+            )
+            .unwrap();
+            let status = executor.run_until_blocked().unwrap();
+            let events = trollm_core::EventLog::read_all(&run.events_path()).unwrap();
+            assert_eq!(
+                status,
+                RunStatus::Succeeded,
+                "prefix {prefix}, errors {:?}",
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "error")
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "model_call")
+                    .count(),
+                expected.len() + 1
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "tool_call_outcome_acknowledged")
+                    .count(),
+                expected.len()
+            );
+            assert_eq!(*sends.lock().unwrap(), expected);
+            drop(executor);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
     fn navigation_source_checks_completed_cursor_last_item_and_distinct_url_target() {
         // Exercise source-side validators only. The legacy constructor still
         // refuses navigation installation and ready flags are not authority.

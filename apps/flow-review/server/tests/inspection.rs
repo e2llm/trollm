@@ -353,7 +353,7 @@ fn unused_files_change_identity() {
 }
 #[test]
 fn real_foreach_subflows_pause_and_shared_prompts() {
-    let r = review(sources(&[
+    let mut files = sources(&[
         "flows/examples/ticket-triage.flow.yaml",
         "flows/examples/process-item.flow.yaml",
         "flows/examples/return-to-list.flow.yaml",
@@ -365,7 +365,12 @@ fn real_foreach_subflows_pause_and_shared_prompts() {
         "flows/tasks/prompts/progress-checkpoint.md",
         "flows/tasks/prompts/finalize-batch.md",
         "flows/tasks/prompts/finalize-empty-batch.md",
-    ]));
+    ]);
+    files[0].content = files[0].content.replace(
+        "flowRef: return-to-list",
+        "flowRef: return-to-list\n      when: moreItems",
+    );
+    let r = review(files);
     assert!(r.valid, "{:?}", r.diagnostics);
     assert_eq!(r.plans.len(), 3);
     assert_eq!(
@@ -374,6 +379,7 @@ fn real_foreach_subflows_pause_and_shared_prompts() {
     );
     let root = r.plans.iter().find(|p| p["id"] == "ticket-triage").unwrap();
     assert_eq!(root["nodes"]["each"]["body"]["flowRef"], "process-item");
+    assert_eq!(root["nodes"]["each"]["between"]["when"], "moreItems");
     assert_eq!(root["nodes"]["each"]["onLimit"]["status"], "paused");
     let mut files = minimal();
     let mut reg = trollm_core::TaskRegistry::from_yaml_str(&files[1].content, ".").unwrap();

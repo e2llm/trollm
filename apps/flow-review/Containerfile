@@ -22,6 +22,7 @@ COPY crates/ crates/
 COPY schemas/ schemas/
 COPY flows/starters/browser-summary/setup.json flows/starters/browser-summary/setup.json
 COPY apps/flow-review/server/ apps/flow-review/server/
+COPY apps/desktop/server/ apps/desktop/server/
 RUN if ! command -v python3 >/dev/null; then \
       export http_proxy="${http_proxy:-${HTTP_PROXY:-}}" https_proxy="${https_proxy:-${HTTPS_PROXY:-}}"; \
       apt-get update && apt-get install -y --no-install-recommends python3 \

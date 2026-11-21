@@ -1,13 +1,18 @@
 import json
 from pathlib import Path
+import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from make_flow_review_notices import (CRATES_IO, MANIFEST_NAME, SERVER, TARGET,
-                                     TEXT_NAME, collect, sha256, verify)
+from make_flow_review_notices import (CRATES_IO, CUDA_HELPER_LICENSES, DESKTOP_FORMAT, DESKTOP_SERVER,
+                                     LLAMA_NATIVE_LICENSE, LLAMA_PACKAGES,
+                                     LLAMA_WRAPPER_LICENSES, MANIFEST_NAME,
+                                     SERVER, TARGET, TEXT_NAME, collect, main,
+                                     sha256, verify)
 
 
-class FlowReviewNoticesTest(unittest.TestCase):
+class NoticeBuildFixture(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -63,11 +68,13 @@ class FlowReviewNoticesTest(unittest.TestCase):
                 'package_id': package_id, 'target': {'kind': kinds, 'name': name},
                 'features': features, 'executable': executable}
 
-    def generate(self):
-        collect(self.root, map(json.dumps, self.records), self.sysroot, self.output)
+    def generate(self, **options):
+        collect(self.root, map(json.dumps, self.records), self.sysroot, self.output, **options)
         return ((self.output / TEXT_NAME).read_bytes(),
                 json.loads((self.output / MANIFEST_NAME).read_text()))
 
+
+class FlowReviewNoticesTest(NoticeBuildFixture):
     def test_compiled_inputs_embedded_notices_and_package_identities(self):
         text, manifest = self.generate()
         packages = {package['name']: package for package in manifest['packages']}
@@ -120,6 +127,140 @@ class FlowReviewNoticesTest(unittest.TestCase):
         manifest['packages'].pop(1)
         with self.assertRaisesRegex(ValueError, 'differ from the package inventory'):
             verify(text, manifest)
+
+
+class DesktopNoticesTest(NoticeBuildFixture):
+    def setUp(self):
+        super().setUp()
+        workspace = self.write('checkout/apps/desktop/server/Cargo.toml', b'')
+        elf = self.linux_executable_fixture()
+        self.binary = self.write(f'checkout/target/{TARGET}/release/{DESKTOP_SERVER}', elf)
+        self.binary.chmod(0o755)
+        self.records[0] = self.artifact(workspace, f'path+file://{workspace.parent}#1.0.0',
+                                        DESKTOP_SERVER, ['bin'], ['default', 'llama'], str(self.binary))
+        self.records[0]['profile'] = {'opt_level': '3', 'debug_assertions': False, 'test': False}
+        self.build_finished = self.records.pop()
+        for workspace_name in ('trollm-uniffi', 'trollm-models'):
+            workspace = self.write(f'checkout/crates/{workspace_name}/Cargo.toml', b'')
+            self.records.append(self.artifact(workspace, f'path+file://{workspace.parent}#1.0.0',
+                                              workspace_name, ['lib'], ['llama']))
+        self.write(f'cargo cache/llama-cpp-sys-2/{LLAMA_NATIVE_LICENSE}', b'Named native license\n')
+        self.write('cargo cache/llama-cpp-sys-2/llama.cpp/vendor/distinct/LICENSE', b'Embedded notice\n')
+        with (self.root / 'Cargo.lock').open('a') as lock:
+            for name in sorted(LLAMA_PACKAGES | {'find_cuda_helper'}):
+                version = '0.2.0' if name == 'find_cuda_helper' else '0.1.159'
+                lock.write(f'[[package]]\nname = "{name}"\nversion = "{version}"\n'
+                           f'source = "{CRATES_IO}"\nchecksum = "{"b" * 64}"\n')
+                manifest = self.write(f'cargo cache/{name}/Cargo.toml',
+                                      f'[package]\nname = "{name}"\nversion = "{version}"\n'
+                                      'license = "MIT OR Apache-2.0"\n'.encode())
+                self.records.append(self.artifact(manifest, f'{CRATES_IO}#{name}@{version}',
+                                                  name, ['lib'], []))
+        self.records.append(self.build_finished)
+        sources = self.root / 'licenses/upstream/sources.json'
+        records = json.loads(sources.read_text())
+        for name in LLAMA_WRAPPER_LICENSES + CUDA_HELPER_LICENSES:
+            data = f'Pinned {name}\n'.encode()
+            self.write('checkout/licenses/upstream/' + name, data)
+            records.append({'file': name, 'source': 'https://example.org/fixture/' + name,
+                            'sha256': sha256(data)})
+        sources.write_text(json.dumps(records))
+
+    @staticmethod
+    def linux_executable_fixture():
+        code = b'\xb8\x3c\x00\x00\x00\x31\xff\x0f\x05'
+        address = 0x400000
+        size = 64 + 56 + len(code)
+        identity = b'\x7fELF\x02\x01\x01' + bytes(9)
+        header = struct.pack('<HHIQQQIHHHHHH', 2, 62, 1, address + 120, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        segment = struct.pack('<IIQQQQQQ', 1, 5, 0, address, address, size, size, 4096)
+        return identity + header + segment + code
+
+    def generate_desktop(self):
+        return self.generate(component='desktop')
+
+    def test_desktop_notices_include_exact_native_and_wrapper_licenses_and_binary_pin(self):
+        body, manifest = self.generate_desktop()
+        self.assertEqual(manifest['format'], DESKTOP_FORMAT)
+        self.assertEqual(manifest['platform'], 'linux/amd64')
+        self.assertEqual(manifest['backend'], 'llama')
+        self.assertEqual(manifest['binarySha256'], sha256(self.binary.read_bytes()))
+        self.assertIn(b'desktop host (linux/amd64, x86_64-unknown-linux-gnu)', body)
+        self.assertIn(b'Named native license\n', body)
+        self.assertIn(b'Embedded notice\n', body)
+        self.assertIn(b'Pinned llama-cpp-rs-LICENSE-MIT.txt\n', body)
+        self.assertIn(b'Pinned llama-cpp-rs-LICENSE-APACHE.txt\n', body)
+        self.assertIn(b'Pinned rust-cuda-LICENSE-MIT.txt\n', body)
+        self.assertIn(b'Pinned rust-cuda-LICENSE-APACHE.txt\n', body)
+        self.assertNotIn(str(self.base).encode(), body)
+        self.assertNotIn(str(self.base), json.dumps(manifest))
+        self.assertEqual(self.generate_desktop(), (body, manifest))
+        verify(body, manifest, component='desktop')
+        with self.assertRaisesRegex(ValueError, 'unexpected Rust notice identity'):
+            verify(body, manifest)
+
+    def test_requires_successful_real_release_artifact(self):
+        original = self.binary.read_bytes()
+        self.binary.unlink()
+        with self.assertRaisesRegex(ValueError, 'missing or not executable'):
+            self.generate_desktop()
+        self.binary.write_bytes(original)
+        self.binary.chmod(0o755)
+        with self.binary.open('r+b') as binary:
+            binary.seek(18)
+            binary.write(struct.pack('<H', 183))
+        with self.assertRaisesRegex(ValueError, 'not a Linux/amd64 ELF executable'):
+            self.generate_desktop()
+        self.binary.write_bytes(original)
+        self.records[0]['profile']['test'] = True
+        with self.assertRaisesRegex(ValueError, 'expected the desktop release binary artifact'):
+            self.generate_desktop()
+        self.records[0]['profile']['test'] = False
+        self.build_finished['success'] = False
+        with self.assertRaisesRegex(ValueError, 'expected successful desktop release build'):
+            self.generate_desktop()
+
+    def test_rejects_stubs_and_requires_compiled_llama_libraries(self):
+        workspace_records = [record for record in self.records if record.get('features') == ['llama']]
+        for record in [self.records[0], *workspace_records]:
+            features = record['features'][:]
+            record['features'].append('stub')
+            with self.assertRaisesRegex(ValueError, 'requires llama and excludes stub'):
+                self.generate_desktop()
+            record['features'] = features
+        self.records[0]['features'] = ['default']
+        with self.assertRaisesRegex(ValueError, 'requires llama and excludes stub'):
+            self.generate_desktop()
+        self.records[0]['features'] = ['default', 'llama']
+        sys_crate = next(record for record in self.records
+                         if record.get('target', {}).get('name') == 'llama-cpp-sys-2')
+        sys_crate['target']['kind'] = ['custom-build']
+        with self.assertRaisesRegex(ValueError, 'required compiled llama library artifacts absent'):
+            self.generate_desktop()
+
+    def test_rejects_missing_native_license_or_changed_wrapper_license(self):
+        (self.base / 'cargo cache/llama-cpp-sys-2' / LLAMA_NATIVE_LICENSE).unlink()
+        with self.assertRaisesRegex(ValueError, 'required compiled llama license text absent'):
+            self.generate_desktop()
+        self.write(f'cargo cache/llama-cpp-sys-2/{LLAMA_NATIVE_LICENSE}', b'Named native license\n')
+        self.write('checkout/licenses/upstream/llama-cpp-rs-LICENSE-MIT.txt', b'Tampered\n')
+        with self.assertRaisesRegex(ValueError, 'pinned supplemental notice changed'):
+            self.generate_desktop()
+
+    def test_verify_cli_checks_exact_release_binary(self):
+        messages = self.write('build-messages.jsonl', ('\n'.join(map(json.dumps, self.records)) + '\n').encode())
+        collect_args = ['notices', 'collect', '--component', 'desktop', '--build-messages', str(messages),
+                        '--sysroot', str(self.sysroot), str(self.output)]
+        verify_args = ['notices', 'verify', '--component', 'desktop', str(self.output)]
+        with patch('make_flow_review_notices.ROOT', self.root):
+            with patch('sys.argv', collect_args):
+                main()
+            with patch('sys.argv', verify_args):
+                main()
+                with self.binary.open('ab') as binary:
+                    binary.write(b'changed')
+                with self.assertRaisesRegex(ValueError, 'desktop release artifact differs'):
+                    main()
 
 
 if __name__ == '__main__':

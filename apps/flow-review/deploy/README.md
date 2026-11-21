@@ -1,47 +1,40 @@
 # Run the flow review companion
 
 The public image is **`ghcr.io/e2llm/trollm-flow-review`** for **Linux/amd64**.
-The pinned image was built from [public source commit `9f154ec5`](https://github.com/e2llm/trollm/commit/9f154ec5ef591aca180046fb6562e867ec77b41d).
-The [GitHub package page](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
-lists tags and digests and opens without a GitHub account. Full commit tags name
-public GitHub source revisions. The workflow can advance `latest` while the
-build's source commit is still current on `main`.
-
-## Pull the image with Docker
-
-```sh
-docker pull --platform linux/amd64 \
-  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
-```
+Use `:latest` for the current published viewer. Full commit tags identify the
+public GitHub source revisions used to build the images.
+[Image tags and digests on GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
 
 ## Start the viewer with Docker
 
-For local inspection, start the container and open the loopback address on
-the machine running Docker. Uploads work with the empty package directory in
-the image.
+Run these commands on the machine running Docker. If the Linux desktop
+runtime is using port 8080, stop it first. The viewer accepts uploaded
+packages from the browser.
 
 ```sh
+docker pull --platform linux/amd64 ghcr.io/e2llm/trollm-flow-review:latest &&
 docker run --detach --rm --name trollm-flow-review --platform linux/amd64 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --memory 1g --cpus 2 --tmpfs /tmp --publish 127.0.0.1:8080:8080 \
-  ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2
+  ghcr.io/e2llm/trollm-flow-review:latest
 ```
 
 Open `http://127.0.0.1:8080`. Choose **Open files / tar** to load an
 uncompressed flow bundle or **Open folder** to load its source directory.
 When finished, run `docker stop trollm-flow-review`. The container is removed
-when it stops.
+when it stops. To update the viewer, stop it and repeat the pull and run commands.
+Pulling an image does not restart an existing container.
 
 ## Start the viewer with Podman
 
-The Podman launcher mounts a package directory for browsing. It uses Podman's
-image store. From the repository root on Linux/amd64, use
-rootless **Podman 5.0 or newer** with cgroups v2, Python 3 and PyYAML. The
-repository's `scripts/requirements.txt` includes PyYAML. Use the repository's
-`flows/starters` directory or substitute your own flow package directory.
+The Podman launcher mounts a package directory for browsing. From the
+repository root on Linux/amd64, use rootless **Podman 5.0 or newer** with
+cgroups v2, Python 3 and PyYAML. Both the Podman client and runtime must meet
+the minimum release for memory-backed volumes. Use `flows/starters` or your
+own package directory. PyYAML is listed in `scripts/requirements.txt`.
 
 ```sh
-FLOW_REVIEW_IMAGE='ghcr.io/e2llm/trollm-flow-review@sha256:21c4efca412dd4b80aa4a2e839b9851c609f753db93c869209034465383abad2'
+FLOW_REVIEW_IMAGE='ghcr.io/e2llm/trollm-flow-review:latest'
 podman pull "$FLOW_REVIEW_IMAGE"
 python3 apps/flow-review/deploy/launch.py --packages "$PWD/flows/starters" \
   --image "$FLOW_REVIEW_IMAGE" --port 8080
@@ -49,7 +42,21 @@ python3 apps/flow-review/deploy/launch.py --packages "$PWD/flows/starters" \
 
 Open `http://127.0.0.1:8080` on the host running the viewer. Choose **Open files /
 tar** to load an uncompressed flow bundle, **Open folder** for a source directory,
-or select a flow from **Mounted packages**.
+or select a flow from **Mounted packages**. To use a different loopback port,
+change `--port` and open that port in the browser.
+
+To stop the viewer, run `podman pod rm -f trollm-flow-review`. To update it,
+pull the image again and rerun the launcher to replace the pod. Add `--print`
+to inspect the configuration without starting Podman. The example
+[pod.yaml](pod.yaml) can also be customized directly.
+
+## Pin a published image
+
+For a repeatable deployment, copy an image digest from
+[GitHub Packages](https://github.com/e2llm/trollm/pkgs/container/trollm-flow-review)
+and use `ghcr.io/e2llm/trollm-flow-review@sha256:<digest>` in both Docker
+commands or as `FLOW_REVIEW_IMAGE` for Podman. A published full commit tag
+can also identify a specific build. The example [pod.yaml](pod.yaml) uses a digest.
 
 ## Build locally with Podman
 
@@ -62,15 +69,25 @@ python3 apps/flow-review/deploy/launch.py --packages "$PWD/flows/starters" \
   --image localhost/trollm-flow-review:dev --port 8080
 ```
 
-Use a published full commit SHA tag or digest for repeatable deployments.
-`--print` renders the exact pod configuration for review;
-`pod.yaml` can also be copied and customized directly. `--bind` controls the
-host interface and defaults to loopback. `podman pod rm -f trollm-flow-review`
-stops and removes the pod. Restart with the launcher after changing the image.
-The server drains active HTTP requests after SIGTERM or Ctrl-C. The runtime image
-uses official distroless Debian 13 with GNU libraries, the Rust server and built
-browser assets; it contains no shell or external health-check utility. Both the
-image healthcheck and pod liveness probe execute the server with `--healthcheck`.
+## Hosting and data
+
+The container runs as UID/GID 10001 with a read-only root filesystem and
+read-only package mounts. Make the package directory readable by the mapped
+user. On SELinux hosts, arrange a container-readable label for that directory.
+The launcher leaves host file permissions and labels as it found them.
+
+The pod limits memory to 1 GiB and CPU to two cores. Podman needs delegated
+cgroup controllers to enforce those limits when running rootless. The 1 GiB
+memory limit includes the memory-backed `/tmp` volume used for uploads. The
+server removes staged uploads after inspection. Removing the pod discards
+temporary storage. Export review feedback before leaving or reloading the page.
+
+The launcher listens on loopback by default and waits for `/healthz`. View
+failures with `podman pod logs trollm-flow-review`. To serve a remote browser,
+configure a TLS and access-control reverse proxy. Anyone who can reach the
+viewer can inspect the packages it serves.
+
+## Dependency notices
 
 The image includes the Rust server's dependency texts at
 `/app/notices/THIRD_PARTY_NOTICES.txt` and a SHA-256 inventory at
@@ -80,92 +97,20 @@ procedural macros, exact upstream supplements, nested texts for bundled code,
 and the installed Rust toolchain's standard-library copyright and license
 bundle. The browser dependency notices are at `/app/web/third-party-notices.txt`.
 Use `podman cp` or `docker cp` to retrieve these files from a created container.
-The public image workflow verifies the extracted Rust notice text against its
-manifest and retains both exact files with the verified image archive.
 
-Podman 4.9 ignores `emptyDir.medium: Memory` and creates a disk-backed anonymous
-volume. [Podman 5.0 added the memory-medium branch](https://github.com/podman-container-tools/podman/blob/v5.0.0/pkg/specgen/generate/kube/volume.go#L266).
-The launcher and smoke query JSON version metadata before execution with a
-20-second deadline; both Client and Server must meet the released 5.0 minimum
-when both are reported. Unsupported, unavailable or unparseable versions fail
-clearly. Prerelease/development builds of 5.0.0 are below that floor.
-`--print` does not query Podman and stays
-usable offline. Version admission does not replace the actual kernel mount and
-resource-limit checks in the smoke.
+## Check a local image
 
-One container serves the browser and API. It runs as UID/GID 10001, drops all
-capabilities, disallows privilege escalation and has a read-only root filesystem.
-The Docker quick start uses the empty `/packages` directory in that image.
-The Podman launcher mounts host packages read-only; make source directories
-readable by the mapped container user. It does not chmod or relabel host sources. On SELinux
-hosts, arrange an appropriate container-readable label for this dedicated source
-directory before launching. Never map a home directory or credential store.
-
-`/tmp` is a memory-backed transient volume. The Kubernetes spec requests a
-512 MiB volume limit; Podman 5.8.2 ignores `emptyDir.sizeLimit`. On Podman, the
-enforced 1 GiB total container memory limit also bounds memory consumed by tmpfs.
-The server accepts at most two concurrent 64 MiB imports. Uploaded imports are staged
-under `/tmp/trollm-flow-review` and removed after inspection, including failures.
-Removing the pod discards the volume; crashes may leave staging data until pod
-removal. There is no shared review database. Comments/baselines remain in browser
-page state; export feedback before reloading or leaving the page. The pod limits
-memory to 1 GiB and CPU to two cores. Rootless resource enforcement requires
-cgroup delegation; verify `podman inspect` on the deployment host. Health and
-readiness use `/healthz`. Podman implements the liveness probe; the launcher
-waits for HTTP readiness because Podman does not implement Kubernetes
-`readinessProbe`. The numeric UID enforces non-root execution even where Podman
-does not implement `runAsNonRoot`. View failures with `podman pod logs trollm-flow-review`.
-
-Use trusted hosting. For network access, place the loopback service behind your
-TLS/access-control reverse proxy; the application has no login or tenant boundary.
-Package text is served to whoever can access this instance. No model weights,
-Android build environment, external renderer, or live MCP connection is needed.
-
-Run the actual container acceptance check on the local Linux Podman runtime host:
+From the repository root on the Linux host running Podman, run the container
+smoke check against the image you built.
 
 ```sh
 python3 apps/flow-review/deploy/smoke.py --image localhost/trollm-flow-review:dev
 ```
 
-It uses its own disposable pod and validates actual non-root execution, read-only
-mounts/root filesystem, memory enforcement, tmpfs, assets, catalog inspection,
-tar upload and staging cleanup. A successful HTTP-only check does not establish
-these container properties. The smoke reads the real container PID's Linux
-`/proc` status, UID mapping, mount table and cgroup v2 membership, then reads the
-actual cgroup memory/CPU limits. It copies the ordinary staged directory through
-Podman to verify cleanup; no shell/helper binary is injected into the image.
-
-The operator must be allowed to read these host process/cgroup files. Remote
-Podman clients and hosts without those permissions are unsupported for this
-acceptance check; it fails explicitly rather than accepting configuration-only
-assertions. The earlier smoke version passed with both rootful and rootless Podman
-5.8.2 on Linux with systemd and cgroup v2. The rootless run used existing
-subordinate UID/GID ranges, user-namespace helpers and delegated CPU/memory
-controllers; it needed no additional process-inspection privileges on that host.
-Other hosts must provide those prerequisites and allow the inspection described
-above. The smoke removes its own pod after success/failure.
-
-Mount checks resolve each container root path through `/proc/<pid>/root` with an
-`O_PATH` directory descriptor, then match its kernel `mnt_id` from
-`/proc/self/fdinfo` to `/proc/<pid>/mountinfo`. This identifies the visible mount
-when a runtime stacks mounts at the same path; a hidden writable tmpfs cannot
-make a visible disk-backed `/tmp` pass. The visible root and package mounts must
-still be read-only, and `/tmp` must still be writable tmpfs. Rootless operators
-must also be able to traverse those process root paths. Insufficient access
-fails the smoke; the earlier Podman 5.8.2 results predate this mount-ID check and
-do not establish its rootless acceptance on another host.
-
-The pinned Linux/amd64 image passed the kernel mount and cgroup checks with
-rootful Podman 5.7.0 on a GitHub-hosted Ubuntu 26.04.1 runner. The browser
-check against the actual image API ran with Docker, the confinement and
-resource flags above, and a mounted starter directory. The same archive
-passed the HIGH/CRITICAL vulnerability and secret scan and Rust notice
-verification. See the
-[GitHub Actions build job](https://github.com/e2llm/trollm/actions/runs/44284133755/job/134732279371).
-The [publication job](https://github.com/e2llm/trollm/actions/runs/44284133755/job/135408120868)
-verified an anonymous pull of the same digest.
-
-The launcher and smoke accept `PODMAN` as a command plus flags (parsed without a
-shell), for example `PODMAN="podman --root /tmp/review-storage --runroot
-/tmp/review-run --storage-driver vfs"`. Rootless deployment remains the default;
-acceptance applies to the host and execution mode actually tested.
+The check creates a disposable pod and verifies the effective non-root UID,
+visible read-only mounts, tmpfs, kernel resource limits, health, imports and
+staging cleanup. It needs access to the container's `/proc` state and cgroup
+files on the same host. Rootless checks also require subordinate UID/GID
+mappings and delegated CPU and memory controllers. The smoke removes its pod
+when it finishes. Set `PODMAN` to a Podman command with flags if the launcher
+or smoke needs a separate image store.

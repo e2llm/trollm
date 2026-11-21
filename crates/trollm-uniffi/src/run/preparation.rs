@@ -233,20 +233,22 @@ mod enabled {
                     )
                 }
             };
-            verify_weights_with_checkpoint(&path, &expected, &lazy.slot, &check)?;
-            Ok::<_, anyhow::Error>(path)
+            verify_weights_with_checkpoint(&path, &expected, &lazy.slot, &check)
         })();
         diagnostics.weight_verify_ms = Some(started.elapsed().as_millis() as u64);
-        let path = verification?;
-        check()?;
-        lazy.ctl.preparation_activity.lock().unwrap().insert(
-            lazy.slot.clone(),
-            RunActivityApi::LoadingModel {
-                slot: lazy.slot.clone(),
-            },
-        );
+        let weights = verification?;
+        weights.check_path_after(&lazy.slot, || {
+            check()?;
+            lazy.ctl.preparation_activity.lock().unwrap().insert(
+                lazy.slot.clone(),
+                RunActivityApi::LoadingModel {
+                    slot: lazy.slot.clone(),
+                },
+            );
+            Ok(())
+        })?;
         let started = Instant::now();
-        let loaded = (lazy.loader)(&path);
+        let loaded = (lazy.loader)(&weights.path);
         diagnostics.load_ms = Some(started.elapsed().as_millis() as u64);
         // Loading cannot be interrupted, but its result must not escape expired
         // or cancelled preparation. Drop joins this call before run inactivity.

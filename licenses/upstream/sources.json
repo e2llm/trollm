@@ -33,5 +33,15 @@
     "file": "jsonschema-LICENSE.txt",
     "source": "https://docs.rs/crate/jsonschema/0.58.6/source/LICENSE",
     "sha256": "117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038"
+  },
+  {
+    "file": "rust-cuda-LICENSE-APACHE.txt",
+    "source": "https://github.com/Rust-GPU/rust-cuda/blob/aaa3f92fbad80afc6c6021fb2b58b6d13c00fc43/LICENSE-APACHE",
+    "sha256": "c1753dcc4e00c4caa891682eec700640e1a0e50bf96802daad12cf30eea942fe"
+  },
+  {
+    "file": "rust-cuda-LICENSE-MIT.txt",
+    "source": "https://github.com/Rust-GPU/rust-cuda/blob/aaa3f92fbad80afc6c6021fb2b58b6d13c00fc43/LICENSE-MIT",
+    "sha256": "b47387386076db46382e2e37ca7d4fbbc85b77a5464a1666314a4a6eda6dd8a5"
   }
 ]

@@ -150,6 +150,11 @@ fn argument_name(name: &str) -> bool {
 }
 
 impl SetupInput {
+    /// Validate host-supplied input using the same rules as a configured run.
+    pub fn validate_input(&self, raw: &str) -> Result<()> {
+        self.resolve(raw).map(|_| ())
+    }
+
     fn validate(&self, servers: &BTreeMap<String, String>) -> Result<()> {
         let Some(fields) = &self.fields else {
             if !self.tool_arguments.is_empty() {

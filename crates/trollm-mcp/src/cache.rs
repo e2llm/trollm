@@ -438,8 +438,6 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<u64> {
 }
 
 /// Publish complete private bytes without replacing an existing destination.
-/// A same-directory hard link provides atomic, no-replace publication; ordinary
-/// rename would silently replace another retained result.
 pub(crate) fn write_file_new_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("result artifact has no parent")?;
@@ -453,19 +451,68 @@ pub(crate) fn write_file_new_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(&tmp)?;
-    let result = (|| -> Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::hard_link(&tmp, path)?;
-        Ok(())
-    })();
+    let staged = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    let cleanup = fs::remove_file(&tmp);
-    result?;
-    cleanup?;
+    let result = staged
+        .map_err(|error| ("stage selected result", error))
+        .and_then(|()| {
+            publish_new_file(&tmp, path)
+                .map_err(|error| ("publish selected result without replacement", error))
+        });
+    if let Err((stage, error)) = result {
+        let _ = fs::remove_file(&tmp);
+        let message = format!("{stage}: {error}");
+        return Err(anyhow::Error::from(error).context(message));
+    }
     #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn publish_new_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    // Android's untrusted_app policy denies hard links inside app storage.
+    // A no-replace rename keeps the complete staged bytes and exclusive
+    // destination guarantee without changing that policy.
+    rename_no_replace(tmp, path)
+}
+
+#[cfg(not(target_os = "android"))]
+fn publish_new_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    fs::hard_link(tmp, path)?;
+    fs::remove_file(tmp)
+}
+
+#[cfg(any(
+    target_os = "android",
+    all(
+        test,
+        target_os = "linux",
+        any(target_env = "gnu", target_env = "musl")
+    )
+))]
+fn rename_no_replace(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = CString::new(tmp.as_os_str().as_bytes())?;
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // The C strings live through this call. The kernel moves the directory
+    // entry only if the destination does not exist, including under contention.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            tmp.as_ptr(),
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::RENAME_NOREPLACE as libc::c_uint,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +535,48 @@ mod publication_tests {
         assert!(write_file_new_atomic(&path, b"replacement").is_err());
         assert_eq!(fs::read(&path).unwrap(), b"original complete result");
         assert!(!path.with_extension("tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    #[test]
+    fn selected_rename_preserves_an_occupied_name_and_never_follows_an_alias() {
+        use std::os::unix::fs::symlink;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("selected-rename-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let tmp = dir.join("new.tmp");
+        let path = dir.join("result.json");
+        fs::write(&tmp, b"original selected result").unwrap();
+        rename_no_replace(&tmp, &path).unwrap();
+        assert!(!tmp.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"original selected result");
+
+        fs::write(&tmp, b"replacement").unwrap();
+        assert_eq!(
+            rename_no_replace(&tmp, &path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"original selected result");
+        assert_eq!(fs::read(&tmp).unwrap(), b"replacement");
+
+        let alias = dir.join("alias.json");
+        symlink(&path, &alias).unwrap();
+        assert_eq!(
+            rename_no_replace(&tmp, &alias).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+        );
+        assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+        assert_eq!(fs::read(&path).unwrap(), b"original selected result");
+        assert_eq!(fs::read(&tmp).unwrap(), b"replacement");
         fs::remove_dir_all(dir).unwrap();
     }
 

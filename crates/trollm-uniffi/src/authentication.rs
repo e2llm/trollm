@@ -38,7 +38,7 @@ pub(crate) struct RunAuthentication {
     servers: BTreeMap<String, PinnedConnection>,
 }
 
-fn endpoint(value: &str) -> Result<String> {
+pub(crate) fn endpoint(value: &str) -> Result<String> {
     // Url validates the network destination, but its serialization rewrites dot
     // segments, IP spellings and Unicode. Those are distinct credential pins in
     // Android's URI-based identity; do not feed rewritten values to callbacks.

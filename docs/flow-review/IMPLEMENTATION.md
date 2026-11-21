@@ -29,9 +29,9 @@ Authoring stays with an external LLM. The viewer does not run flows, call models
 or tools, edit executable sources, or install packages on a phone. Proposed
 changes are comments for the authoring LLM to implement and validate.
 
-## Validation performed
+## Validation
 
-| Check | Scope established |
+| Check | Scope |
 | --- | --- |
 | Rust unit/integration tests and Clippy | Canonical validation, invalid/incomplete inputs, bounded imports, safe paths, presentation references, health probes and shutdown. |
 | Browser type/lint/build and unit tests | Graph/inspector data, feedback anchors, comparisons, defaults and dependency notices. |
@@ -39,18 +39,13 @@ changes are comments for the authoring LLM to implement and validate.
 | Browser against the real HTTP server | Mounted Check a total inspection, phases/prompts/graph, downloaded feedback, changed-prompt comparison and starter tar import. |
 | Generated large source package | Inspection of a package exceeding 300 KB with 402 nodes. |
 | Actual rootful and rootless Podman smoke | Imports, assets, health, effective non-root UID, real read-only mounts, tmpfs, kernel resource limits, cleanup and graceful shutdown. |
-| Dependency, secret and runtime-image scans | The tested runtime image had no selected HIGH/CRITICAL findings; Rust and browser dependency checks are separate. |
+| Dependency, secret and runtime-image scans | Findings for the dependency set and image tested. |
 
-The Podman checks used Linux, systemd/cgroup v2 and Podman 5.8.2. The rootless
-host already had subordinate UID/GID mappings and delegated resource controllers.
-See the [deployment guide](../../apps/flow-review/deploy/README.md) for required
-host permissions and the portable smoke command. Host/container checks do not
-establish behavior on every Podman host or browser.
+Run the Podman smoke on the target host to verify its actual mounts and limits.
+[Host requirements and smoke command](../../apps/flow-review/deploy/README.md#check-a-local-image)
 
-No phone, native inference or live MCP execution is required for this companion
-or was used for its acceptance. The browser's fixture tests and real-server
-checks establish different scopes. Validation of package structure and hashes
-does not establish the accuracy of model prose or business descriptions.
+Package validation checks structure and hashes. Review model prose and business
+descriptions against the executable flow.
 
 ## Continuing development
 

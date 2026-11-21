@@ -1,0 +1,36 @@
+[package]
+name = "trollm-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["llama"]
+llama = ["trollm-uniffi/llama"]
+stub = ["trollm-uniffi/stub"]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "=0.22.1"
+libc = "=0.2.190"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+ring = "0.17"
+rustix = { version = "1", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tower-http = { version = "0.6", features = ["fs", "timeout", "set-header", "limit"] }
+trollm-core = { path = "../../../crates/trollm-core" }
+trollm-uniffi = { path = "../../../crates/trollm-uniffi", default-features = false }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tar = "0.4"
+tower = { version = "0.5", features = ["util"] }

@@ -6,13 +6,14 @@ members = [
     "crates/trollm-mcp",
     "crates/trollm-uniffi",
     "apps/flow-review/server",
+    "apps/desktop/server",
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.metadata.android]
 # Increase for every newly distributed APK; independent of the product version.
-version-code = 72
+version-code = 73

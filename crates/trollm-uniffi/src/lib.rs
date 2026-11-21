@@ -39,6 +39,11 @@ use trollm_core::ExecutionPlan;
 pub use authentication::ConnectionAuth;
 pub use history::RunSummaryInfo;
 
+/// Canonical credential identity for an MCP endpoint, shared by host adapters.
+pub fn canonical_mcp_endpoint(value: &str) -> anyhow::Result<String> {
+    authentication::endpoint(value)
+}
+
 uniffi::setup_scaffolding!();
 
 /// Shared handle to the app-supplied token provider. UniFFI 0.28 callback
@@ -696,18 +701,8 @@ impl TrollmRuntime {
     ) -> Result<String, TrollmError> {
         let configuration = serde_json::from_str(&configuration_json)
             .map_err(|e| TrollmError::Run(format!("invalid run configuration: {e}")))?;
-        let spawned = run::spawn_run(
-            self.base.clone(),
-            flow_sha256,
-            user_input,
-            self.token_provider.lock().unwrap().clone(),
-            None,
-            Some(configuration),
-        )
-        .map_err(TrollmError::run)?;
-        let run_id = spawned.run_id.clone();
-        self.runs.insert(run_id.clone(), spawned.handle);
-        Ok(run_id)
+        let provider = self.token_provider.lock().unwrap().clone();
+        self.start_configured(flow_sha256, user_input, configuration, provider)
     }
 
     /// §9: current status. Falls back to the persisted snapshot for runs not
@@ -878,25 +873,8 @@ impl TrollmRuntime {
     /// and for cold resume after process death (rebuilds the executor over
     /// the persisted snapshot — core's crash-recovery path, §4.4).
     pub fn resume(&self, run_id: String) -> Result<(), TrollmError> {
-        history::validate_run_id(&run_id)?;
-        self.resume_or_reconstruct(run_id.clone(), || {
-            // Cold resume: reconstruct from the persisted state.
-            let flow_sha = run::plan_sha_of_run(&self.base, &run_id).map_err(TrollmError::run)?;
-            let user_input = std::fs::read_to_string(
-                self.base.join("runs").join(&run_id).join("user_input.txt"),
-            )
-            .unwrap_or_default();
-            let spawned = run::spawn_run(
-                self.base.clone(),
-                flow_sha,
-                user_input,
-                self.token_provider.lock().unwrap().clone(),
-                Some(run_id),
-                None,
-            )
-            .map_err(TrollmError::run)?;
-            Ok(spawned.handle)
-        })
+        let provider = self.token_provider.lock().unwrap().clone();
+        self.resume_using(run_id, provider)
     }
 
     /// §9: cancel. Cooperative boundaries, including retry backoff, record a
@@ -950,6 +928,110 @@ impl TrollmRuntime {
 }
 
 impl TrollmRuntime {
+    /// Check native worker ownership without opening the run's saved evidence.
+    /// Terminal status can be published while native teardown is still active.
+    pub fn run_worker_active(&self, run_id: &str) -> bool {
+        self.runs
+            .get(run_id)
+            .is_some_and(|handle| handle.control.worker_active())
+    }
+
+    /// Whether the runtime has a live pause or unfinished saved progress that
+    /// can be explicitly resumed. Reconstruction still validates all evidence.
+    pub fn run_resume_available(&self, run_id: &str) -> Result<bool, TrollmError> {
+        history::validate_run_id(run_id)?;
+        let _resume = self.resume_lock.lock().unwrap();
+        if let Some(handle) = self.runs.get(run_id) {
+            let phase = handle.status.lock().unwrap();
+            if handle.control.worker_active() {
+                return Ok(matches!(*phase, RunPhase::Paused { .. }));
+            }
+            if handle.control.has_volatile_failure() {
+                return Ok(false);
+            }
+        }
+        let dir = trollm_core::RunDir::new(self.base.join("runs").join(run_id));
+        if !dir.snapshot_path().is_file() {
+            return Ok(false);
+        }
+        run::terminal_snapshot(&self.base, run_id)
+            .map(|terminal| !terminal)
+            .map_err(TrollmError::run)
+    }
+
+    /// Rust embedding entry for a configured run with host-pinned credential
+    /// selection. The provider is owned by this run.
+    pub fn start_run_configured_with_provider(
+        &self,
+        flow_sha256: String,
+        user_input: String,
+        configuration: configuration::RunConfiguration,
+        provider: Box<dyn TokenProvider>,
+    ) -> Result<String, TrollmError> {
+        self.start_configured(
+            flow_sha256,
+            user_input,
+            configuration,
+            Some(Arc::new(provider)),
+        )
+    }
+
+    /// Rust embedding entry for explicit recovery. An existing worker retains
+    /// its original provider. A reconstructed worker uses the supplied one.
+    pub fn resume_with_provider(
+        &self,
+        run_id: String,
+        provider: Box<dyn TokenProvider>,
+    ) -> Result<(), TrollmError> {
+        self.resume_using(run_id, Some(Arc::new(provider)))
+    }
+
+    fn start_configured(
+        &self,
+        flow_sha256: String,
+        user_input: String,
+        configuration: configuration::RunConfiguration,
+        provider: Option<SharedTokenProvider>,
+    ) -> Result<String, TrollmError> {
+        let spawned = run::spawn_run(
+            self.base.clone(),
+            flow_sha256,
+            user_input,
+            provider,
+            None,
+            Some(configuration),
+        )
+        .map_err(TrollmError::run)?;
+        let run_id = spawned.run_id.clone();
+        self.runs.insert(run_id.clone(), spawned.handle);
+        Ok(run_id)
+    }
+
+    fn resume_using(
+        &self,
+        run_id: String,
+        provider: Option<SharedTokenProvider>,
+    ) -> Result<(), TrollmError> {
+        history::validate_run_id(&run_id)?;
+        self.resume_or_reconstruct(run_id.clone(), || {
+            let flow_sha = run::plan_sha_of_run(&self.base, &run_id).map_err(TrollmError::run)?;
+            let user_input = std::fs::read_to_string(
+                self.base.join("runs").join(&run_id).join("user_input.txt"),
+            )
+            .unwrap_or_default();
+            let spawned = run::spawn_run(
+                self.base.clone(),
+                flow_sha,
+                user_input,
+                provider,
+                Some(run_id),
+                None,
+            )
+            .map_err(TrollmError::run)?;
+            Ok(spawned.handle)
+        })
+    }
+
     /// Keep the registry check, reconstruction and insertion atomic with respect
     /// to other explicit resume requests on this runtime. The injected factory
     /// allows host tests to count reconstruction without starting model workers.
