@@ -164,8 +164,9 @@ alias. Other hostnames are rejected rather than resolved through DNS.
 
 The Containerfile runs `audit:prebuild`, builds the browser assets and then runs
 `audit:final` in the same build stage. Keep the original receipt and generated
-inventory together; the [security exception record](../../docs/SECURITY-EXCEPTIONS.md)
-defines the bounded development-dependency allowance and expiry.
+inventory together. Both gates require zero findings in the full and production
+npm audits. The image check verifies the original receipt, bundled modules and
+asset hashes. [Viewer audit policy](web/scripts/audit-policy.json)
 
 The container uses `trollm-flow-review --healthcheck` to probe its own endpoint.
 This command succeeds only for HTTP 200 with `status: ok`, has a three-second

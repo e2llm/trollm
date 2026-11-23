@@ -47,7 +47,6 @@ covers the issue and pull request process.
 | [#4 Add a deterministic packer for existing v1 flow bundles](https://github.com/e2llm/trollm/issues/4) | Package arbitrary current-format flow sources using the existing manifest and reader. The starter and replay packers already serve their specific inputs. |
 | [#5 Add a small non-browser selection replay walkthrough](https://github.com/e2llm/trollm/issues/5) | The replay helper and tests are available. Add synthetic fixtures and a walkthrough for supported, unsupported and ambiguous selections using that helper. Good first issue. |
 | [#6 Collect third-party license and NOTICE material for APK delivery](https://github.com/e2llm/trollm/issues/6) | The issue predates the generated notices and manifest in the 1.1.0 APK. Review what remains against that build and the [notice collector documentation](../THIRD_PARTY_NOTICES.md#notices-accompanying-an-apk) with the maintainer before duplicating the inventory. |
-| [#7 Track temporary development-only picomatch exception — expires 2026-11-24 00:00 UTC](https://github.com/e2llm/trollm/issues/7) | Track remediation of the viewer's development dependency. The [approved exception](SECURITY-EXCEPTIONS.md) expires on **2026-11-24 at 00:00 UTC**. |
 
 ## What remains to validate
 

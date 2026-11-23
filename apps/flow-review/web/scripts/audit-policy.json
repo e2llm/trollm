@@ -1,0 +1,5 @@
+{
+  "schema": "trollm.web-audit-policy.v1",
+  "mode": "zero-findings",
+  "lockfileSha256": "7070eafefedc72065b039f169455c950cdfe695c783aa4c5154a960ac1de40e7"
+}

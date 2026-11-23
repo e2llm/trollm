@@ -9,7 +9,7 @@ COPY apps/flow-review/web/package*.json ./
 RUN npm ci --no-audit --no-fund --fetch-retries=2 --fetch-timeout=60000
 COPY apps/flow-review/web/ ./
 # Keep the receipt and built inventory in this same workdir. A cached prebuild
-# audit alone cannot establish the bounded exception for newly built assets.
+# audit alone cannot qualify newly built assets.
 RUN npm run audit:prebuild && npm run build && npm run audit:final
 
 FROM ${RUST_IMAGE} AS server

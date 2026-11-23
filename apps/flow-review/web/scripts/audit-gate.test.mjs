@@ -34,15 +34,15 @@ import {
 } from "./audit-evidence.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const now = Date.parse("2026-11-17T22:00:00Z");
-const context = readContext(root, now);
+const now = Date.parse("2026-12-01T12:00:00Z");
+const context = readContext(root);
 const clone = (value) => structuredClone(value);
 const leaf = {
   source: 1247710,
   name: "picomatch",
   dependency: "picomatch",
   title: "Known advisory",
-  url: context.policy.advisoryUrl,
+  url: "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
   severity: "high",
   range: "<=4.0.7",
 };
@@ -89,14 +89,18 @@ function full() {
     picomatch: vulnerability(
       "picomatch",
       [clone(leaf)],
-      [...context.policy.paths],
+      [
+        "node_modules/tinyglobby/node_modules/picomatch",
+        "node_modules/vite/node_modules/picomatch",
+        "node_modules/vitest/node_modules/picomatch",
+      ],
     ),
     vite: vulnerability("vite", ["picomatch"], ["node_modules/vite"]),
   });
 }
 function receipt() {
   return {
-    schema: "trollm.web-audit-prebuild.v1",
+    schema: "trollm.web-audit-prebuild.v2",
     nonce: "a".repeat(32),
     checkedAt: new Date(now - 1000).toISOString(),
     lockSha256: context.lockSha256,
@@ -105,7 +109,7 @@ function receipt() {
 }
 function inventory() {
   return {
-    schema: "trollm.web-bundle-inventory.v1",
+    schema: "trollm.web-bundle-inventory.v2",
     generatedAt: new Date(now).toISOString(),
     lockSha256: context.lockSha256,
     policySha256: context.policySha256,
@@ -134,7 +138,7 @@ function temp(fn) {
     for (const file of [
       "package.json",
       "package-lock.json",
-      "scripts/audit-exceptions.json",
+      "scripts/audit-policy.json",
     ])
       copyFileSync(join(root, file), join(directory, file));
     fn(directory);
@@ -143,149 +147,73 @@ function temp(fn) {
   }
 }
 
-test("only the approved high advisory and its complete dev via chains are waived", () => {
-  assert.deepEqual(evaluateAudits(full(), audit(), context), [
-    "picomatch",
-    "vite",
-  ]);
-  assert.deepEqual(evaluateAudits(audit(), audit(), context), []);
-  checkAuditExit(full(), 1);
-  checkAuditExit(audit(), 0);
-  assert.throws(() => checkAuditExit(full(), 0), /expected status/);
+test("full and production audits require zero findings at every severity", () => {
+  assert.doesNotThrow(() => evaluateAudits(audit(), audit()));
+  for (const severity of ["info", "low", "moderate", "high", "critical"]) {
+    const advisory = {
+      ...leaf,
+      name: "fixture",
+      dependency: "fixture",
+      url: "https://github.com/advisories/GHSA-test-test-test",
+      severity,
+    };
+    const affected = audit({
+      fixture: vulnerability("fixture", [advisory], ["node_modules/fixture"], severity),
+    });
+    assert.throws(() => evaluateAudits(affected, audit()), /Full audit must have zero findings/);
+    assert.throws(() => evaluateAudits(audit(), affected), /Production audit must have zero findings/);
+    assert.doesNotThrow(() => checkAuditExit(affected, 1));
+    assert.throws(() => checkAuditExit(affected, 0), /expected status/);
+  }
+});
+
+test("the withdrawn Picomatch advisory blocks if the registry reports it again", () => {
+  const affected = full();
+  assert.throws(() => evaluateAudits(affected, audit()), /Full audit must have zero findings/);
+  assert.throws(() => evaluateAudits(audit(), affected), /Production audit must have zero findings/);
+  assert.throws(() => checkAuditExit(affected, 0), /expected status/);
+});
+
+test("clean reports still require their expected exit status and metadata", () => {
+  assert.doesNotThrow(() => checkAuditExit(audit(), 0));
   assert.throws(() => checkAuditExit(audit(), 1), /expected status/);
   assert.throws(() => checkAuditExit(audit(), null), /expected status/);
+  const badCount = audit();
+  badCount.metadata.vulnerabilities.low = 1;
+  assert.throws(() => validateAudit(badCount), /counts disagree/);
+  const badTotal = audit();
+  badTotal.metadata.vulnerabilities.total = 1;
+  assert.throws(() => validateAudit(badTotal), /total disagrees/);
+  assert.throws(() => validateAudit({ error: "registry unavailable" }), /Unexpected evidence/);
 });
-test("critical severity, other advisory identities and mixed leaves fail", () => {
-  for (const mutate of [
-    (value) => {
-      value.vulnerabilities.picomatch.via[0].url =
-        "https://github.com/advisories/GHSA-other";
-    },
-    (value) => {
-      value.vulnerabilities.picomatch.via[0].severity = "critical";
-    },
-    (value) => {
-      value.vulnerabilities.vite.severity = "critical";
-      value.metadata.vulnerabilities.high--;
-      value.metadata.vulnerabilities.critical++;
-    },
-    (value) => {
-      value.vulnerabilities.vite.via.push({
-        ...leaf,
-        severity: "low",
-        url: "https://github.com/advisories/GHSA-other",
-      });
-    },
-  ]) {
-    const value = full();
-    mutate(value);
-    assert.throws(
-      () => evaluateAudits(value, audit(), context),
-      /Critical|Unapproved/,
-    );
-  }
-});
-test("production findings and a production or unknown dependency in a waived chain fail", () => {
-  assert.throws(
-    () => evaluateAudits(full(), full(), context),
-    /Production audit/,
-  );
-  const low = audit({
-    react: vulnerability(
-      "react",
-      [{ ...leaf, severity: "low" }],
-      ["node_modules/react"],
-      "low",
-    ),
-  });
-  assert.throws(() => evaluateAudits(full(), low, context), /Production audit/);
-  for (const path of [context.policy.paths[0], "node_modules/vite"]) {
-    const changed = clone(context);
-    changed.lock.packages[path].dev = false;
-    assert.throws(() => evaluateAudits(full(), audit(), changed), /production/);
-  }
-  const changed = full();
-  changed.vulnerabilities.vite.nodes = ["node_modules/unknown"];
-  assert.throws(() => evaluateAudits(changed, audit(), context), /unknown/);
-});
-test("changed picomatch version and any path change fail", () => {
-  const changed = clone(context);
-  changed.lock.packages[context.policy.paths[0]].version = "4.0.8";
-  assert.throws(
-    () => evaluateAudits(full(), audit(), changed),
-    /version changed/,
-  );
-  const value = full();
-  value.vulnerabilities.picomatch.nodes.pop();
-  assert.throws(() => evaluateAudits(value, audit(), context), /paths changed/);
-});
-test("cyclic, missing, empty and malformed via chains fail closed", () => {
-  const cases = [
-    (value) => {
-      value.vulnerabilities.picomatch.via = ["vite"];
-    },
-    (value) => {
-      value.vulnerabilities.vite.via = ["missing"];
-    },
-    (value) => {
-      value.vulnerabilities.vite.via = [];
-    },
-    (value) => {
-      value.vulnerabilities.vite.via = [42];
-    },
-    (value) => {
-      value.metadata.vulnerabilities.high = 0;
-    },
-    (value) => {
-      value.auditReportVersion = 3;
-    },
-    (value) => {
-      value.error = "unexpected";
-    },
-  ];
-  for (const mutate of cases) {
-    const value = full();
-    mutate(value);
-    assert.throws(() => validateAudit(value));
-  }
-});
-test("policy expires at the exact boundary and lock drift is never silently approved", () =>
+
+test("the strict policy pins the audited lockfile and admits no exception fields", () =>
   temp((directory) => {
-    const expiry = Date.parse(context.policy.expiresAt);
-    assert.doesNotThrow(() => readContext(directory, expiry - 1));
-    assert.throws(() => readContext(directory, expiry), /expired/);
-    assert.throws(() => readContext(directory, expiry + 1), /expired/);
-    writeFileSync(
-      join(directory, "package-lock.json"),
-      readFileSync(join(directory, "package-lock.json"), "utf8") + "\n",
-    );
-    assert.throws(() => readContext(directory, now), /Lockfile differs/);
+    const file = join(directory, "scripts/audit-policy.json");
+    const loaded = readContext(directory);
+    assert.equal(loaded.policy.mode, "zero-findings");
+    for (const changed of [
+      {...context.policy, mode: "allow-high"},
+      {...context.policy, schema: "trollm.web-audit-exception.v1"},
+      {...context.policy, expiresAt: "2099-01-01T00:00:00Z"},
+    ]) {
+      writeFileSync(file, JSON.stringify(changed));
+      assert.throws(() => readContext(directory));
+    }
+    copyFileSync(join(root, "scripts/audit-policy.json"), file);
+    const lock = join(directory, "package-lock.json");
+    writeFileSync(lock, readFileSync(lock, "utf8") + "\n");
+    assert.throws(() => readContext(directory), /Lockfile differs/);
   }));
-test("policy version, severity, path and unknown fields cannot broaden the exception", () => {
-  for (const mutate of [
-    (policy) => {
-      policy.version = "4.0.8";
-    },
-    (policy) => {
-      policy.severity = "critical";
-    },
-    (policy) => {
-      policy.paths.push("node_modules/picomatch");
-    },
-    (policy) => {
-      policy.allowAll = true;
-    },
-  ])
-    temp((directory) => {
-      const policy = clone(context.policy);
-      mutate(policy);
-      writeFileSync(
-        join(directory, "scripts/audit-exceptions.json"),
-        JSON.stringify(policy),
-      );
-      assert.throws(() => readContext(directory, now));
-    });
+
+test("exception-era receipts and inventories cannot be qualified", () => {
+  const valid = inventory();
+  const oldReceipt = {...receipt(), schema: "trollm.web-audit-prebuild.v1"};
+  const oldInventory = {...valid, schema: "trollm.web-bundle-inventory.v1"};
+  assert.throws(() => validateInventory(valid, context, oldReceipt, valid.files, now));
+  assert.throws(() => validateInventory(oldInventory, context, receipt(), valid.files, now));
 });
+
 test("fresh inventory is tied to current nonce, lock, policy and exact output bytes", () => {
   const valid = inventory();
   assert.doesNotThrow(() =>

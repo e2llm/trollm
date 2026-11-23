@@ -141,94 +141,25 @@ export function validateAudit(report) {
       Object.keys(report.vulnerabilities).length,
     "Audit total disagrees",
   );
-  const leaves = new Map(),
-    active = new Set();
-  function visit(name) {
-    requireValue(
-      Object.hasOwn(report.vulnerabilities, name),
-      "Missing audit via-chain entry",
-    );
-    requireValue(!active.has(name), "Cyclic audit via chain");
-    if (leaves.has(name)) return leaves.get(name);
-    active.add(name);
-    const result = [
-      ...new Set(
-        report.vulnerabilities[name].via.flatMap((via) =>
-          typeof via === "string" ? visit(via) : [via],
-        ),
-      ),
-    ];
-    active.delete(name);
-    requireValue(result.length > 0, "Empty audit advisory chain");
-    leaves.set(name, result);
-    return result;
-  }
-  for (const name of Object.keys(report.vulnerabilities)) visit(name);
-  return leaves;
 }
 
-export function evaluateAudits(full, production, context) {
-  const leaves = validateAudit(full);
+export function evaluateAudits(full, production) {
+  validateAudit(full);
   validateAudit(production);
   requireValue(
-    Object.keys(production.vulnerabilities).length === 0,
+    full.metadata.vulnerabilities.total === 0,
+    "Full audit must have zero findings",
+  );
+  requireValue(
+    production.metadata.vulnerabilities.total === 0,
     "Production audit must have zero findings",
   );
-  const waived = [];
-  for (const [name, vuln] of Object.entries(full.vulnerabilities)) {
-    const advisoryLeaves = leaves.get(name);
-    requireValue(
-      vuln.severity !== "critical" &&
-        advisoryLeaves.every((leaf) => leaf.severity !== "critical"),
-      "Critical advisory is never excepted",
-    );
-    if (
-      vuln.severity !== "high" &&
-      !advisoryLeaves.some((leaf) => leaf.severity === "high")
-    )
-      continue;
-    requireValue(
-      vuln.severity === "high" &&
-        advisoryLeaves.every(
-          (leaf) =>
-            leaf.name === context.policy.package &&
-            leaf.dependency === context.policy.package &&
-            leaf.url === context.policy.advisoryUrl &&
-            leaf.severity === "high",
-        ),
-      `Unapproved high advisory or mixed advisory chain: ${name}`,
-    );
-    for (const node of vuln.nodes) {
-      requireValue(
-        context.lock.packages[node]?.dev === true &&
-          node.endsWith(`node_modules/${name}`),
-        "Excepted via chain reaches a production or unknown package path",
-      );
-    }
-    waived.push(name);
-  }
-  if (waived.length) {
-    const root = full.vulnerabilities[context.policy.package];
-    requireValue(
-      root &&
-        JSON.stringify([...root.nodes].sort()) ===
-          JSON.stringify([...context.policy.paths].sort()),
-      "Excepted package paths changed",
-    );
-    for (const node of root.nodes)
-      requireValue(
-        context.lock.packages[node]?.version === context.policy.version,
-        "Excepted package version changed",
-      );
-  }
-  return waived;
 }
 
 export function checkAuditExit(report, status) {
   validateAudit(report);
-  const counts = report.metadata.vulnerabilities;
   requireValue(
-    status === (counts.high + counts.critical > 0 ? 1 : 0),
+    status === (report.metadata.vulnerabilities.total > 0 ? 1 : 0),
     "npm audit did not complete with its expected status",
   );
 }
@@ -262,7 +193,7 @@ export function validatePublishedInventory(
 function audit(root, production) {
   const args = [
     "audit",
-    "--audit-level=high",
+    "--audit-level=info",
     "--json",
     "--registry=https://registry.npmjs.org",
     "--fetch-retries=1",
@@ -271,6 +202,7 @@ function audit(root, production) {
     join(root, "node_modules/.cache/trollm-audit/npm"),
   ];
   if (production) args.push("--omit=dev");
+  else args.push("--include=dev");
   const npm = process.env.npm_execpath;
   const result = spawnSync(
     npm ? process.execPath : "npm",
@@ -333,13 +265,18 @@ export function runGate(root, phase, imageDirectory) {
   const full = audit(root, false),
     production = audit(root, true);
   const current = readContext(root);
-  const waived = evaluateAudits(full, production, current);
+  requireValue(
+    context.lockSha256 === current.lockSha256 &&
+      context.policySha256 === current.policySha256,
+    "Audit inputs changed during the gate",
+  );
+  evaluateAudits(full, production);
   if (phase === "prebuild") {
     writeFileSync(
       join(root, RECEIPT),
       JSON.stringify(
         {
-          schema: "trollm.web-audit-prebuild.v1",
+          schema: "trollm.web-audit-prebuild.v2",
           nonce: randomBytes(16).toString("hex"),
           checkedAt: new Date().toISOString(),
           lockSha256: current.lockSha256,
@@ -352,17 +289,7 @@ export function runGate(root, phase, imageDirectory) {
   } else {
     validateFinalEvidence(root, current);
   }
-  if (waived.length) {
-    console.log(
-      `WAIVED ${current.policy.advisory}: ${current.policy.package}@${current.policy.version}, exactly 3 development-only paths, expires ${current.policy.expiresAt}.`,
-    );
-    console.log(
-      `Full npm audit remains exit 1 (${waived.length} affected package entries); production audit has zero findings. This is not an audit-clean result.`,
-    );
-  } else
-    console.log(
-      "Full npm audit passed without a waiver; production audit has zero findings.",
-    );
+  console.log("Full and production npm audits both have zero findings.");
   console.log(
     phase === "prebuild"
       ? "Prebuild admission is provisional; audit:final and fresh bundle evidence remain mandatory."

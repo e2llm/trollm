@@ -47,65 +47,26 @@ export function readJson(path) {
   requireValue(lstatSync(path).isFile(), "Evidence must be a regular file");
   return JSON.parse(readFileSync(path, "utf8"));
 }
-export function readContext(root, now = Date.now()) {
-  const policyBytes = readFileSync(join(root, "scripts/audit-exceptions.json"));
+export function readContext(root) {
+  const policyBytes = readFileSync(join(root, "scripts/audit-policy.json"));
   const policy = JSON.parse(policyBytes);
-  keys(policy, [
-    "schema",
-    "advisory",
-    "advisoryUrl",
-    "package",
-    "version",
-    "severity",
-    "expiresAt",
-    "lockfileSha256",
-    "paths",
-  ]);
+  keys(policy, ["schema", "mode", "lockfileSha256"]);
   requireValue(
-    policy.schema === "trollm.web-audit-exception.v1" &&
-      policy.advisory === "GHSA-fc5q-39xc-vjpf" &&
-      policy.advisoryUrl ===
-        `https://github.com/advisories/${policy.advisory}` &&
-      policy.package === "picomatch" &&
-      policy.version === "4.0.7" &&
-      policy.severity === "high",
-    "Unapproved audit exception identity",
-  );
-  requireValue(
-    policy.expiresAt === "2026-11-24T00:00:00Z" &&
-      now < Date.parse(policy.expiresAt),
-    "Audit exception expired",
-  );
-  const paths = [
-    "node_modules/tinyglobby/node_modules/picomatch",
-    "node_modules/vite/node_modules/picomatch",
-    "node_modules/vitest/node_modules/picomatch",
-  ];
-  requireValue(
-    Array.isArray(policy.paths) &&
-      JSON.stringify(policy.paths) === JSON.stringify(paths),
-    "Unapproved audit exception paths",
+    policy.schema === "trollm.web-audit-policy.v1" &&
+      policy.mode === "zero-findings",
+    "Unexpected audit policy",
   );
   const lockBytes = readFileSync(join(root, "package-lock.json"));
   const lockSha256 = sha256(lockBytes);
   requireValue(
-    policy.lockfileSha256 ===
-      "7070eafefedc72065b039f169455c950cdfe695c783aa4c5154a960ac1de40e7" &&
-      lockSha256 === policy.lockfileSha256,
-    "Lockfile differs from the approved audit exception",
+    lockSha256 === policy.lockfileSha256,
+    "Lockfile differs from the approved audit policy",
   );
   const lock = JSON.parse(lockBytes);
   requireValue(
     lock.lockfileVersion === 3 && object(lock.packages),
     "Unexpected lockfile format",
   );
-  for (const path of paths) {
-    requireValue(
-      lock.packages[path]?.version === policy.version &&
-        lock.packages[path]?.dev === true,
-      "Excepted package must retain its exact version and development-only path",
-    );
-  }
   const pkg = readJson(join(root, "package.json"));
   for (const field of [
     "dependencies",
@@ -124,7 +85,7 @@ export function validateReceipt(receipt, context, now = Date.now()) {
   keys(receipt, ["schema", "nonce", "checkedAt", "lockSha256", "policySha256"]);
   const checked = Date.parse(receipt.checkedAt);
   requireValue(
-    receipt.schema === "trollm.web-audit-prebuild.v1" &&
+    receipt.schema === "trollm.web-audit-prebuild.v2" &&
       typeof receipt.nonce === "string" &&
       /^[a-f0-9]{32}$/.test(receipt.nonce) &&
       typeof receipt.checkedAt === "string" &&
@@ -188,7 +149,7 @@ export function validateInventory(
   const checked = validateReceipt(receipt, context, now);
   const generated = Date.parse(inventory.generatedAt);
   requireValue(
-    inventory.schema === "trollm.web-bundle-inventory.v1" &&
+    inventory.schema === "trollm.web-bundle-inventory.v2" &&
       typeof inventory.generatedAt === "string" &&
       Number.isFinite(generated) &&
       generated >= checked &&

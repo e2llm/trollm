@@ -106,7 +106,7 @@ export function bundleInventoryPlugin() {
 }
 
 export function finalizeInventory(root, now = Date.now()) {
-  const context = readContext(root, now),
+  const context = readContext(root),
     directory = join(root, "dist");
   const raw = readJson(join(directory, MODULES));
   keys(raw, [
@@ -141,7 +141,7 @@ export function finalizeInventory(root, now = Date.now()) {
   if (raw.prebuildNonce !== null)
     copyFileSync(join(root, RECEIPT), join(directory, PUBLIC_RECEIPT));
   const files = outputFiles(directory);
-  const inventory = { ...raw, schema: "trollm.web-bundle-inventory.v1", files };
+  const inventory = { ...raw, schema: "trollm.web-bundle-inventory.v2", files };
   if (raw.prebuildNonce !== null) {
     validateInventory(
       inventory,
